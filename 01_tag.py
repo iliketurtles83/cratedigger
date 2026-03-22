@@ -3,11 +3,12 @@
 
 Reads audio files, fingerprints via AcoustID, fetches metadata / genres
 from MusicBrainz, determines folder-derived genre, detects BPM, and
-writes all tags.  Existing artist / title tags are never overwritten
-unless ``--overwrite`` is passed.
+writes all tags.  Existing tags are never overwritten unless ``--overwrite``
+is passed.  Genre is always merged (folder + existing + MB), never replaced.
 
 Usage:
-    python 01_tag.py [--dry-run] [--folder NAME] [--overwrite] [--log FILE]
+    python 01_tag.py [--dry-run] [--folder NAME] [--overwrite] [--no-bpm] [--no-mb] [--log FILE]
+    python 01_tag.py --no-dry-run --folder jazz
 """
 
 import argparse
@@ -16,7 +17,7 @@ import logging
 from pathlib import Path
 
 import config
-from lib.genres import merge_genres, normalise_genre, parent_genre
+from lib.genres import merge_genres, normalise_genre
 from lib.logger import setup_logger
 from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata
 from lib.parsers import parse_filename, parse_folder_name
@@ -27,21 +28,27 @@ log: logging.Logger = None  # type: ignore[assignment]
 # ---------------------------------------------------------------------------
 # BPM detection (optional — librosa may not be installed)
 # ---------------------------------------------------------------------------
-try:
-    import librosa  # type: ignore[import-untyped]
-    _HAS_LIBROSA = True
-except ImportError:
-    _HAS_LIBROSA = False
 
+_librosa = None  # module-level sentinel
 
 def detect_bpm(path: Path) -> int | None:
     """Return estimated BPM (rounded int) or None."""
-    if not _HAS_LIBROSA:
-        log.debug("librosa not installed — skipping BPM detection for %s", path.name)
+    global _librosa
+
+    if _librosa is None:
+        try:
+            import librosa as lib
+            _librosa = lib
+        except ImportError:
+            _librosa = False
+            log.debug("librosa not installed — BPM detection unavailable")
+
+    if _librosa is False:
         return None
+
     try:
-        y, sr = librosa.load(str(path), sr=None, duration=60)
-        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        y, sr = _librosa.load(str(path), sr=None, duration=60)
+        tempo, _ = _librosa.beat.beat_track(y=y, sr=sr)
         bpm = round(float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo))
         return bpm if bpm > 0 else None
     except Exception as exc:
@@ -71,20 +78,14 @@ def resolve_folder_genre(audio_path: Path) -> str | None:
 
     top = parts[0].lower()
 
-    # Skip folders → never process
     if top in config.SKIP_FOLDERS:
         return None
-
-    # Genre folders
     if top in config.GENRE_FOLDERS:
         return config.FOLDER_TO_GENRE.get(top)
-
-    # 0random / 0random_good → genre from subfolder
     if top in {"0random", "0random_good"} and len(parts) >= 3:
         subfolder = parts[1].lower()
         return config.FOLDER_TO_GENRE.get(subfolder)
 
-    # Other special folders → no folder genre
     return None
 
 
@@ -97,99 +98,125 @@ def tag_file(
     *,
     dry_run: bool = True,
     overwrite: bool = False,
+    no_bpm: bool = False,
+    no_mb: bool = False,
     review_items: list[dict],
 ) -> None:
     """Tag a single audio file."""
     log.info("Processing %s", path)
 
     existing = read_tags(path)
+    if existing is None:
+        log.warning("Skipping unreadable file: %s", path)
+        review_items.append({"path": str(path), "reason": "unreadable"})
+        return
     new_tags: dict[str, str | None] = {}
 
     # --- Fingerprint + MusicBrainz ------------------------------------------
-    fp = fingerprint_lookup(
-        path,
-        min_score=config.ACOUSTID_MIN_SCORE,
-        rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
+    # Only call API if we genuinely need data that folder/filename can't provide
+    needs_mb = (
+        not existing.get("artist") or
+        not existing.get("title") or
+        not resolve_folder_genre(path)  # no folder-derived genre available
     )
 
-    recording_id = fp.get("recording_id")
-    mb_title = fp.get("title")
-    mb_artist = fp.get("artist")
-
+    recording_id = None
+    mb_title = None
+    mb_artist = None
     mb_meta: dict[str, str | None] = {"album": None, "year": None, "track": None}
     mb_genre_list: list[str] = []
 
-    if recording_id:
-        mb_meta = mb_recording_metadata(
-            recording_id,
+    if needs_mb and not no_mb:
+        fp = fingerprint_lookup(
+            path,
+            min_score=config.ACOUSTID_MIN_SCORE,
             rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
         )
-        mb_genre_list = mb_genres(
-            recording_id,
-            min_votes=config.MB_MIN_TAG_VOTES,
-            max_genres=config.MB_MAX_GENRES,
-            rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
-        )
+        recording_id = fp.get("recording_id")
+        mb_title = fp.get("title")
+        mb_artist = fp.get("artist")
 
-    # --- Fill missing fields from MB (never overwrite unless --overwrite) ----
+        if recording_id:
+            mb_meta = mb_recording_metadata(
+                recording_id,
+                rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
+            )
+            mb_genre_list = mb_genres(
+                recording_id,
+                min_votes=config.MB_MIN_TAG_VOTES,
+                max_genres=config.MB_MAX_GENRES,
+                rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
+            )
+
+    # --- Fill missing fields from MB ----------------------------------------
+    # Rule: only write if the field is genuinely empty in existing tags.
+    # Never fall back to existing value here — that would cause no-op writes.
     if overwrite or not existing.get("title"):
-        new_tags["title"] = mb_title or existing.get("title")
+        if mb_title:
+            new_tags["title"] = mb_title
     if overwrite or not existing.get("artist"):
-        new_tags["artist"] = mb_artist or existing.get("artist")
+        if mb_artist:
+            new_tags["artist"] = mb_artist
     if overwrite or not existing.get("album"):
-        new_tags["album"] = mb_meta.get("album") or existing.get("album")
+        if mb_meta.get("album"):
+            new_tags["album"] = mb_meta["album"]
     if overwrite or not existing.get("year"):
-        new_tags["year"] = mb_meta.get("year") or existing.get("year")
+        if mb_meta.get("year"):
+            new_tags["year"] = mb_meta["year"]
     if overwrite or not existing.get("track"):
-        new_tags["track"] = mb_meta.get("track") or existing.get("track")
+        if mb_meta.get("track"):
+            new_tags["track"] = mb_meta["track"]
 
     # --- Fallback: parse filename for artist / title if still missing --------
-    if not new_tags.get("title") or not new_tags.get("artist"):
-        parsed = parse_filename(path)
-        if not new_tags.get("title"):
-            new_tags["title"] = parsed.get("title")
-        if not new_tags.get("artist"):
-            new_tags["artist"] = parsed.get("artist")
-        if not new_tags.get("track") and parsed.get("track"):
-            new_tags["track"] = parsed.get("track")
+    # Only fills fields empty in BOTH existing tags and new_tags so far.
+    parsed = parse_filename(path)
+    if not existing.get("title") and not new_tags.get("title"):
+        if parsed.get("title"):
+            new_tags["title"] = parsed["title"]
+    if not existing.get("artist") and not new_tags.get("artist"):
+        if parsed.get("artist"):
+            new_tags["artist"] = parsed["artist"]
+    if not existing.get("track") and not new_tags.get("track"):
+        if parsed.get("track"):
+            new_tags["track"] = parsed["track"]
 
-    # --- Fallback: parse parent folder for album / year ----------------------
+    # --- Fallback: parse parent folder for album / year if still missing -----
+    # Only fills fields empty in BOTH existing tags and new_tags so far.
     folder_info = parse_folder_name(path.parent.name)
-    if not new_tags.get("album"):
-        new_tags["album"] = folder_info.get("album") or existing.get("album")
-    if not new_tags.get("year"):
-        new_tags["year"] = folder_info.get("year") or existing.get("year")
+    if not existing.get("album") and not new_tags.get("album"):
+        if folder_info.get("album"):
+            new_tags["album"] = folder_info["album"]
+    if not existing.get("year") and not new_tags.get("year"):
+        if folder_info.get("year"):
+            new_tags["year"] = folder_info["year"]
 
     # --- Genre ---------------------------------------------------------------
+    # Always merge: folder genre + existing genre + MB genres (collect_set).
+    # Existing genre is included so it is never lost, only enriched.
     folder_genre = resolve_folder_genre(path)
+    existing_genres = [
+        g.strip()
+        for g in (existing.get("genre") or "").split("/")
+        if g.strip()
+    ]
     normalised_mb = [normalise_genre(g) for g in mb_genre_list]
-    genre_str = merge_genres(folder_genre, normalised_mb)
+    genre_str = merge_genres(folder_genre, existing_genres + normalised_mb)
 
     if genre_str:
-        new_tags["genre"] = genre_str
-    elif existing.get("genre"):
-        pass  # keep existing genre
+        # Only write if the merged result differs from what is already stored
+        if genre_str != existing.get("genre"):
+            new_tags["genre"] = genre_str
     else:
         log.warning("No genre resolved for %s — flagging for review", path.name)
-        review_items.append({
-            "path": str(path),
-            "reason": "no_genre",
-        })
+        review_items.append({"path": str(path), "reason": "no_genre"})
 
-    # --- Grouping for mood folders -------------------------------------------
+    # --- BPM -----------------------------------------------------------------
     try:
         rel = path.relative_to(config.MUSIC_ROOT)
         top = rel.parts[0].lower() if rel.parts else ""
     except ValueError:
         top = ""
-
-    if top == "0meditation" and not existing.get("grouping"):
-        new_tags["grouping"] = "meditation"
-    elif top == "0shacks" and not existing.get("grouping"):
-        new_tags["grouping"] = "shacks"
-
-    # --- BPM -----------------------------------------------------------------
-    if not existing.get("bpm"):
+    if not no_bpm and not existing.get("bpm") and top not in config.NO_BPM_FOLDERS:
         bpm = detect_bpm(path)
         if bpm is not None:
             new_tags["bpm"] = str(bpm)
@@ -234,11 +261,15 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", default=True,
                         help="Show changes without writing (default: True)")
     parser.add_argument("--no-dry-run", action="store_true",
-                        help="Actually write changes")
+                        help="Actually write tag changes to files")
     parser.add_argument("--folder", type=str, default=None,
                         help="Process a single top-level folder only")
     parser.add_argument("--overwrite", action="store_true",
-                        help="Overwrite existing artist/title tags from MB")
+                        help="Overwrite existing artist/title/album/year tags")
+    parser.add_argument("--no-bpm", action="store_true",
+                        help="Skip BPM detection (fast metadata-only pass)")
+    parser.add_argument("--no-mb", action="store_true",
+                        help="Skip MusicBrainz/AcoustID lookup entirely")
     parser.add_argument("--log", type=str, default="review.log",
                         help="Log file path (default: review.log)")
     args = parser.parse_args()
@@ -262,6 +293,8 @@ def main() -> None:
             folder,
             dry_run=dry_run,
             overwrite=args.overwrite,
+            no_bpm=args.no_bpm,
+            no_mb=args.no_mb,
         )
         all_review.extend(items)
 

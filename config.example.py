@@ -4,24 +4,37 @@ from pathlib import Path
 
 MUSIC_ROOT = Path("/path/to/your/music")
 
-GENRE_FOLDERS = {
-    "genre1", "genre2", "genre3",
-    # add your genre folder names here
-}
-
+# Special folders — tag only, never move or rename files
 SPECIAL_FOLDERS = {
-    "0inbox", "0favourites",
-    # add your special folder names here
+    "0faves", "0faves_alltime", "0random", "0random_good",
+    "0new", "0shacks", "0compilations", "0various", "0mixes",
 }
 
-SKIP_FOLDERS = {"0skip"}
+SKIP_FOLDERS = {"0videos"}
 
+# Folders where BPM detection makes no sense (speech, ambient, mixes)
+NO_BPM_FOLDERS = {"spoken", "0mixes"}
+
+# Single source of truth: folder name → display genre.
+# GENRE_FOLDERS is derived from this — never edit GENRE_FOLDERS directly.
 FOLDER_TO_GENRE = {
     "genre1": "Genre One",
     "genre2": "Genre Two",
     # subfolder genres for random/inbox folders
     "subgenre1": "Subgenre One",
 }
+
+# Derived automatically from FOLDER_TO_GENRE — never edit directly
+GENRE_FOLDERS = set(FOLDER_TO_GENRE.keys())
+
+# Subgenre bucket folders inside genre folders — folder name : display genre
+SUBGENRE_BUCKETS = {
+    "0subgenre-one": "Subgenre One",
+}
+
+# Artists with this many or more albums get their own artist subfolder.
+# Below this they live flat in the genre root.
+ARTIST_FOLDER_THRESHOLD = 3
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
 

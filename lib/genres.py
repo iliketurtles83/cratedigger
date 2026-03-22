@@ -30,6 +30,20 @@ GENRE_NORMALISE: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
+# Blacklist — MB tags that are meaningless as genres, silently discarded.
+# Add to this list as you encounter more junk tags from MusicBrainz.
+# ---------------------------------------------------------------------------
+GENRE_BLACKLIST: set[str] = {
+    "other",
+    "unknown",
+    "miscellaneous",
+    "seen live",
+    "favorites",
+    "favourite",
+    "good",
+}
+
+# ---------------------------------------------------------------------------
 # Genre tree — CHILD_TO_PARENT built by parsing genre-tree.txt
 # ---------------------------------------------------------------------------
 CHILD_TO_PARENT: dict[str, str] = {}
@@ -84,7 +98,7 @@ def merge_genres(folder_genre: str | None, mb_genres: list[str]) -> str:
     """Build the final slash-separated genre string.
 
     1. *folder_genre* (if any) always comes first.
-    2. MusicBrainz genres appended in order.
+    2. MusicBrainz genres appended in order, blacklisted terms discarded.
     3. Deduplicated case-insensitively.
     4. Joined with `` / ``.
     """
@@ -93,6 +107,8 @@ def merge_genres(folder_genre: str | None, mb_genres: list[str]) -> str:
 
     def _add(g: str) -> None:
         normed = normalise_genre(g)
+        if normed.lower() in GENRE_BLACKLIST:
+            return
         key = normed.lower()
         if key not in seen:
             seen.add(key)

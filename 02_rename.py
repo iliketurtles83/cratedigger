@@ -31,6 +31,10 @@ def rename_file(
 ) -> None:
     """Rename a single audio file to canonical format using its tags."""
     tags = read_tags(path)
+    if tags is None:
+        log.warning("Skipping unreadable file: %s", path)
+        review_items.append({"path": str(path), "reason": "unreadable"})
+        return
     parsed = parse_filename(path)
 
     # Use tags as source of truth; fall back to filename parse

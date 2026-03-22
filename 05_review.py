@@ -51,6 +51,9 @@ def handle_no_genre(item: dict, *, dry_run: bool) -> bool:
         return True
 
     tags = read_tags(path)
+    if tags is None:
+        print(f"  [Cannot read tags from file]")
+        tags = {}
     print(f"\n--- No genre: {path} ---")
     print(f"  Current tags: artist={tags.get('artist')}, title={tags.get('title')}")
     print(f"  Current genre: {tags.get('genre')}")

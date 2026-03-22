@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from mutagen import File as MutagenFile
-from mutagen.id3 import ID3, TBPM, TCON, TDRC, TIT1, TIT2, TALB, TPE1, TRCK
+from mutagen.id3 import ID3, TBPM, TCON, TDRC, TIT2, TALB, TPE1, TRCK
 from mutagen.flac import FLAC
 from mutagen.oggvorbis import OggVorbis
 from mutagen.mp4 import MP4
@@ -20,7 +20,6 @@ _ID3_MAP = {
     "genre":    "TCON",
     "bpm":      "TBPM",
     "track":    "TRCK",
-    "grouping": "TIT1",
 }
 
 _VORBIS_MAP = {
@@ -31,7 +30,6 @@ _VORBIS_MAP = {
     "genre":    "genre",
     "bpm":      "bpm",
     "track":    "tracknumber",
-    "grouping": "grouping",
 }
 
 _M4A_MAP = {
@@ -41,7 +39,6 @@ _M4A_MAP = {
     "year":     "\xa9day",
     "genre":    "\xa9gen",
     "track":    "trkn",
-    "grouping": "\xa9grp",
     # BPM not supported in M4A
 }
 
@@ -59,18 +56,25 @@ def _first(val) -> str | None:
     return str(val).strip() or None
 
 
-def read_tags(path: Path) -> dict[str, str | None]:
+def read_tags(path: Path) -> dict[str, str | None] | None:
     """Read standard tag fields from *path*, returning a dict.
 
-    Keys: title, artist, album, year, genre, bpm, track, grouping.
+    Returns ``None`` and logs a warning if the file cannot be read.
+    Keys when successful: title, artist, album, year, genre, bpm, track.
     Values are ``None`` when absent.
     """
     result: dict[str, str | None] = {
         k: None for k in ("title", "artist", "album", "year",
-                          "genre", "bpm", "track", "grouping")
+                          "genre", "bpm", "track")
     }
 
-    audio = MutagenFile(path, easy=False)
+    try:
+        audio = MutagenFile(path, easy=False)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Cannot read tags from %s: %s", path, exc)
+        return None
     if audio is None:
         return result
 
@@ -129,7 +133,7 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
         frame_classes = {
             "title": TIT2, "artist": TPE1, "album": TALB,
             "year": TDRC, "genre": TCON, "bpm": TBPM,
-            "track": TRCK, "grouping": TIT1,
+            "track": TRCK,
         }
         for field, val in tags.items():
             if val is None or field not in frame_classes:
