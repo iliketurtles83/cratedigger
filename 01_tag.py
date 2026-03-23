@@ -7,7 +7,8 @@ writes all tags.  Existing tags are never overwritten unless ``--overwrite``
 is passed.  Genre is always merged (folder + existing + MB), never replaced.
 
 Usage:
-    python 01_tag.py [--dry-run] [--folder NAME] [--overwrite] [--no-bpm] [--no-mb] [--log FILE]
+    python 01_tag.py [--dry-run] [--folder NAME] [--overwrite] [--fix-suspicious]
+                     [--no-bpm] [--no-mb] [--log FILE]
     python 01_tag.py --no-dry-run --folder jazz
 """
 
@@ -17,7 +18,8 @@ import logging
 from pathlib import Path
 
 import config
-from lib.genres import merge_genres, normalise_genre
+from lib.context import get_folder_context
+from lib.genres import has_meaningful_genres, merge_genres, normalise_genre
 from lib.logger import setup_logger
 from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata
 from lib.parsers import parse_filename, parse_folder_name
@@ -57,47 +59,19 @@ def detect_bpm(path: Path) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# Folder → genre resolution
-# ---------------------------------------------------------------------------
-
-def resolve_folder_genre(audio_path: Path) -> str | None:
-    """Determine the folder-derived genre for *audio_path*.
-
-    * Genre folders → folder name via FOLDER_TO_GENRE.
-    * ``0random`` / ``0random_good`` → subfolder name via FOLDER_TO_GENRE.
-    * Special folders with no inherent genre → None.
-    """
-    try:
-        rel = audio_path.relative_to(config.MUSIC_ROOT)
-    except ValueError:
-        return None
-
-    parts = rel.parts
-    if not parts:
-        return None
-
-    top = parts[0].lower()
-
-    if top in config.SKIP_FOLDERS:
-        return None
-    if top in config.GENRE_FOLDERS:
-        return config.FOLDER_TO_GENRE.get(top)
-    if top in {"0random", "0random_good"} and len(parts) >= 3:
-        subfolder = parts[1].lower()
-        return config.FOLDER_TO_GENRE.get(subfolder)
-
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Process a single file
 # ---------------------------------------------------------------------------
+
+def is_suspicious(value: str | None) -> bool:
+    return (value or "").strip().lower() in config.SUSPICIOUS_TAG_VALUES
+
 
 def tag_file(
     path: Path,
     *,
     dry_run: bool = True,
     overwrite: bool = False,
+    fix_suspicious: bool = False,
     no_bpm: bool = False,
     no_mb: bool = False,
     review_items: list[dict],
@@ -111,22 +85,50 @@ def tag_file(
         review_items.append({"path": str(path), "reason": "unreadable"})
         return
     new_tags: dict[str, str | None] = {}
+    ctx = get_folder_context(path)
+
+    effective_existing = dict(existing)
+    if fix_suspicious:
+        for field in ("artist", "title", "album", "year", "track"):
+            if is_suspicious(existing.get(field)):
+                effective_existing[field] = None
 
     # --- Fingerprint + MusicBrainz ------------------------------------------
-    # Only call API if we genuinely need data that folder/filename can't provide
-    needs_mb = (
+    needs_mb_for_identity = (
+        overwrite or
+        (fix_suspicious and is_suspicious(existing.get("artist"))) or
+        (fix_suspicious and is_suspicious(existing.get("title"))) or
         not existing.get("artist") or
-        not existing.get("title") or
-        not resolve_folder_genre(path)  # no folder-derived genre available
+        not existing.get("title")
+    )
+
+    needs_mb_for_year = (
+        not effective_existing.get("year") and
+        not parse_folder_name(path.parent.name).get("year")
+    )
+
+    needs_mb_for_genre = not has_meaningful_genres(existing.get("genre"))
+
+    needs_mb = (
+        needs_mb_for_identity or
+        needs_mb_for_year or
+        needs_mb_for_genre
     )
 
     recording_id = None
     mb_title = None
     mb_artist = None
-    mb_meta: dict[str, str | None] = {"album": None, "year": None, "track": None}
+    mb_meta: dict[str, str | None] = {
+        "album": None,
+        "year": None,
+        "track": None,
+        "albumartist": None,
+        "isrc": None,
+    }
     mb_genre_list: list[str] = []
 
     if needs_mb and not no_mb:
+        log.info("  API lookup: AcoustID fingerprint + MusicBrainz metadata")
         fp = fingerprint_lookup(
             path,
             min_score=config.ACOUSTID_MIN_SCORE,
@@ -137,63 +139,66 @@ def tag_file(
         mb_artist = fp.get("artist")
 
         if recording_id:
-            mb_meta = mb_recording_metadata(
+            log.info("  API lookup: MusicBrainz recording %s", recording_id)
+            mb_meta.update(mb_recording_metadata(
                 recording_id,
                 rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
-            )
+            ))
             mb_genre_list = mb_genres(
                 recording_id,
                 min_votes=config.MB_MIN_TAG_VOTES,
                 max_genres=config.MB_MAX_GENRES,
                 rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
             )
+        else:
+            log.info("  API lookup: no AcoustID recording match")
+    elif needs_mb and no_mb:
+        log.info("  API lookup needed but skipped (--no-mb)")
 
     # --- Fill missing fields from MB ----------------------------------------
-    # Rule: only write if the field is genuinely empty in existing tags.
-    # Never fall back to existing value here — that would cause no-op writes.
-    if overwrite or not existing.get("title"):
+    if overwrite or not effective_existing.get("title"):
         if mb_title:
             new_tags["title"] = mb_title
-    if overwrite or not existing.get("artist"):
+    if overwrite or not effective_existing.get("artist"):
         if mb_artist:
             new_tags["artist"] = mb_artist
-    if overwrite or not existing.get("album"):
+    if overwrite or not effective_existing.get("album"):
         if mb_meta.get("album"):
             new_tags["album"] = mb_meta["album"]
-    if overwrite or not existing.get("year"):
+    if overwrite or not effective_existing.get("year"):
         if mb_meta.get("year"):
             new_tags["year"] = mb_meta["year"]
-    if overwrite or not existing.get("track"):
+    if overwrite or not effective_existing.get("track"):
         if mb_meta.get("track"):
             new_tags["track"] = mb_meta["track"]
 
     # --- Fallback: parse filename for artist / title if still missing --------
     # Only fills fields empty in BOTH existing tags and new_tags so far.
     parsed = parse_filename(path)
-    if not existing.get("title") and not new_tags.get("title"):
+    if not effective_existing.get("title") and not new_tags.get("title"):
         if parsed.get("title"):
             new_tags["title"] = parsed["title"]
-    if not existing.get("artist") and not new_tags.get("artist"):
+    if not effective_existing.get("artist") and not new_tags.get("artist"):
         if parsed.get("artist"):
             new_tags["artist"] = parsed["artist"]
-    if not existing.get("track") and not new_tags.get("track"):
+    if not effective_existing.get("track") and not new_tags.get("track"):
         if parsed.get("track"):
             new_tags["track"] = parsed["track"]
 
     # --- Fallback: parse parent folder for album / year if still missing -----
     # Only fills fields empty in BOTH existing tags and new_tags so far.
     folder_info = parse_folder_name(path.parent.name)
-    if not existing.get("album") and not new_tags.get("album"):
+    if not effective_existing.get("album") and not new_tags.get("album"):
         if folder_info.get("album"):
             new_tags["album"] = folder_info["album"]
-    if not existing.get("year") and not new_tags.get("year"):
+    if not effective_existing.get("year") and not new_tags.get("year"):
         if folder_info.get("year"):
             new_tags["year"] = folder_info["year"]
 
     # --- Genre ---------------------------------------------------------------
     # Always merge: folder genre + existing genre + MB genres (collect_set).
     # Existing genre is included so it is never lost, only enriched.
-    folder_genre = resolve_folder_genre(path)
+    folder_genre = ctx.genre
     existing_genres = [
         g.strip()
         for g in (existing.get("genre") or "").split("/")
@@ -210,13 +215,16 @@ def tag_file(
         log.warning("No genre resolved for %s — flagging for review", path.name)
         review_items.append({"path": str(path), "reason": "no_genre"})
 
+    # --- AlbumArtist / ISRC --------------------------------------------------
+    if (ctx.is_compilation or ctx.is_soundtrack) and not existing.get("albumartist"):
+        if mb_meta.get("albumartist"):
+            new_tags["albumartist"] = mb_meta["albumartist"]
+
+    if not existing.get("isrc") and mb_meta.get("isrc"):
+        new_tags["isrc"] = mb_meta["isrc"]
+
     # --- BPM -----------------------------------------------------------------
-    try:
-        rel = path.relative_to(config.MUSIC_ROOT)
-        top = rel.parts[0].lower() if rel.parts else ""
-    except ValueError:
-        top = ""
-    if not no_bpm and not existing.get("bpm") and top not in config.NO_BPM_FOLDERS:
+    if not no_bpm and not existing.get("bpm") and ctx.needs_bpm:
         bpm = detect_bpm(path)
         if bpm is not None:
             new_tags["bpm"] = str(bpm)
@@ -232,6 +240,7 @@ def tag_file(
         for field, val in new_tags.items():
             log.info("  [DRY-RUN] Would set %s = %s", field, val)
     else:
+        log.info("  Writing %d tag(s) to %s", len(new_tags), path.name)
         written = write_tags(path, new_tags, dry_run=False)
         for field, val in written.items():
             log.info("  Set %s = %s", field, val)
@@ -266,6 +275,8 @@ def main() -> None:
                         help="Process a single top-level folder only")
     parser.add_argument("--overwrite", action="store_true",
                         help="Overwrite existing artist/title/album/year tags")
+    parser.add_argument("--fix-suspicious", action="store_true",
+                        help="Replace suspicious placeholder values only")
     parser.add_argument("--no-bpm", action="store_true",
                         help="Skip BPM detection (fast metadata-only pass)")
     parser.add_argument("--no-mb", action="store_true",
@@ -293,6 +304,7 @@ def main() -> None:
             folder,
             dry_run=dry_run,
             overwrite=args.overwrite,
+            fix_suspicious=args.fix_suspicious,
             no_bpm=args.no_bpm,
             no_mb=args.no_mb,
         )
@@ -308,7 +320,12 @@ def main() -> None:
                 pass
 
         if not dry_run:
-            existing_review.extend(all_review)
+            seen = {(e["path"], e["reason"]) for e in existing_review}
+            for item in all_review:
+                key = (item["path"], item["reason"])
+                if key not in seen:
+                    existing_review.append(item)
+                    seen.add(key)
             review_path.write_text(
                 json.dumps(existing_review, indent=2, ensure_ascii=False),
                 encoding="utf-8",

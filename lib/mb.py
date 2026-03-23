@@ -155,7 +155,7 @@ def mb_genres(
 
 
 # ---------------------------------------------------------------------------
-# MusicBrainz recording metadata (album, year, track)
+# MusicBrainz recording metadata (album, year, track, albumartist, isrc)
 # ---------------------------------------------------------------------------
 
 def mb_recording_metadata(
@@ -163,11 +163,15 @@ def mb_recording_metadata(
     *,
     rate_limit_seconds: float = 1.1,
 ) -> dict[str, str | None]:
-    """Fetch album, year, and track number from MusicBrainz for *recording_id*.
+    """Fetch album, year, track, albumartist, and isrc from MusicBrainz.
 
-    Returns ``{album, year, track}`` — values ``None`` when unavailable.
+    Returns ``{album, year, track, albumartist, isrc}`` — values ``None``
+    when unavailable.
     """
-    result: dict[str, str | None] = {"album": None, "year": None, "track": None}
+    result: dict[str, str | None] = {
+        "album": None, "year": None, "track": None,
+        "albumartist": None, "isrc": None,
+    }
 
     if not _HAS_MB or not recording_id:
         return result
@@ -176,13 +180,19 @@ def mb_recording_metadata(
 
     try:
         data = musicbrainzngs.get_recording_by_id(
-            recording_id, includes=["releases"]
+            recording_id, includes=["releases", "isrcs"]
         )
     except Exception as exc:
         log.error("MB metadata error for %s: %s", recording_id, exc)
         return result
 
     recording = data.get("recording", {})
+
+    # ISRC from recording level
+    isrc_list = recording.get("isrc-list", [])
+    if isrc_list:
+        result["isrc"] = isrc_list[0]
+
     releases = recording.get("release-list", [])
     if not releases:
         return result
@@ -190,6 +200,14 @@ def mb_recording_metadata(
     release = releases[0]
     result["album"] = release.get("title")
     result["year"] = release.get("date", "")[:4] or None
+
+    # Album artist from the release artist-credit
+    artist_credit = release.get("artist-credit", [])
+    if artist_credit:
+        first_credit = artist_credit[0]
+        if isinstance(first_credit, dict):
+            artist_obj = first_credit.get("artist", {})
+            result["albumartist"] = artist_obj.get("name")
 
     # Track number from the medium list
     media = release.get("medium-list", [])

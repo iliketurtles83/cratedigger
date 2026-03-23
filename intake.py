@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""intake.py — Orchestrate 01_tag → 02_rename → 03_move for files in 0new/.
+"""intake.py — Orchestrate 01_tag → 02_rename → 04_move --intake for incoming.
 
-Processes new files arriving in ``0new/albums/`` and ``0new/singles/``,
-running the full pipeline automatically.
+Processes new files arriving in ``INCOMING_FOLDER``, running the intake pipeline
+automatically.
 
 Usage:
     python intake.py [--dry-run] [--overwrite] [--log FILE]
 """
 
 import argparse
-import json
 import logging
 import subprocess
 import sys
@@ -19,8 +18,6 @@ import config
 from lib.logger import setup_logger
 
 log: logging.Logger = None  # type: ignore[assignment]
-
-INTAKE_FOLDER = config.MUSIC_ROOT / "0new"
 
 
 def run_step(script: str, extra_args: list[str]) -> int:
@@ -36,13 +33,16 @@ def run_step(script: str, extra_args: list[str]) -> int:
 def main() -> None:
     global log
 
-    parser = argparse.ArgumentParser(description="Intake pipeline for 0new/.")
+    parser = argparse.ArgumentParser(
+        description="Intake pipeline for INCOMING_FOLDER.")
     parser.add_argument("--dry-run", action="store_true", default=True,
                         help="Show changes without writing (default: True)")
     parser.add_argument("--no-dry-run", action="store_true",
                         help="Actually apply all changes")
     parser.add_argument("--overwrite", action="store_true",
                         help="Overwrite existing artist/title tags from MB")
+    parser.add_argument("--fix-suspicious", action="store_true",
+                        help="Replace suspicious placeholder values only")
     parser.add_argument("--log", type=str, default="review.log",
                         help="Log file path (default: review.log)")
     args = parser.parse_args()
@@ -50,24 +50,27 @@ def main() -> None:
     dry_run = not args.no_dry_run
     log = setup_logger("intake", Path(args.log))
 
-    if not INTAKE_FOLDER.exists():
-        log.info("Intake folder does not exist: %s", INTAKE_FOLDER)
+    intake_folder = config.INCOMING_FOLDER
+
+    if not intake_folder.exists():
+        log.info("Intake folder does not exist: %s", intake_folder)
         return
 
-    # Check for audio files in 0new/
+    # Check for audio files in incoming folder
     audio_files = [
-        p for p in INTAKE_FOLDER.rglob("*")
+        p for p in intake_folder.rglob("*")
         if p.suffix.lower() in config.AUDIO_EXTENSIONS and p.is_file()
     ]
 
     if not audio_files:
-        log.info("No audio files found in %s", INTAKE_FOLDER)
+        log.info("No audio files found in %s", intake_folder)
         return
 
-    log.info("Found %d audio files in %s", len(audio_files), INTAKE_FOLDER)
+    log.info("Found %d audio files in %s", len(audio_files), intake_folder)
 
     # Build common args
-    common_args = ["--folder", "0new", "--log", args.log]
+    incoming_folder_name = intake_folder.name
+    common_args = ["--folder", incoming_folder_name, "--log", args.log]
     if not dry_run:
         common_args.append("--no-dry-run")
 
@@ -75,21 +78,24 @@ def main() -> None:
     tag_args = common_args[:]
     if args.overwrite:
         tag_args.append("--overwrite")
+    if args.fix_suspicious:
+        tag_args.append("--fix-suspicious")
     rc = run_step("01_tag.py", tag_args)
     if rc != 0:
         log.error("Tagging failed — stopping pipeline")
         return
 
-    # Step 2: Rename (only in non-special context — 0new is special,
-    # but we rename before moving out)
-    # We pass --folder 0new so it processes that folder specifically
+    # Step 2: Rename files in incoming folder
     rc = run_step("02_rename.py", common_args)
     if rc != 0:
         log.error("Renaming failed — stopping pipeline")
         return
 
-    # Step 3: Move to genre folders
-    rc = run_step("03_move.py", common_args)
+    # Step 3: Intake routing to staging folders
+    move_args = ["--intake", "--log", args.log]
+    if not dry_run:
+        move_args.append("--no-dry-run")
+    rc = run_step("04_move.py", move_args)
     if rc != 0:
         log.error("Moving failed — stopping pipeline")
         return

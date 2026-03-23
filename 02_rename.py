@@ -122,7 +122,12 @@ def main() -> None:
                 pass
 
         if not dry_run:
-            existing.extend(all_review)
+            seen = {(e["path"], e["reason"]) for e in existing}
+            for item in all_review:
+                key = (item["path"], item["reason"])
+                if key not in seen:
+                    existing.append(item)
+                    seen.add(key)
             review_path.write_text(
                 json.dumps(existing, indent=2, ensure_ascii=False),
                 encoding="utf-8",

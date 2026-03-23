@@ -6,6 +6,7 @@ A personal music collection management pipeline that:
 1. Tags audio files with genre and metadata (artist, album, year, BPM, track)
 2. Normalises filenames and folder names
 3. Routes incoming music to the right place automatically
+4. Builds toward a personal music recommender model ("poor man's Spotify")
 
 All scripts are safe, idempotent, and support `--dry-run` before touching files.
 
@@ -21,6 +22,7 @@ cratedigger/
   .env.example               ← committed template showing required keys (values empty)
   .gitignore                 ← covers: .env, config.py, *.log, *.json, __pycache__, .venv
   lib/
+    context.py               ← FolderContext dataclass, get_folder_context(), classify_folder()
     genres.py                ← genre normalisation, merge logic, blacklist, parent lookup
     parsers.py               ← filename and folder name parsing, sanitisation
     tags.py                  ← mutagen read/write wrappers for all formats
@@ -29,9 +31,10 @@ cratedigger/
   01_tag.py                  ← fingerprint → MusicBrainz → folder genre → write tags
   02_rename.py               ← normalise audio filenames using tags as source of truth
   03_folders.py              ← normalise folder names, classify folder types
-  04_move.py                 ← structural decisions: flatten, nest, route new files
+  04_move.py                 ← intake routing, restructure, promote
   05_review.py               ← interactive resolution of files flagged in review log
-  intake.py                  ← orchestrates 01→02→03→04 for new files in 0new/
+  06_analyze.py              ← audio feature extraction for recommender (future)
+  intake.py                  ← orchestrates 01→02→04 for files in INCOMING_FOLDER
   genre-tree.txt             ← AllMusic genre taxonomy (reference, never modified)
 ```
 
@@ -39,16 +42,18 @@ cratedigger/
 
 ## Configuration — config.py
 
-All user-specific settings live here. Imported by all scripts and lib modules.
-Never hardcode paths, folder names, genre lists, or preferences outside this file.
-
 ```python
 from pathlib import Path
 
 MUSIC_ROOT = Path("/path/to/audio")
 
-# Single source of truth: folder name → display genre.
-# GENRE_FOLDERS is derived from this — never edit GENRE_FOLDERS directly.
+# ── Intake / staging ──────────────────────────────────────────────────────────
+INCOMING_FOLDER      = MUSIC_ROOT / "incoming"   # drop zone
+STAGED_TRACKS_FOLDER = MUSIC_ROOT / "0new"       # loose files by genre, awaiting decision
+STAGED_ALBUMS_FOLDER = MUSIC_ROOT / "0new_albums"# albums by genre, review before promoting
+
+# ── Genre folders ─────────────────────────────────────────────────────────────
+# Single source of truth. GENRE_FOLDERS derived from this — never edit directly.
 FOLDER_TO_GENRE = {
     "50s": "50s", "60s": "60s", "70s": "70s", "80s": "80s",
     "african": "African", "blues": "Blues", "brazil": "Brazil",
@@ -61,55 +66,118 @@ FOLDER_TO_GENRE = {
     "punk": "Punk", "reggae": "Reggae", "rnb": "R&B", "rock": "Rock",
     "soundtrack": "Soundtrack", "spoken": "Spoken Word",
 }
+GENRE_FOLDERS = set(FOLDER_TO_GENRE.keys())  # derived — never edit
 
-# Derived automatically — never edit directly
-GENRE_FOLDERS = set(FOLDER_TO_GENRE.keys())
-
-# Subgenre bucket folders inside genre folders — folder name : display genre
-# Start with 0, contain album subfolders. Add new ones as discovered.
 SUBGENRE_BUCKETS = {
-    "0alt-rock":      "Alt-Rock",
-    "0blues-rock":    "Blues Rock",
-    "0noise-rock":    "Noise Rock",
-    "0post-hardcore": "Post-Hardcore",
+    "0alt-rock": "Alt-Rock", "0blues-rock": "Blues Rock",
+    "0noise-rock": "Noise Rock", "0post-hardcore": "Post-Hardcore",
 }
 
-# Special folders — tag only, never move or rename files
 SPECIAL_FOLDERS = {
-    "0faves", "0bestof", "0random", "0random_good",
-    "0new", "0shacks", "0compilations", "0various", "0mixes",
+    "0faves", "0faves_alltime", "0random", "0random_good",
+    "0new", "0new_albums", "0shacks", "0compilations", "0various", "0mixes",
 }
 
 SKIP_FOLDERS = {"0videos"}
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
 
-# Folders where BPM detection makes no sense
+# Folders where albumartist tag is relevant
+ALBUMARTIST_FOLDERS = {"0compilations", "0various", "soundtrack"}
+
+# Folders where BPM makes no sense
 NO_BPM_FOLDERS = {"spoken", "0mixes"}
 
-# Artist folder threshold — artists with this many or more albums get their
-# own artist subfolder. Below this they live flat in the genre root.
+# Placeholder values that indicate bad/missing data — trigger MB lookup
+SUSPICIOUS_TAG_VALUES = {
+    "unknown artist", "unknown", "track", "untitled",
+    "artist", "album artist", "no artist", "various artists",
+}
+
 ARTIST_FOLDER_THRESHOLD = 3
 
-# MusicBrainz / AcoustID
 MB_RATE_LIMIT_SECONDS = 1.1
 ACOUSTID_MIN_SCORE    = 0.8
 MB_MIN_TAG_VOTES      = 2
 MB_MAX_GENRES         = 5
 ```
 
-### .env (never committed)
-```
-ACOUSTID_API_KEY=your_key_here
-MB_USER_AGENT_EMAIL=your@email.com
+---
+
+## lib/context.py — Folder Context (Single Source of Truth)
+
+All path-based decisions across the entire pipeline flow from this module.
+No script should re-implement folder classification or genre resolution.
+
+```python
+from dataclasses import dataclass
+from pathlib import Path
+
+@dataclass
+class FolderContext:
+    top: str                  # raw top-level folder name e.g. "rock"
+    genre: str | None         # display genre e.g. "Rock", or None
+    subgenre: str | None      # e.g. "Alt-Rock" if in subgenre bucket, else None
+    folder_kind: str          # see Folder Classifier section
+    is_genre_folder: bool     # top is in GENRE_FOLDERS
+    is_special_folder: bool   # top is in SPECIAL_FOLDERS
+    is_compilation: bool      # albumartist tag needed
+    is_soundtrack: bool       # albumartist tag needed
+    needs_bpm: bool           # not in NO_BPM_FOLDERS
+    depth: int                # levels below music root
+
+def get_folder_context(path: Path) -> FolderContext:
+    """
+    Build complete folder context for any audio file path.
+    Called once per file in tag_file(), used for all tag decisions.
+    Imports config — never hardcodes folder names.
+    """
 ```
 
-### Loading secrets
+### Usage in all scripts
 ```python
-from dotenv import load_dotenv
-import os
-load_dotenv()
-ACOUSTID_API_KEY = os.getenv("ACOUSTID_API_KEY", "")
+from lib.context import get_folder_context, FolderContext
+
+ctx = get_folder_context(path)
+
+# 01_tag.py
+folder_genre = ctx.genre
+needs_bpm = ctx.needs_bpm and not existing.get("bpm")
+needs_albumartist = (ctx.is_compilation or ctx.is_soundtrack)
+
+# 03_folders.py
+if ctx.folder_kind == "artist_flat": ...
+
+# 04_move.py
+if ctx.is_special_folder: # never move
+```
+
+### classify_folder() lives in lib/context.py
+Previously in 03_folders.py — moved here so all scripts share it.
+03_folders.py and 04_move.py import from lib.context, not from each other.
+
+```python
+def classify_folder(folder: Path) -> str:
+    """
+    Returns: album | artist | artist_mixed | artist_flat |
+             subgenre | local_special | disc | unknown
+    """
+    has_audio = any audio files directly inside folder
+    has_album_subdirs = any subdirs classifying as album or artist
+    starts_with_0 = folder.name.startswith("0")
+    has_separator = " - " in folder.name
+
+    if is_disc_subfolder(name): return "disc"
+    if starts_with_0 and name in SUBGENRE_BUCKETS: return "subgenre"
+    if starts_with_0: return "local_special"
+    if has_separator: return "album"
+    if has_album_subdirs and not has_audio: return "artist"
+    if has_album_subdirs and has_audio: return "artist_mixed"
+    if not has_album_subdirs and has_audio: return "artist_flat"
+    return "unknown"
+
+def is_disc_subfolder(name: str) -> bool:
+    return bool(re.match(r"^(cd|disc|disk)\s*\d+$", name, re.IGNORECASE))
 ```
 
 ---
@@ -117,17 +185,19 @@ ACOUSTID_API_KEY = os.getenv("ACOUSTID_API_KEY", "")
 ## Pipeline Architecture
 
 ```
-01_tag.py       fingerprint → MusicBrainz genres + folder genre → write tags
+01_tag.py       fingerprint → MusicBrainz → folder context → write tags
       ↓
 02_rename.py    normalise audio filenames using tags as source of truth
       ↓
-03_folders.py   classify folders, normalise names, move loose files to 0singles
+03_folders.py   classify folders, normalise names, flag artist_flat
       ↓
-04_move.py      structural decisions: flatten/nest artist folders, route 0new files
+04_move.py      intake routing, restructure, promote
       ↓
 05_review.py    interactive resolution of flagged files and folders
+      ↓
+06_analyze.py   audio feature extraction for recommender (future)
 
-intake.py       orchestrates 01→02→03→04 for files arriving in 0new/
+intake.py       orchestrates 01→02→04 for files arriving in INCOMING_FOLDER
 ```
 
 ### CLI flags all scripts must support
@@ -136,287 +206,127 @@ intake.py       orchestrates 01→02→03→04 for files arriving in 0new/
 - `--folder NAME`   process one top-level folder only
 - `--log FILE`      log file path (default: review.log)
 
-### 01_tag.py additional flags
-- `--overwrite`     overwrite existing artist/title/album/year (dangerous)
-- `--no-bpm`        skip BPM detection (fast metadata-only pass)
-- `--no-mb`         skip MusicBrainz/AcoustID lookup entirely
+### 01_tag.py flags
+- `--overwrite`         overwrite all existing tags from MB (dangerous, nuclear)
+- `--fix-suspicious`    replace only placeholder/bad values (safer alternative)
+- `--no-bpm`            skip BPM detection
+- `--no-mb`             skip MusicBrainz/AcoustID entirely
+
+### 04_move.py modes (mutually exclusive)
+- `--intake`        route files from INCOMING_FOLDER to staging folders
+- `--restructure`   apply N=3 threshold to existing genre folder structure
+- `--promote`       move staged albums from STAGED_ALBUMS_FOLDER to genre folders
 
 ---
 
-## Music Root — Full Folder Structure
+## 01_tag.py — Preconditions and Postconditions
 
-```
-audio/
-  ├── rock/                              ← genre folder
-  │   ├── 0alt-rock/                     ← subgenre bucket (starts with 0)
-  │   │   └── Artist - Album (Year)/     ← album inside bucket
-  │   │       ├── CD1/                   ← disc subfolder
-  │   │       └── CD2/
-  │   ├── 0compilations/                 ← local compilations
-  │   ├── 0various/                      ← local various artists
-  │   ├── AC-DC - Stiff Upper Lip (2000)/← flat album (few albums by artist)
-  │   ├── Black Sabbath/                 ← artist folder (many albums)
-  │   │   ├── Black Sabbath - Paranoid (1970)/
-  │   │   ├── Black Sabbath - Heaven and Hell (1980)/
-  │   │   └── 0singles/                  ← loose files from artist folder
-  │   └── Allman Brothers Band, The - Best Of (1973)/
-  ├── electronic/
-  ├── jazz/
-  ├── meditation/                        ← genre folder (not special)
-  ├── [other genre folders...]
-  ├── 0faves/          favourite songs ~last 5 years — tag only, never move
-  ├── 0faves_alltime/  all-time faves — tag only, never move
-  ├── 0random/         randomly collected, genre subfolders — tag only
-  ├── 0random_good/    curated from 0random, genre subfolders — tag only
-  ├── 0new/            intake staging
-  │   ├── albums/
-  │   └── singles/
-  ├── 0shacks/         songs from a friend — tag only, never move
-  ├── 0compilations/   genre-spanning compilations — tag only, never move
-  ├── 0various/        various artists — tag only, never move
-  ├── 0mixes/          DJ mixes — tag only, never move
-  └── 0videos/         skip entirely
-```
+### Preconditions
+- Audio file exists and is readable
+- File format supported: mp3 / flac / ogg / m4a / aac / opus
+- Folder context available via get_folder_context()
+- 01_tag.py must run BEFORE 03_folders.py on any folder
 
----
+### Postconditions
+Every processed file should have — if resolvable:
+- `genre` — folder + existing + MB merged
+- `artist` — from MB or filename parse
+- `title` — from MB or filename parse
+- `track` — from MB or filename parse
+- `album` — from MB, folder name, or filename parse
+- `year` — from MB or folder name
+- `bpm` — from librosa (except NO_BPM_FOLDERS)
+- `albumartist` — only in compilation/soundtrack context, if MB provides it
+- `isrc` — if MB provides it
 
-## Folder Classifier
-
-`classify_folder()` in `03_folders.py` inspects each folder and returns one of:
-
-| Classification | Description |
-|---|---|
-| `album` | `Artist - Album (Year)/` format, contains audio files |
-| `artist` | Single name, contains album subfolders only |
-| `artist_mixed` | Single name, contains albums AND loose audio files |
-| `artist_flat` | Single name, contains only loose audio files (IS an album) |
-| `subgenre` | Starts with 0, in SUBGENRE_BUCKETS |
-| `local_special` | Starts with 0, not in SUBGENRE_BUCKETS |
-| `disc` | CD1, CD2, Disc 1, Disc N etc. |
-| `unknown` | Doesn't fit any pattern — flag for review |
-
-### Classification logic
-```python
-has_audio = any audio files directly inside folder
-has_album_subdirs = any subdirs that classify as album or artist
-starts_with_0 = folder.name.startswith("0")
-has_separator = " - " in folder.name
-
-if is_disc_subfolder(name): return "disc"
-if starts_with_0 and name in SUBGENRE_BUCKETS: return "subgenre"
-if starts_with_0: return "local_special"
-if has_separator:
-    return "album"
-if has_album_subdirs and not has_audio: return "artist"
-if has_album_subdirs and has_audio: return "artist_mixed"
-if not has_album_subdirs and has_audio: return "artist_flat"
-return "unknown"
-```
-
----
-
-## 03_folders.py — Responsibilities
-
-**Does:**
-- Classify every folder using the classifier
-- Fix `, The` / `, A` suffix on artist and album folder names
-- Add missing year to album folder names (read from file tags inside)
-- Move loose audio files from `artist_mixed` folders → `0singles/` subfolder
-- Flag `artist_flat` with mixed album tags for review
-- Flag `unknown` folders for review
-- Flag rename conflicts for review
-
-**Does NOT:**
-- Move files between genre folders
-- Create album subfolders or restructure artist folders (that's `04_move.py`)
-- Rename genre root folders, SPECIAL_FOLDERS, subgenre buckets, disc subfolders
-- Touch files in SPECIAL_FOLDERS or SKIP_FOLDERS
-
-### The-suffix fix
-```python
-def _fix_the(name: str) -> str:
-    if name.endswith(", The"):
-        return "The " + name[:-5]
-    if name.endswith(", A"):
-        return "A " + name[:-3]
-    return name
-```
-Apply to artist portion of any folder name.
-
-### Year from file tags
-```python
-year = next(
-    (read_tags(f).get("year", "")[:4]
-     for f in sorted(folder.rglob("*"))
-     if f.suffix.lower() in config.AUDIO_EXTENSIONS),
-    None
-)
-```
-Use `year[:4]` — handles full date formats like `1999-05-03`.
-
-### Embedded year detection
-Detect year in both round and square brackets:
-```python
-_EMBEDDED_YEAR = re.compile(r"[\(\[](\d{4})[\)\]]")
-```
-Strip from album text before building new folder name to avoid duplication.
-
-### Disc subfolder detection
-```python
-_DISC_PATTERN = re.compile(r"^(cd|disc|disk)\s*\d+$", re.IGNORECASE)
-```
-
-### 0singles convention
-When `artist_mixed` folder found — move loose audio files to `0singles/`
-subfolder inside the artist folder. Never move files from album subfolders.
-`0singles/` sorts to top with other `0` folders.
-
----
-
-## 04_move.py — Responsibilities
-
-**Does:**
-- Apply N=3 threshold rule to `artist_flat` folders (from 03_folders review)
-- Route new files from `0new/` to correct genre folder
-- Restructure artist folders based on album count
-
-**Does NOT:**
-- Rename folders (that's `03_folders.py`)
-- Write tags (that's `01_tag.py`)
-
-### Artist Folder Threshold Rule (N=3)
-
-Count existing album subfolders in the artist folder, then apply:
-
-```
-artist_flat, 0 existing albums, all files share same album tag:
-  → flatten to genre root: Artist - Album (Year)/
-  → delete empty artist folder
-
-artist_flat, 0 existing albums, files have mixed album tags:
-  → flag for review — cannot auto-decide
-
-artist_flat, 1-2 existing albums (below threshold):
-  → create Artist - Album (Year)/ in genre root
-  → move files into it
-  → if artist folder now empty → delete it
-
-artist_flat, 3+ existing albums (at or above threshold):
-  → create Artist - Album (Year)/ inside artist folder
-  → move files into it
-  → artist folder stays
-```
-
-Album count uses `ARTIST_FOLDER_THRESHOLD = 3` from config.
-Always use `--dry-run` first — structural moves are hard to undo.
-
----
-
-## resolve_folder_genre() — Path Walking Logic
-
-Handle all folder depth levels:
-
-```
-Level 1 — genre folder (e.g. rock/)
-  → base genre from FOLDER_TO_GENRE
-
-Level 2 — may be:
-  a) subgenre bucket (starts with 0, in SUBGENRE_BUCKETS)
-       → genre = "Rock / Alt-Rock"
-  b) local special (0compilations, 0various inside genre folder)
-       → genre = base genre only
-  c) artist folder (no dash, single name)
-       → genre = base genre, go deeper
-  d) album folder (contains " - ")
-       → genre = base genre
-
-Level 3 — may be:
-  a) disc subfolder (CD1, CD2, Disc N)
-       → genre already known
-  b) album folder (if level 2 was artist folder)
-       → genre = base genre
-
-Level 4 — disc subfolder if level 2 was artist, level 3 was album
-```
-
----
-
-## Filename Conventions
-
-### Input — parser handles all of these
-```
-01 - Artist Name - Song Title.mp3     ← standard target
-Artist Name - 01 - Song Title.mp3     ← artist first
-Artist Name - Song Title.mp3          ← no track number
-08.Song Title.mp3                     ← dot-separated (ripper)
-04-Song Title.mp3                     ← dash no spaces (ripper)
-01 Song Title.mp3                     ← space-separated track
-```
-
-### Output target (02_rename.py)
-```
-01 - Artist Name - Song Title.mp3
-```
-Track zero-padded to 2 digits. Fields from tags, not filename.
-
-### Folder naming target (03_folders.py)
-```
-Artist Name - Album Title (Year)/
-Artist Name/Artist Name - Album Title (Year)/   ← two-level (≥3 albums)
-```
+Existing non-empty fields never overwritten unless `--overwrite` or
+`--fix-suspicious` passed. Unresolvable fields flagged in review.json.
 
 ---
 
 ## 01_tag.py — Critical Logic Rules
 
-### API gate — only call MB when genuinely needed
+### API gate — needs_mb
 ```python
-needs_mb = (
+ctx = get_folder_context(path)
+
+def is_suspicious(value: str | None) -> bool:
+    return (value or "").strip().lower() in config.SUSPICIOUS_TAG_VALUES
+
+needs_mb_for_identity = (
+    overwrite or
+    is_suspicious(existing.get("artist")) or
+    is_suspicious(existing.get("title")) or
     not existing.get("artist") or
     not existing.get("title") or
-    not resolve_folder_genre(path)
+    not ctx.genre
 )
-if needs_mb and not no_mb:
-    # fingerprint_lookup...
-```
-Do NOT remove this gate. Test folders not in GENRE_FOLDERS always trigger
-MB — add test folders to config temporarily to avoid this.
 
-### Fill missing fields — always check existing first
+needs_mb_for_year = (
+    not existing.get("year") and
+    not parse_folder_name(path.parent.name).get("year")
+)
+
+needs_mb = needs_mb_for_identity or needs_mb_for_year
+```
+
+Key rules:
+- `--overwrite` forces needs_mb True — without this, overwrite does nothing on tagged files
+- Suspicious placeholder values trigger MB lookup even if field not empty
+- Year triggers MB only if missing from both tag AND folder name
+
+### Fill missing fields — always check existing AND new_tags
 ```python
 # CORRECT
 if not existing.get("album") and not new_tags.get("album"):
-    if folder_info.get("album"):
-        new_tags["album"] = folder_info["album"]
+    if mb_meta.get("album"):
+        new_tags["album"] = mb_meta["album"]
 
 # WRONG — overwrites good existing data
 if not new_tags.get("album"):
-    new_tags["album"] = folder_info.get("album") or existing.get("album")
+    new_tags["album"] = mb_meta.get("album") or existing.get("album")
 ```
 
-### Genre merge — always include existing genre
+### --fix-suspicious flag
+Replaces fields whose current value is in SUSPICIOUS_TAG_VALUES.
+Safer than --overwrite which replaces everything unconditionally.
+```python
+if args.fix_suspicious and is_suspicious(existing.get("artist")):
+    needs_mb_for_identity = True
+    # then treat the field as empty for write purposes
+```
+
+### Genre merge — always include existing
 ```python
 existing_genres = [
     g.strip()
     for g in (existing.get("genre") or "").split("/")
     if g.strip()
 ]
-genre_str = merge_genres(folder_genre, existing_genres + normalised_mb)
-```
-A file tagged `Electronic` in `jazz/` → `Jazz / Electronic`, never just `Jazz`.
+normalised_mb = [normalise_genre(g) for g in mb_genre_list]
+genre_str = merge_genres(ctx.genre, existing_genres + normalised_mb)
 
-### Only write genre if it changed
-```python
 if genre_str and genre_str != existing.get("genre"):
     new_tags["genre"] = genre_str
 ```
 
-### Track number — preserve existing format
-Never overwrite `1/12` with `1`. Check `existing.get("track")` first.
+### AlbumArtist — compilation/soundtrack context only
+```python
+if (ctx.is_compilation or ctx.is_soundtrack) and not existing.get("albumartist"):
+    if mb_meta.get("albumartist"):
+        new_tags["albumartist"] = mb_meta["albumartist"]
+```
+Never write albumartist for regular artist albums.
+
+### ISRC — if MB provides it
+```python
+if not existing.get("isrc") and mb_meta.get("isrc"):
+    new_tags["isrc"] = mb_meta["isrc"]
+```
 
 ### BPM — lazy import, skip for non-musical folders
 ```python
-_librosa = None  # module-level sentinel
+_librosa = None
 
 def detect_bpm(path: Path) -> int | None:
     global _librosa
@@ -431,13 +341,30 @@ def detect_bpm(path: Path) -> int | None:
     ...
 
 # Gate in tag_file():
-top = path.relative_to(config.MUSIC_ROOT).parts[0].lower()
-if not no_bpm and not existing.get("bpm") and top not in config.NO_BPM_FOLDERS:
+if not no_bpm and not existing.get("bpm") and ctx.needs_bpm:
     bpm = detect_bpm(path)
 ```
 
 ### No grouping tag
-No GROUPING_FOLDERS config, no grouping tag logic anywhere in pipeline.
+No GROUPING_FOLDERS, no grouping tag logic anywhere in pipeline.
+
+---
+
+## Tag Fields Reference
+
+| Field       | ID3 (MP3) | Vorbis (FLAC/OGG) | M4A   | Notes |
+|-------------|-----------|-------------------|-------|-------|
+| Title       | TIT2      | title             | ©nam  | |
+| Artist      | TPE1      | artist            | ©ART  | |
+| AlbumArtist | TPE2      | albumartist       | aART  | compilation/soundtrack only |
+| Album       | TALB      | album             | ©alb  | |
+| Year        | TDRC      | date              | ©day  | |
+| Genre       | TCON      | genre             | ©gen  | slash-separated |
+| BPM         | TBPM      | bpm               | —     | integer, M4A unsupported |
+| Track       | TRCK      | tracknumber       | trkn  | preserve x/total format |
+| ISRC        | TSRC      | isrc              | —     | deduplication anchor |
+
+No grouping tag. All fields must be in tags.py field maps.
 
 ---
 
@@ -452,14 +379,13 @@ Rock / Alt-Rock / Shoegaze
 Main genre always first. Never flatten to single genre.
 
 ### Merge logic (lib/genres.py merge_genres())
-1. Folder-derived genre → first
+1. ctx.genre (folder-derived) → first
 2. Existing genre tags → second (never lost)
-3. MusicBrainz genres → appended, blacklisted discarded
-4. Deduplicate case-insensitively
-5. Join with ` / `
+3. MB genres → appended, blacklisted discarded
+4. Deduplicate case-insensitively, join with ` / `
 
 ### Genre source by folder type
-| Folder | Genre source |
+| Folder | Source |
 |---|---|
 | Genre folder | FOLDER_TO_GENRE[top] |
 | Genre / subgenre bucket | FOLDER_TO_GENRE[top] / SUBGENRE_BUCKETS[level2] |
@@ -469,54 +395,209 @@ Main genre always first. Never flatten to single genre.
 
 ### FOLDER_TO_GENRE values are display names
 ```
-"spoken":  "Spoken Word"    not "spoken"
-"rnb":     "R&B"            not "rnb"
-"hip-hop": "Hip-Hop"        not "hip-hop"
+"spoken":  "Spoken Word"    "rnb": "R&B"    "hip-hop": "Hip-Hop"
 ```
 
-### Genre blacklist (lib/genres.py GENRE_BLACKLIST)
+### Genre blacklist
 ```python
 GENRE_BLACKLIST = {
-    "other", "unknown", "miscellaneous",
-    "seen live", "favorites", "favourite", "good",
+    "other", "unknown", "miscellaneous", "seen live", "favorites",
+    "favourite", "good",
 }
 ```
 
-### Genre tree (genre-tree.txt)
-Parsed into CHILD_TO_PARENT for resolving subgenres to root parents.
-First genre in tag is always root-level, never a subgenre.
+---
+
+## 03_folders.py — Responsibilities
+
+**Does:**
+- Use get_folder_context() / classify_folder() from lib/context.py
+- Fix `, The` / `, A` suffix
+- Add missing year — read from file tags first, folder name second
+- Build folder names from tags as primary source (01_tag.py must run first)
+- Move loose files from artist_mixed → `0singles/` subfolder
+- Flag artist_flat, unknown, conflict cases for review
+
+**Does NOT:**
+- Own classify_folder() — import from lib/context.py
+- Move files between genre folders
+- Apply N=3 rule
+- Rename genre roots, SPECIAL_FOLDERS, subgenre buckets, disc subfolders
+
+### Folder name source priority
+```
+1. File tags inside the folder  ← most reliable — 01_tag.py must run first
+2. Existing folder name         ← fallback if tags incomplete
+3. Flag for review              ← if neither gives enough info
+```
+
+### artist_flat handling
+When classify_folder() returns "artist_flat":
+- Read artist, album, year from file tags inside
+- Build canonical: Artist - Album (Year)/
+- If files have mixed album tags → flag for review, do not rename
+- If tags incomplete → flag for review, do not guess
+- Example: AGO/ with tagged files → AGO - Cronenberg on Warhol (2006)/
+
+### Pipeline dependency
+03_folders.py depends on 01_tag.py having already run on the same folder.
+Never run on untagged files.
+
+### Embedded year pattern
+```python
+_EMBEDDED_YEAR = re.compile(r"[\(\[](\d{4})[\)\]]")  # handles (1960) and [1960]
+```
+
+### Disc subfolder detection (from lib/context.py)
+```python
+is_disc_subfolder(name)  # import from lib.context
+```
 
 ---
 
-## lib/parsers.py — Critical Rules
+## 04_move.py — Three Modes
 
-### Filename patterns (most to least specific)
+### --intake mode
+```python
+is_album_track = path.parent != config.INCOMING_FOLDER
+is_loose       = path.parent == config.INCOMING_FOLDER
+```
+Albums → STAGED_ALBUMS_FOLDER / genre_subfolder / Artist - Album (Year)/
+Loose  → STAGED_TRACKS_FOLDER / genre_subfolder / filename
+
+Never move directly to genre folders. Always stage first.
+
+### --promote mode
+STAGED_ALBUMS_FOLDER / genre / Album/ → genre / Album/
+Remove empty genre subfolders from staging after move.
+
+### --restructure mode
+Apply N=3 threshold. See Artist Folder Threshold Rule.
+
+### Artist Folder Threshold Rule
+```
+artist_flat, 0 albums, all files same album tag → flatten to genre root, delete artist folder
+artist_flat, 0 albums, mixed album tags         → flag for review
+artist_flat, 1-2 albums (below threshold)       → create album in genre root, delete if empty
+artist_flat, 3+ albums (at/above threshold)     → create album inside artist folder
+artist_mixed                                    → loose files → 0singles/, albums normal
+```
+Never delete folder without verifying empty first.
+
+---
+
+## 06_analyze.py — Audio Feature Extraction (Future)
+
+Separate from tagging. Analysis outputs belong in feature store, not audio tags.
+Allows re-running with better models without touching tags.
+
+| Feature | Source | Storage |
+|---|---|---|
+| BPM | librosa | audio tag (already in 01_tag.py) |
+| Key | librosa | audio tag (conventional to embed) |
+| Energy / loudness | librosa | features.json or sqlite |
+| Spectral centroid | librosa | features.json or sqlite |
+| Zero crossing rate | librosa | features.json or sqlite |
+| Danceability | librosa | features.json or sqlite |
+
+Run after 01_tag.py — needs ISRC in tags for cross-referencing.
+Embed in tags: BPM (done), Key. Store externally: everything else.
+
+---
+
+## Music Root — Full Folder Structure
+
+```
+audio/
+  ├── incoming/                    ← INCOMING_FOLDER
+  ├── 0new/                        ← STAGED_TRACKS_FOLDER (loose by genre)
+  ├── 0new_albums/                 ← STAGED_ALBUMS_FOLDER (albums by genre)
+  ├── rock/
+  │   ├── 0alt-rock/               ← subgenre bucket
+  │   │   └── Artist - Album (Year)/
+  │   │       ├── CD1/
+  │   │       └── CD2/
+  │   ├── 0compilations/
+  │   ├── 0various/
+  │   ├── AC-DC - Stiff Upper Lip (2000)/   ← flat album
+  │   ├── Black Sabbath/                    ← artist folder (≥3 albums)
+  │   │   ├── Black Sabbath - Paranoid (1970)/
+  │   │   └── 0singles/
+  │   └── Allman Brothers Band, The - Best Of (1973)/
+  ├── jazz/
+  ├── meditation/                  ← genre folder (not special)
+  ├── 0faves/                      ← tag only, never move
+  ├── 0faves_alltime/              ← tag only, never move
+  ├── 0random/                     ← tag only, genre subfolders
+  ├── 0random_good/                ← tag only, genre subfolders
+  ├── 0shacks/                     ← tag only, never move
+  ├── 0compilations/               ← tag only, never move
+  ├── 0various/                    ← tag only, never move
+  ├── 0mixes/                      ← tag only, never move
+  └── 0videos/                     ← skip entirely
+```
+
+---
+
+## Intake Flow
+
+```bash
+python3 01_tag.py --no-dry-run --folder incoming
+python3 02_rename.py --no-dry-run --folder incoming
+python3 04_move.py --intake --no-dry-run
+# review 0new_albums/, then:
+python3 04_move.py --promote --no-dry-run
+# review 0new/ loose tracks manually
+```
+
+Or: `python3 intake.py --no-dry-run`
+
+---
+
+## Filename Conventions
+
+### Input (parser handles all)
+```
+01 - Artist - Song Title.mp3
+Artist - 01 - Song Title.mp3
+Artist - Song Title.mp3
+08.Song Title.mp3
+04-Song Title.mp3
+01 Song Title.mp3
+```
+
+### Output target
+```
+01 - Artist Name - Song Title.mp3
+```
+
+### Folder target
+```
+Artist Name - Album Title (Year)/
+Artist Name/Artist Name - Album Title (Year)/
+```
+
+---
+
+## lib/parsers.py
+
+### Patterns
 ```python
 r"^(?P<track>\d{1,3})\s*-\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
 r"^(?P<artist>.+?)\s*-\s*(?P<track>\d{1,3})\s*-\s*(?P<title>.+)$"
 r"^(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
-r"^(?P<track>\d{1,3})\.(?P<title>.+)$"      ← dot-separated ripper
-r"^(?P<track>\d{1,3})\s+(?P<title>.+)$"     ← space-separated
+r"^(?P<track>\d{1,3})\.(?P<title>.+)$"
+r"^(?P<track>\d{1,3})\s+(?P<title>.+)$"
 ```
 
-### Ripper annotations — strip vs keep
-**Strip:** `[-]`, `[*]`, `[#]`, `[DM]`, `[DDR]`, `[NoFS]`, `[raw]`,
+### Ripper annotations
+Strip: `[-]`, `[*]`, `[#]`, `[DM]`, `[DDR]`, `[NoFS]`, `[raw]`,
 `[ChattChitto RG]`, `[www.anything.com]`, `[plixid.com]`, empty `[]`
 
-**Keep:** `[Live]`, `[Instrumental]`, `[Remix]`, `[Bonus Tracks]`, `[EP]`,
+Keep: `[Live]`, `[Instrumental]`, `[Remix]`, `[Bonus Tracks]`, `[EP]`,
 `[Disc 1]`, `[Disc 2]`, `[deluxe edition]`, `[clean]`, `[2007]`
 
-### _clean_track()
-`"1/12"` → `"1"`. Apply in parse_filename() and build_filename().
-
-### Capitalisation — never auto-apply
-Never use .title() or any auto-casing. Flag for manual review only.
-
-### Embedded year detection (03_folders.py)
-```python
-_EMBEDDED_YEAR = re.compile(r"[\(\[](\d{4})[\)\]]")
-```
-Handles both `(1960)` and `[1960]` in folder names.
+Never auto-capitalise. Preserve case exactly as in tags.
 
 ---
 
@@ -525,25 +606,9 @@ Handles both `(1960)` and `[1960]` in folder names.
 - Always fingerprint — never tag-based lookup
 - Score threshold: ACOUSTID_MIN_SCORE (0.8)
 - Rate limit: MB_RATE_LIMIT_SECONDS (1.1s)
-- Fill missing fields only — never overwrite without --overwrite
+- Fill missing or suspicious fields only — never overwrite without flag
 - set_useragent() reads from .env — never hardcoded
 - Degrade gracefully if pyacoustid not installed
-
----
-
-## Tag Fields Reference
-
-| Field | ID3 (MP3) | Vorbis (FLAC/OGG) | M4A | Notes |
-|-------|-----------|-------------------|-----|-------|
-| Title | TIT2 | title | ©nam | |
-| Artist | TPE1 | artist | ©ART | |
-| Album | TALB | album | ©alb | |
-| Year | TDRC | date | ©day | |
-| Genre | TCON | genre | ©gen | slash-separated |
-| BPM | TBPM | bpm | — | integer |
-| Track | TRCK | tracknumber | trkn | preserve x/total |
-
-No grouping tag — removed from pipeline entirely.
 
 ---
 
@@ -551,35 +616,36 @@ No grouping tag — removed from pipeline entirely.
 
 Three valid locations — leave where they are, tag correctly:
 - `0compilations/` — genre-spanning
-- `0various/` — various artists albums
+- `0various/` — various artists
 - Inside genre folder — single-genre compilations
-
-Do not auto-move. Flag ambiguous cases in review.json.
 
 ---
 
 ## Testing Protocol
 
-1. Copy small genre folder → `foldername_test/`
-2. Add `"foldername_test": "Genre"` to FOLDER_TO_GENRE in config.py
-3. Run `--dry-run`, review output
-4. Run `--no-dry-run`, verify in Strawberry
-5. Remove test folder and config entry, run on real folder
+1. Copy folder → `foldername_test/`
+2. Add `"foldername_test": "Genre"` to FOLDER_TO_GENRE temporarily
+3. `--dry-run`, review output
+4. `--no-dry-run`, verify in Strawberry
+5. Remove test folder and config entry
 
-Test folders without config entry always trigger MB — always add temporarily.
+Test folders not in config always trigger MB.
 
 ---
 
 ## Recommender Model (Future)
 
-| Tag | Signal |
+| Signal | Source |
 |---|---|
-| Genre (multi-value) | Primary categorical — never flatten |
-| BPM | Tempo similarity |
-| Year | Era similarity |
-| Artist | Collaborative filtering |
-| 0faves membership | Positive preference label |
-| 0faves_alltime membership | Strong positive preference label |
+| Genre (multi-value) | Tags — never flatten |
+| BPM | librosa tag |
+| Key | 06_analyze.py |
+| Year | Tags |
+| Artist | Tags — collaborative filtering |
+| AlbumArtist | Tags — compilation signal |
+| ISRC | Tags — deduplication anchor |
+| Energy, spectral | 06_analyze.py → feature store |
+| 0faves / 0faves_alltime | Positive preference labels |
 | 0random_good vs 0random | Implicit promotion signal |
 
 ---
@@ -587,27 +653,26 @@ Test folders without config entry always trigger MB — always add temporarily.
 ## Secrets and Security
 
 - API keys in .env only — python-dotenv
-- .env never committed
-- config.py never committed — contains local paths
+- .env and config.py never committed
 - config.example.py committed — fully depersonalised
-- No personal folder names or paths in any committed file
+- No personal paths or folder names in committed files
 
 ---
 
 ## Coding Conventions
 
 - pathlib.Path always — never os.path
-- --dry-run default, all writes gated — no exceptions
+- --dry-run default, all writes gated
 - Idempotent — safe to re-run
-- Never move/rename files in SPECIAL_FOLDERS
+- Never move/rename from SPECIAL_FOLDERS
 - Never process SKIP_FOLDERS
-- review.log + review.json for all failures and ambiguous cases
-- Log format: YYYY-MM-DD HH:MM:SS LEVEL message
-- Import order: stdlib → third-party → local (config, then lib/)
-- Graceful degradation for optional deps
-- .venv always — never system Python
-- GENRE_FOLDERS = set(FOLDER_TO_GENRE.keys()) — derived, never edited directly
-- librosa lazy import — never at module level
+- review.log + review.json for all failures
+- Log: YYYY-MM-DD HH:MM:SS LEVEL message
+- Import: stdlib → third-party → local (config, then lib/)
+- .venv always
+- GENRE_FOLDERS = set(FOLDER_TO_GENRE.keys()) — derived, never edited
+- librosa lazy import only
+- get_folder_context() called once per file, result passed through — never re-computed
 
 ---
 
@@ -616,10 +681,10 @@ Test folders without config entry always trigger MB — always add temporarily.
 - Use os.path — always pathlib.Path
 - Hardcode paths, folder names, genre lists outside config.py
 - Hardcode API keys — always .env
-- Overwrite existing tags without --overwrite flag
+- Overwrite existing tags without --overwrite or --fix-suspicious
 - Check only new_tags for fallback — must check existing too
 - Use existing.get(field) as fallback value in assignment
-- Move/rename files from SPECIAL_FOLDERS
+- Move/rename from SPECIAL_FOLDERS
 - Use tag-based MB lookup — always fingerprint
 - Flatten multi-genre to single genre
 - Put subgenre before parent in tag string
@@ -627,13 +692,22 @@ Test folders without config entry always trigger MB — always add temporarily.
 - Process 0videos/
 - Apply .title() or auto-capitalisation
 - Strip square brackets without checking keep/strip rules
-- Remove the needs_mb API gate from 01_tag.py
-- Add grouping tag logic — removed from pipeline
-- Edit GENRE_FOLDERS directly — derived from FOLDER_TO_GENRE
-- Rename genre root folders, SPECIAL_FOLDERS, subgenre buckets, disc subfolders
-- Omit --no-bpm or --no-mb flags from 01_tag.py
-- Import librosa at module level — must be lazy import
-- Apply N-threshold logic in 03_folders.py — belongs in 04_move.py only
-- Move loose files from artist_mixed to anywhere other than 0singles/
+- Remove the needs_mb gate
+- Add grouping tag logic
+- Edit GENRE_FOLDERS directly
+- Rename genre roots, SPECIAL_FOLDERS, subgenre buckets, disc subfolders
+- Omit --no-bpm, --no-mb, --fix-suspicious from 01_tag.py
+- Import librosa at module level — lazy import only
+- Apply N=3 logic in 03_folders.py — belongs in 04_move.py --restructure
+- Move loose files from artist_mixed anywhere other than 0singles/
 - Auto-decide artist_flat with mixed album tags — always flag for review
-- Delete artist folders without verifying they are empty first
+- Delete folders without verifying empty first
+- Move files directly to genre folders during --intake — always stage first
+- Bypass STAGED_ALBUMS_FOLDER — albums never go direct from intake to genre folders
+- Mix --intake, --restructure, --promote — mutually exclusive
+- Implement classify_folder() in 03_folders.py or 04_move.py — belongs in lib/context.py
+- Implement resolve_folder_genre() in 01_tag.py — belongs in lib/context.py
+- Re-compute folder context multiple times per file — call get_folder_context() once
+- Write albumartist tag for regular artist albums — compilation/soundtrack context only
+- Embed spectral/energy features in audio tags — store in features.json or sqlite
+- Implement 06_analyze.py logic inside 01_tag.py — keep analysis separate

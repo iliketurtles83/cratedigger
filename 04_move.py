@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
-"""04_move.py — Structural decisions: flatten/nest artist folders, route new files.
+"""04_move.py — Three modes: intake, restructure, promote.
 
-Routes files from ``0new/`` to the correct genre folder, and applies the N=3
-artist-folder threshold rule to restructure artist folders.
+Modes are mutually exclusive:
 
-Does NOT rename folders (that's ``03_folders.py``) or write tags (``01_tag.py``).
+- ``--intake``: route files from INCOMING_FOLDER into staging folders
+- ``--restructure``: apply artist-folder threshold rule to existing collection
+- ``--promote``: move staged albums from STAGED_ALBUMS_FOLDER to genre folders
 
 Usage:
-    python 04_move.py [--dry-run] [--folder NAME] [--log FILE]
+    python 04_move.py (--intake|--restructure|--promote)
+                      [--dry-run] [--folder NAME] [--log FILE]
 """
 
 import argparse
-import importlib
 import json
 import logging
 import shutil
 from pathlib import Path
 
 import config
+from lib.context import classify_folder
 from lib.genres import normalise_genre, parent_genre
 from lib.logger import setup_logger
 from lib.tags import read_tags
-
-_folders_mod = importlib.import_module("03_folders")
-classify_folder = _folders_mod.classify_folder
 
 log: logging.Logger = None  # type: ignore[assignment]
 
@@ -49,6 +48,192 @@ def resolve_target_folder(genre_tag: str) -> Path | None:
         return None
 
     return config.MUSIC_ROOT / folder_name
+
+
+def _first_audio_file(folder: Path) -> Path | None:
+    for path in sorted(folder.rglob("*")):
+        if path.is_file() and path.suffix.lower() in config.AUDIO_EXTENSIONS:
+            return path
+    return None
+
+
+def _write_review_items(all_review: list[dict], *, dry_run: bool) -> None:
+    if not all_review:
+        return
+
+    review_path = Path("review.json")
+    existing: list[dict] = []
+    if review_path.exists():
+        try:
+            existing = json.loads(review_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    if not dry_run:
+        seen = {(e["path"], e["reason"]) for e in existing}
+        for item in all_review:
+            key = (item["path"], item["reason"])
+            if key not in seen:
+                existing.append(item)
+                seen.add(key)
+        review_path.write_text(
+            json.dumps(existing, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    log.info("Flagged %d items for review", len(all_review))
+
+
+def _map_folder_name_from_genre(genre_tag: str) -> str | None:
+    target_dir = resolve_target_folder(genre_tag)
+    if target_dir is None:
+        return None
+    return target_dir.name
+
+
+def _move_path(src: Path, dest: Path, *, dry_run: bool) -> None:
+    if dry_run:
+        log.info("[DRY-RUN] Would move: %s → %s", src, dest)
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+    log.info("Moved: %s → %s", src, dest)
+
+
+def _remove_if_empty(folder: Path, *, dry_run: bool) -> None:
+    if dry_run:
+        return
+    try:
+        if folder.is_dir() and not any(folder.iterdir()):
+            folder.rmdir()
+            log.info("Removed empty directory: %s", folder)
+    except OSError:
+        pass
+
+
+def _route_loose_file_from_intake(
+    path: Path,
+    *,
+    dry_run: bool,
+    review_items: list[dict],
+) -> None:
+    tags = read_tags(path)
+    if tags is None:
+        log.warning("Skipping unreadable file: %s", path)
+        review_items.append({"path": str(path), "reason": "unreadable"})
+        return
+
+    genre_tag = tags.get("genre")
+    if not genre_tag:
+        log.warning("No genre tag for %s — flagging for review", path.name)
+        review_items.append({"path": str(path), "reason": "no_genre"})
+        return
+
+    folder_name = _map_folder_name_from_genre(genre_tag)
+    if folder_name is None:
+        log.warning("No folder mapping for genre '%s' (%s) — flagging",
+                    genre_tag, path.name)
+        review_items.append({
+            "path": str(path),
+            "reason": "no_folder_mapping",
+            "genre": genre_tag,
+        })
+        return
+
+    dest = config.STAGED_TRACKS_FOLDER / folder_name / path.name
+    if dest.exists():
+        log.warning("Target exists, skipping: %s → %s", path, dest)
+        review_items.append({
+            "path": str(path),
+            "reason": "move_conflict",
+            "target": str(dest),
+        })
+        return
+
+    _move_path(path, dest, dry_run=dry_run)
+
+
+def _route_album_folder_from_intake(
+    album_folder: Path,
+    *,
+    dry_run: bool,
+    review_items: list[dict],
+) -> None:
+    sample = _first_audio_file(album_folder)
+    if sample is None:
+        log.warning("No audio files in intake album folder: %s", album_folder)
+        review_items.append({
+            "path": str(album_folder),
+            "reason": "unknown_pattern",
+        })
+        return
+
+    tags = read_tags(sample)
+    if tags is None:
+        log.warning("Skipping unreadable album folder: %s", album_folder)
+        review_items.append({"path": str(album_folder), "reason": "unreadable"})
+        return
+
+    genre_tag = tags.get("genre")
+    if not genre_tag:
+        log.warning("No genre tag for album folder %s — flagging", album_folder)
+        review_items.append({"path": str(album_folder), "reason": "no_genre"})
+        return
+
+    folder_name = _map_folder_name_from_genre(genre_tag)
+    if folder_name is None:
+        log.warning("No folder mapping for genre '%s' (%s) — flagging",
+                    genre_tag, album_folder.name)
+        review_items.append({
+            "path": str(album_folder),
+            "reason": "no_folder_mapping",
+            "genre": genre_tag,
+        })
+        return
+
+    dest = config.STAGED_ALBUMS_FOLDER / folder_name / album_folder.name
+    if dest.exists():
+        log.warning("Target exists, skipping: %s → %s", album_folder, dest)
+        review_items.append({
+            "path": str(album_folder),
+            "reason": "move_conflict",
+            "target": str(dest),
+        })
+        return
+
+    _move_path(album_folder, dest, dry_run=dry_run)
+
+
+def run_intake_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
+    """Route incoming loose files/albums into staging folders."""
+    review_items: list[dict] = []
+
+    if not config.INCOMING_FOLDER.exists():
+        log.warning("INCOMING_FOLDER does not exist: %s", config.INCOMING_FOLDER)
+        review_items.append({
+            "path": str(config.INCOMING_FOLDER),
+            "reason": "missing_folder",
+        })
+        return review_items
+
+    if folder:
+        candidates = [config.INCOMING_FOLDER / folder]
+    else:
+        candidates = sorted(config.INCOMING_FOLDER.iterdir())
+
+    for item in candidates:
+        if not item.exists():
+            continue
+        if item.is_dir():
+            log.info("Intake album folder: %s", item)
+            _route_album_folder_from_intake(item, dry_run=dry_run,
+                                            review_items=review_items)
+        elif item.is_file() and item.suffix.lower() in config.AUDIO_EXTENSIONS:
+            log.info("Intake loose file: %s", item)
+            _route_loose_file_from_intake(item, dry_run=dry_run,
+                                          review_items=review_items)
+
+    return review_items
 
 
 def move_file(
@@ -252,12 +437,96 @@ def walk_artist_folders(genre_dir: Path, **kwargs) -> list[dict]:
     return review_items
 
 
+def run_restructure_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
+    """Apply N-threshold artist-folder restructuring to collection folders."""
+    if folder:
+        folders = [config.MUSIC_ROOT / folder]
+    else:
+        skip = config.SPECIAL_FOLDERS | config.SKIP_FOLDERS
+        folders = sorted(
+            p for p in config.MUSIC_ROOT.iterdir()
+            if p.is_dir() and p.name.lower() not in skip
+        )
+
+    all_review: list[dict] = []
+    for genre_dir in folders:
+        log.info("Restructure folder: %s", genre_dir.name)
+        items = walk_artist_folders(genre_dir, dry_run=dry_run)
+        all_review.extend(items)
+
+    return all_review
+
+
+def run_promote_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
+    """Move staged albums from STAGED_ALBUMS_FOLDER into genre folders."""
+    review_items: list[dict] = []
+
+    if not config.STAGED_ALBUMS_FOLDER.exists():
+        log.warning("STAGED_ALBUMS_FOLDER does not exist: %s",
+                    config.STAGED_ALBUMS_FOLDER)
+        review_items.append({
+            "path": str(config.STAGED_ALBUMS_FOLDER),
+            "reason": "missing_folder",
+        })
+        return review_items
+
+    if folder:
+        staged_genre_dirs = [config.STAGED_ALBUMS_FOLDER / folder]
+    else:
+        staged_genre_dirs = sorted(
+            p for p in config.STAGED_ALBUMS_FOLDER.iterdir() if p.is_dir()
+        )
+
+    for staged_genre_dir in staged_genre_dirs:
+        if not staged_genre_dir.exists() or not staged_genre_dir.is_dir():
+            continue
+
+        folder_name = staged_genre_dir.name
+        if folder_name not in config.FOLDER_TO_GENRE:
+            log.warning("Unknown staged genre folder: %s — flagging",
+                        staged_genre_dir)
+            review_items.append({
+                "path": str(staged_genre_dir),
+                "reason": "no_folder_mapping",
+                "genre": folder_name,
+            })
+            continue
+
+        target_genre_dir = config.MUSIC_ROOT / folder_name
+
+        for album_folder in sorted(staged_genre_dir.iterdir()):
+            if not album_folder.is_dir():
+                continue
+
+            dest = target_genre_dir / album_folder.name
+            if dest.exists():
+                log.warning("Target exists, skipping: %s → %s", album_folder, dest)
+                review_items.append({
+                    "path": str(album_folder),
+                    "reason": "move_conflict",
+                    "target": str(dest),
+                })
+                continue
+
+            _move_path(album_folder, dest, dry_run=dry_run)
+
+        _remove_if_empty(staged_genre_dir, dry_run=dry_run)
+
+    return review_items
+
+
 def main() -> None:
     global log
 
     parser = argparse.ArgumentParser(
-        description="Structural decisions: flatten/nest artist folders, "
-                    "route new files.")
+        description="04_move modes: intake, restructure, promote")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--intake", action="store_true",
+                      help="Route INCOMING_FOLDER files to staging folders")
+    mode.add_argument("--restructure", action="store_true",
+                      help="Apply artist folder threshold restructure")
+    mode.add_argument("--promote", action="store_true",
+                      help="Promote staged albums to main genre folders")
     parser.add_argument("--dry-run", action="store_true", default=True,
                         help="Show changes without writing (default: True)")
     parser.add_argument("--no-dry-run", action="store_true",
@@ -271,41 +540,14 @@ def main() -> None:
     dry_run = not args.no_dry_run
     log = setup_logger("04_move", Path(args.log))
 
-    if args.folder:
-        folders = [config.MUSIC_ROOT / args.folder]
+    if args.intake:
+        all_review = run_intake_mode(dry_run=dry_run, folder=args.folder)
+    elif args.restructure:
+        all_review = run_restructure_mode(dry_run=dry_run, folder=args.folder)
     else:
-        # Never move files from SPECIAL_FOLDERS or SKIP_FOLDERS
-        skip = config.SPECIAL_FOLDERS | config.SKIP_FOLDERS
-        folders = sorted(
-            p for p in config.MUSIC_ROOT.iterdir()
-            if p.is_dir() and p.name.lower() not in skip
-        )
+        all_review = run_promote_mode(dry_run=dry_run, folder=args.folder)
 
-    all_review: list[dict] = []
-    for folder in folders:
-        log.info("=== Folder: %s ===", folder.name)
-        items = walk_folder(folder, dry_run=dry_run)
-        all_review.extend(items)
-        # Also apply N=3 threshold logic for artist_flat folders
-        items = walk_artist_folders(folder, dry_run=dry_run)
-        all_review.extend(items)
-
-    if all_review:
-        review_path = Path("review.json")
-        existing: list[dict] = []
-        if review_path.exists():
-            try:
-                existing = json.loads(review_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        if not dry_run:
-            existing.extend(all_review)
-            review_path.write_text(
-                json.dumps(existing, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        log.info("Flagged %d files for review", len(all_review))
+    _write_review_items(all_review, dry_run=dry_run)
 
     log.info("Done (%s)", "DRY-RUN" if dry_run else "LIVE")
 

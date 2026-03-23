@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""04_review.py — Interactively resolve files flagged in review.json.
+"""05_review.py — Interactively resolve files flagged in review.json.
 
 Reads review.json and presents each flagged item for manual resolution.
 
 Usage:
-    python 04_review.py [--dry-run] [--log FILE]
+    python 05_review.py [--dry-run] [--log FILE]
 """
 
 import argparse
@@ -130,12 +130,50 @@ def handle_generic(item: dict, *, dry_run: bool) -> bool:
     return choice == "d"
 
 
+def handle_artist_flat_proposal(item: dict, *, dry_run: bool) -> bool:
+    """Handle an artist_flat rename proposal. Returns True if resolved."""
+    path = Path(item["path"])
+    target = item.get("target", "?")
+    print(f"\n--- artist_flat rename proposal: {path} ---")
+    print(f"  Proposed: {target}")
+    print()
+    print("  Options:")
+    print("    [a] Apply rename")
+    print("    [s] Skip (keep in review)")
+    print("    [d] Dismiss (remove from review)")
+
+    choice = input("  Choice: ").strip().lower()
+
+    if choice == "a":
+        target_path = Path(target)
+        if target_path.exists():
+            log.warning("Target already exists: %s", target_path)
+            return False
+        if dry_run:
+            log.info("[DRY-RUN] Would rename %s → %s", path, target_path)
+        else:
+            if path.exists():
+                path.rename(target_path)
+                log.info("Renamed: %s → %s", path, target_path)
+        return True
+    elif choice == "d":
+        return True
+
+    return False
+
+
 HANDLERS = {
     "no_genre": handle_no_genre,
     "no_title": handle_generic,
     "rename_conflict": handle_rename_conflict,
     "move_conflict": handle_generic,
     "no_folder_mapping": handle_no_genre,
+    "mixed_tags": handle_generic,
+    "incomplete_metadata": handle_generic,
+    "artist_flat_mixed": handle_generic,
+    "artist_flat_incomplete": handle_generic,
+    "artist_flat_rename_proposal": handle_artist_flat_proposal,
+    "artist_flat_rename_conflict": handle_rename_conflict,
 }
 
 
@@ -152,7 +190,7 @@ def main() -> None:
     args = parser.parse_args()
 
     dry_run = not args.no_dry_run
-    log = setup_logger("04_review", Path(args.log))
+    log = setup_logger("05_review", Path(args.log))
 
     items = load_review()
     if not items:

@@ -89,6 +89,23 @@ def normalise_genre(genre: str) -> str:
     return GENRE_NORMALISE.get(key, genre.strip())
 
 
+def is_meaningful_genre(genre: str | None) -> bool:
+    """Return True when *genre* is non-empty and not blacklisted."""
+    if not genre:
+        return False
+    normed = normalise_genre(genre)
+    return bool(normed) and normed.lower() not in GENRE_BLACKLIST
+
+
+def has_meaningful_genres(genre_value: str | None) -> bool:
+    """Return True when a slash-separated genre tag contains any valid genre."""
+    return any(
+        is_meaningful_genre(part.strip())
+        for part in (genre_value or "").split("/")
+        if part.strip()
+    )
+
+
 def parent_genre(genre: str) -> str | None:
     """Return the root parent for *genre*, or ``None`` if already root / unknown."""
     return CHILD_TO_PARENT.get(genre.strip().lower())
@@ -107,7 +124,7 @@ def merge_genres(folder_genre: str | None, mb_genres: list[str]) -> str:
 
     def _add(g: str) -> None:
         normed = normalise_genre(g)
-        if normed.lower() in GENRE_BLACKLIST:
+        if not is_meaningful_genre(normed):
             return
         key = normed.lower()
         if key not in seen:

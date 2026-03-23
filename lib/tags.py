@@ -3,10 +3,7 @@
 from pathlib import Path
 
 from mutagen import File as MutagenFile
-from mutagen.id3 import ID3, TBPM, TCON, TDRC, TIT2, TALB, TPE1, TRCK
-from mutagen.flac import FLAC
-from mutagen.oggvorbis import OggVorbis
-from mutagen.mp4 import MP4
+from mutagen.id3 import ID3, TBPM, TCON, TDRC, TIT2, TALB, TPE1, TPE2, TRCK, TSRC
 
 
 # ---------------------------------------------------------------------------
@@ -15,31 +12,37 @@ from mutagen.mp4 import MP4
 _ID3_MAP = {
     "title":    "TIT2",
     "artist":   "TPE1",
+    "albumartist": "TPE2",
     "album":    "TALB",
     "year":     "TDRC",
     "genre":    "TCON",
     "bpm":      "TBPM",
     "track":    "TRCK",
+    "isrc":     "TSRC",
 }
 
 _VORBIS_MAP = {
     "title":    "title",
     "artist":   "artist",
+    "albumartist": "albumartist",
     "album":    "album",
     "year":     "date",
     "genre":    "genre",
     "bpm":      "bpm",
     "track":    "tracknumber",
+    "isrc":     "isrc",
 }
 
 _M4A_MAP = {
     "title":    "\xa9nam",
     "artist":   "\xa9ART",
+    "albumartist": "aART",
     "album":    "\xa9alb",
     "year":     "\xa9day",
     "genre":    "\xa9gen",
     "track":    "trkn",
     # BPM not supported in M4A
+    # ISRC not supported in M4A
 }
 
 
@@ -47,7 +50,7 @@ _M4A_MAP = {
 # Read helpers
 # ---------------------------------------------------------------------------
 
-def _first(val) -> str | None:
+def _first(val: object) -> str | None:
     """Extract the first string value from a mutagen tag value."""
     if val is None:
         return None
@@ -60,12 +63,13 @@ def read_tags(path: Path) -> dict[str, str | None] | None:
     """Read standard tag fields from *path*, returning a dict.
 
     Returns ``None`` and logs a warning if the file cannot be read.
-    Keys when successful: title, artist, album, year, genre, bpm, track.
+    Keys when successful: title, artist, albumartist, album, year,
+    genre, bpm, track, isrc.
     Values are ``None`` when absent.
     """
     result: dict[str, str | None] = {
-        k: None for k in ("title", "artist", "album", "year",
-                          "genre", "bpm", "track")
+        k: None for k in ("title", "artist", "albumartist", "album", "year",
+                          "genre", "bpm", "track", "isrc")
     }
 
     try:
@@ -131,9 +135,9 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
     if suffix == ".mp3":
         id3 = _ensure_id3(audio)
         frame_classes = {
-            "title": TIT2, "artist": TPE1, "album": TALB,
+            "title": TIT2, "artist": TPE1, "albumartist": TPE2, "album": TALB,
             "year": TDRC, "genre": TCON, "bpm": TBPM,
-            "track": TRCK,
+            "track": TRCK, "isrc": TSRC,
         }
         for field, val in tags.items():
             if val is None or field not in frame_classes:

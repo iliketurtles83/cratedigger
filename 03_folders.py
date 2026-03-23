@@ -22,13 +22,13 @@ import shutil
 from pathlib import Path
 
 import config
+from lib.context import classify_folder, get_folder_context, is_disc_subfolder
 from lib.logger import setup_logger
 from lib.parsers import parse_folder_name
 from lib.tags import read_tags
 
 log: logging.Logger = None  # type: ignore[assignment]
 
-_DISC_PATTERN = re.compile(r"^(cd|disc|disk)\s*\d+$", re.IGNORECASE)
 
 # Album folder without year — requires space-dash-space to avoid splitting
 # artist names with hyphens (e.g. AC-DC)
@@ -36,46 +36,6 @@ _FOLDER_NO_YEAR = re.compile(r"^(?P<artist>.+?)\s+-\s+(?P<album>.+)$")
 
 # Year in parentheses embedded in album text
 _EMBEDDED_YEAR = re.compile(r"[\(\[](\d{4})[\)\]]")
-
-
-def _is_disc_subfolder(name: str) -> bool:
-    return bool(_DISC_PATTERN.match(name))
-
-
-def classify_folder(folder: Path) -> str:
-    """Classify a folder inside a genre directory.
-
-    Returns one of: ``album``, ``artist``, ``artist_mixed``, ``artist_flat``,
-    ``subgenre``, ``local_special``, ``disc``, ``unknown``.
-    """
-    name = folder.name
-    has_audio = any(
-        f.suffix.lower() in config.AUDIO_EXTENSIONS
-        for f in folder.iterdir()
-        if f.is_file()
-    )
-    has_album_subdirs = any(
-        d.is_dir() and classify_folder(d) in ("album", "artist", "artist_flat")
-        for d in folder.iterdir()
-    )
-    starts_with_0 = name.startswith("0")
-    has_separator = " - " in name
-
-    if _is_disc_subfolder(name):
-        return "disc"
-    if starts_with_0 and name in config.SUBGENRE_BUCKETS:
-        return "subgenre"
-    if starts_with_0:
-        return "local_special"
-    if has_separator:
-        return "album"
-    if has_album_subdirs and not has_audio:
-        return "artist"
-    if has_album_subdirs and has_audio:
-        return "artist_mixed"
-    if not has_album_subdirs and has_audio:
-        return "artist_flat"
-    return "unknown"
 
 
 def _fix_the(name: str) -> str:
@@ -87,18 +47,52 @@ def _fix_the(name: str) -> str:
     return name
 
 
-def _year_from_tags(folder: Path) -> str | None:
-    """Read year from the first audio file found in *folder*."""
+def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
+    """Collect consistent artist/album/year values from tags in *folder*.
+
+    Returns:
+      {
+        "values": {"artist": str|None, "album": str|None, "year": str|None},
+        "mixed_fields": [field, ...],
+      }
+    """
+    field_values: dict[str, set[str]] = {
+        "artist": set(),
+        "album": set(),
+        "year": set(),
+    }
+
     for f in sorted(folder.rglob("*")):
-        if f.suffix.lower() in config.AUDIO_EXTENSIONS and f.is_file():
-            tags = read_tags(f)
-            if tags is None:
-                continue
-            year = tags.get("year", "") or ""
-            year = year[:4]
-            if re.match(r"^\d{4}$", year):
-                return year
-    return None
+        if not f.is_file() or f.suffix.lower() not in config.AUDIO_EXTENSIONS:
+            continue
+        tags = read_tags(f)
+        if tags is None:
+            continue
+
+        artist = (tags.get("artist") or "").strip()
+        album = (tags.get("album") or "").strip()
+        year = (tags.get("year") or "").strip()[:4]
+
+        if artist:
+            field_values["artist"].add(artist)
+        if album:
+            field_values["album"].add(album)
+        if re.match(r"^\d{4}$", year):
+            field_values["year"].add(year)
+
+    mixed_fields = sorted(
+        field for field, values in field_values.items() if len(values) > 1
+    )
+    # next(iter(s)) is deterministic here: guarded by len == 1.
+    values = {
+        field: next(iter(entries)) if len(entries) == 1 else None
+        for field, entries in field_values.items()
+    }
+
+    return {
+        "values": values,
+        "mixed_fields": mixed_fields,
+    }
 
 
 def _parse_album_name(name: str) -> dict[str, str | None] | None:
@@ -133,6 +127,13 @@ def _build_folder_name(artist: str, album: str, year: str | None) -> str:
     return f"{artist} - {album}"
 
 
+def _build_compilation_folder_name(album: str, year: str | None) -> str:
+    """Build folder name for soundtracks/compilations: Album (Year)."""
+    if year:
+        return f"{album} ({year})"
+    return album
+
+
 def _normalise_folder(
     folder: Path,
     *,
@@ -141,26 +142,64 @@ def _normalise_folder(
 ) -> None:
     """Normalise a single album folder name."""
     name = folder.name
-    parsed = _parse_album_name(name)
+    ctx = get_folder_context(folder)
+    is_comp = ctx.is_compilation or ctx.is_soundtrack
 
-    if parsed is None:
-        log.warning("Unknown folder pattern: %s — flagging for review", folder)
-        review_items.append({"path": str(folder), "reason": "unknown_pattern"})
+    parsed = _parse_album_name(name) or {
+        "artist": None,
+        "album": None,
+        "year": None,
+    }
+    tag_summary = _collect_consistent_tag_fields(folder)
+    mixed_fields = tag_summary["mixed_fields"]
+
+    # Compilations/soundtracks expect mixed artists — only flag other fields
+    effective_mixed = (
+        [f for f in mixed_fields if f != "artist"] if is_comp else mixed_fields
+    )
+
+    if effective_mixed:
+        log.warning("Mixed tag fields for %s: %s — flagging for review",
+                    folder, ", ".join(effective_mixed))
+        review_items.append({
+            "path": str(folder),
+            "reason": "mixed_tags",
+            "fields": effective_mixed,
+        })
         return
 
-    artist = _fix_the(parsed["artist"])
-    album = parsed["album"]
-    year = parsed["year"]
+    tag_values = tag_summary["values"]
+    album = (tag_values["album"] or parsed["album"] or "").strip()
+    year = tag_values["year"] or parsed["year"]
 
-    # If no year in folder name, try to get from file tags
-    if not year:
-        year = _year_from_tags(folder)
-        if not year:
-            log.warning("Cannot determine year for %s — flagging for review", folder)
-            review_items.append({"path": str(folder), "reason": "no_year"})
-            # Still proceed — The-suffix fix may apply even without year
+    if is_comp:
+        missing_fields = [
+            field
+            for field, value in (("album", album), ("year", year))
+            if not value
+        ]
+    else:
+        artist = _fix_the((tag_values["artist"] or parsed["artist"] or "").strip())
+        missing_fields = [
+            field
+            for field, value in (("artist", artist), ("album", album), ("year", year))
+            if not value
+        ]
 
-    new_name = _build_folder_name(artist, album, year)
+    if missing_fields:
+        log.warning("Incomplete metadata for %s (missing: %s) — flagging for review",
+                    folder, ", ".join(missing_fields))
+        review_items.append({
+            "path": str(folder),
+            "reason": "incomplete_metadata",
+            "missing": missing_fields,
+        })
+        return
+
+    if is_comp:
+        new_name = _build_compilation_folder_name(album, year)
+    else:
+        new_name = _build_folder_name(artist, album, year)
 
     if new_name == name:
         log.debug("Already canonical: %s", name)
@@ -194,22 +233,25 @@ def _normalise_album_child(
     """Normalise an album-only subfolder inside an artist folder.
 
     Prepends the artist name from the parent folder to build canonical format.
+    For compilation/soundtrack context, uses Album (Year) format instead.
     """
+    ctx = get_folder_context(folder)
+    is_comp = ctx.is_compilation or ctx.is_soundtrack
     album = folder.name
 
     # If the child name already starts with the artist name, it's probably
     # a malformed "Artist Album" folder missing the separator — flag it.
-    if album.strip().lower().startswith(artist.strip().lower()):
+    if not is_comp and album.strip().lower().startswith(artist.strip().lower()):
         log.warning("Folder may contain embedded artist name: %s "
                      "— flagging for review", folder)
         review_items.append({"path": str(folder), "reason": "unknown_pattern"})
         return
 
-    # Extract embedded (YYYY) from album name to avoid duplication
+    # Existing folder-name fallback values
     year_m = _EMBEDDED_YEAR.search(album)
-    year = None
+    fallback_year = None
     if year_m:
-        year = year_m.group(1)
+        fallback_year = year_m.group(1)
         before = album[:year_m.start()].rstrip()
         after = album[year_m.end():].lstrip()
         if before and after:
@@ -217,14 +259,63 @@ def _normalise_album_child(
         else:
             album = (before or after).strip()
 
-    if not year:
-        year = _year_from_tags(folder)
+    tag_summary = _collect_consistent_tag_fields(folder)
+    mixed_fields = tag_summary["mixed_fields"]
 
-    if not year:
-        log.warning("Cannot determine year for %s — flagging for review", folder)
-        review_items.append({"path": str(folder), "reason": "no_year"})
+    # Compilations/soundtracks expect mixed artists — only flag other fields
+    effective_mixed = (
+        [f for f in mixed_fields if f != "artist"] if is_comp else mixed_fields
+    )
 
-    new_name = _build_folder_name(artist, album, year)
+    if effective_mixed:
+        log.warning("Mixed tag fields for %s: %s — flagging for review",
+                    folder, ", ".join(effective_mixed))
+        review_items.append({
+            "path": str(folder),
+            "reason": "mixed_tags",
+            "fields": effective_mixed,
+        })
+        return
+
+    tag_values = tag_summary["values"]
+    effective_album = (tag_values["album"] or album or "").strip()
+    effective_year = tag_values["year"] or fallback_year
+
+    if is_comp:
+        missing_fields = [
+            field
+            for field, value in (
+                ("album", effective_album),
+                ("year", effective_year),
+            )
+            if not value
+        ]
+    else:
+        effective_artist = _fix_the((tag_values["artist"] or artist or "").strip())
+        missing_fields = [
+            field
+            for field, value in (
+                ("artist", effective_artist),
+                ("album", effective_album),
+                ("year", effective_year),
+            )
+            if not value
+        ]
+
+    if missing_fields:
+        log.warning("Incomplete metadata for %s (missing: %s) — flagging for review",
+                    folder, ", ".join(missing_fields))
+        review_items.append({
+            "path": str(folder),
+            "reason": "incomplete_metadata",
+            "missing": missing_fields,
+        })
+        return
+
+    if is_comp:
+        new_name = _build_compilation_folder_name(effective_album, effective_year)
+    else:
+        new_name = _build_folder_name(effective_artist, effective_album, effective_year)
 
     if new_name == folder.name:
         log.debug("Already canonical: %s", folder.name)
@@ -281,26 +372,89 @@ def _move_loose_to_singles(
 def _handle_artist_flat(
     folder: Path,
     *,
+    dry_run: bool = True,
     review_items: list[dict],
 ) -> None:
-    """Flag artist_flat folders with mixed album tags for review."""
-    albums = set()
-    for f in sorted(folder.rglob("*")):
-        if f.is_file() and f.suffix.lower() in config.AUDIO_EXTENSIONS:
-            tags = read_tags(f)
-            if tags is None:
-                continue
-            album = tags.get("album") or ""
-            if album:
-                albums.add(album)
-    if len(albums) > 1:
-        log.warning("artist_flat with mixed album tags: %s — flagging for "
-                     "review", folder)
+    """Propose canonical rename for artist_flat folders from tags only."""
+    ctx = get_folder_context(folder)
+    is_comp = ctx.is_compilation or ctx.is_soundtrack
+
+    tag_summary = _collect_consistent_tag_fields(folder)
+    mixed_fields = tag_summary["mixed_fields"]
+
+    # Compilations/soundtracks expect mixed artists — only flag other fields
+    effective_mixed = (
+        [f for f in mixed_fields if f != "artist"] if is_comp else mixed_fields
+    )
+
+    if effective_mixed:
+        log.warning("artist_flat with mixed tag fields: %s (%s) — flagging for "
+                    "review", folder, ", ".join(effective_mixed))
         review_items.append({
             "path": str(folder),
             "reason": "artist_flat_mixed",
-            "albums": sorted(albums),
+            "fields": effective_mixed,
         })
+        return
+
+    tag_values = tag_summary["values"]
+    album = (tag_values["album"] or "").strip()
+    year = tag_values["year"]
+
+    if is_comp:
+        missing_fields = [
+            field
+            for field, value in (("album", album), ("year", year))
+            if not value
+        ]
+    else:
+        artist = _fix_the((tag_values["artist"] or "").strip())
+        missing_fields = [
+            field
+            for field, value in (("artist", artist), ("album", album), ("year", year))
+            if not value
+        ]
+
+    if missing_fields:
+        log.warning("artist_flat has incomplete tags: %s (missing: %s) — "
+                    "flagging for review", folder, ", ".join(missing_fields))
+        review_items.append({
+            "path": str(folder),
+            "reason": "artist_flat_incomplete",
+            "missing": missing_fields,
+        })
+        return
+
+    if is_comp:
+        proposed_name = _build_compilation_folder_name(album, year)
+    else:
+        proposed_name = _build_folder_name(artist, album, year)
+    proposed_path = folder.parent / proposed_name
+
+    if proposed_name == folder.name:
+        log.debug("artist_flat already canonical: %s", folder)
+        return
+
+    if proposed_path.exists():
+        log.warning("artist_flat rename conflict: %s → %s", folder.name,
+                    proposed_name)
+        review_items.append({
+            "path": str(folder),
+            "reason": "artist_flat_rename_conflict",
+            "target": str(proposed_path),
+        })
+        return
+
+    if dry_run:
+        log.info("[DRY-RUN] Would rename: %s → %s", folder.name, proposed_name)
+        review_items.append({
+            "path": str(folder),
+            "reason": "artist_flat_rename_proposal",
+            "target": str(proposed_path),
+        })
+    else:
+        folder.rename(proposed_path)
+        log.info("Renamed: %s → %s", folder.name, proposed_name)
 
 
 def _normalise_artist_folder(
@@ -336,7 +490,7 @@ def _normalise_artist_folder(
     for child in sorted(current.iterdir()):
         if not child.is_dir():
             continue
-        if _is_disc_subfolder(child.name):
+        if is_disc_subfolder(child.name):
             continue
         if child.name.startswith("0"):
             continue
@@ -393,7 +547,8 @@ def _process_level2(
                                      review_items=review_items)
 
         elif kind == "artist_flat":
-            _handle_artist_flat(child, review_items=review_items)
+            _handle_artist_flat(child, dry_run=dry_run,
+                                review_items=review_items)
 
         else:  # unknown
             log.warning("Unknown folder pattern: %s — flagging for review",
@@ -454,7 +609,12 @@ def main() -> None:
                 pass
 
         if not dry_run:
-            existing.extend(all_review)
+            seen = {(e["path"], e["reason"]) for e in existing}
+            for item in all_review:
+                key = (item["path"], item["reason"])
+                if key not in seen:
+                    existing.append(item)
+                    seen.add(key)
             review_path.write_text(
                 json.dumps(existing, indent=2, ensure_ascii=False),
                 encoding="utf-8",
