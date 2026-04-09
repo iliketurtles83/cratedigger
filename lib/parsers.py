@@ -5,7 +5,24 @@ from pathlib import Path
 
 
 # Patterns ordered from most specific to least specific.
+# Disc-track patterns come first to avoid misparsing "1-01" as track=1.
 _PATTERNS = [
+    # 1-01 - Artist Name - Song Title.ext  (disc-track with artist)
+    re.compile(
+        r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s*-\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
+    ),
+    # Artist Name - 1-01 - Song Title.ext  (artist then disc-track)
+    re.compile(
+        r"^(?P<artist>.+?)\s*-\s*(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s*-\s*(?P<title>.+)$"
+    ),
+    # 1-01-Song Title.ext  (disc-track, no artist, ripper format)
+    re.compile(
+        r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})-(?P<title>.+)$"
+    ),
+    # 1-01 Song Title.ext  (disc-track, no artist, space-separated)
+    re.compile(
+        r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s+(?P<title>.+)$"
+    ),
     # 01 - Artist Name - Song Title.ext
     re.compile(
         r"^(?P<track>\d{1,3})\s*-\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
@@ -17,6 +34,10 @@ _PATTERNS = [
     # 04-Song Title.ext  (dash without spaces, ripper format)
     re.compile(
         r"^(?P<track>\d{1,3})-(?P<title>.+)$"
+    ),
+    # 13. Artist Name - Song Title.ext  (dot-prefixed track with artist)
+    re.compile(
+        r"^(?P<track>\d{1,3})\.\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
     ),
     # Artist Name - Song Title.ext
     re.compile(
@@ -74,8 +95,16 @@ def _clean_track(track: str | None) -> str | None:
     return track.split("/")[0].strip().lstrip("0") or "0"
 
 
+def _clean_disc(disc: str | None) -> str | None:
+    """Normalise disc number — strip total (e.g. '1/2' → '1')."""
+    if not disc:
+        return None
+    num = disc.split("/")[0].strip().lstrip("0")
+    return num or None
+
+
 def parse_filename(path: Path) -> dict[str, str | None]:
-    """Parse an audio filename into ``{artist, title, track}`` (any may be None)."""
+    """Parse an audio filename into ``{artist, title, track, disc}`` (any may be None)."""
     stem = path.stem
     for pat in _PATTERNS:
         m = pat.match(stem)
@@ -85,9 +114,10 @@ def parse_filename(path: Path) -> dict[str, str | None]:
                 "artist": groups.get("artist", "").strip() or None,
                 "title":  groups.get("title",  "").strip() or None,
                 "track":  _clean_track(groups.get("track")),
+                "disc":   groups.get("disc", "").strip() or None,
             }
     # Fallback — treat the whole stem as title
-    return {"artist": None, "title": stem.strip() or None, "track": None}
+    return {"artist": None, "title": stem.strip() or None, "track": None, "disc": None}
 
 
 def parse_folder_name(name: str) -> dict[str, str | None]:
@@ -107,8 +137,12 @@ def build_filename(
     artist: str | None,
     title: str | None,
     ext: str = ".mp3",
+    disc: str | None = None,
 ) -> str:
-    """Build the canonical filename: ``01 - Artist Name - Song Title.ext``.
+    """Build the canonical filename.
+
+    Single-disc:  ``01 - Artist Name - Song Title.ext``
+    Multi-disc:   ``1-01 - Artist Name - Song Title.ext``
 
     Falls back gracefully when fields are missing.
     Sanitises illegal filename characters from all fields.
@@ -118,7 +152,11 @@ def build_filename(
     if track is not None:
         clean_track = _clean_track(track)
         if clean_track:
-            parts.append(clean_track.zfill(2))
+            clean_disc = _clean_disc(disc) if disc is not None else None
+            if clean_disc:
+                parts.append(f"{clean_disc}-{clean_track.zfill(2)}")
+            else:
+                parts.append(clean_track.zfill(2))
 
     if artist:
         parts.append(_sanitise(artist))

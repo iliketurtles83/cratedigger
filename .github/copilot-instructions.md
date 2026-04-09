@@ -17,9 +17,9 @@ All scripts are safe, idempotent, and support `--dry-run` before touching files.
 ```
 cratedigger/
   config.py                  ← user settings: music root, folder lists, preferences
-  config.example.py          ← committed template, fully depersonalised
+  config.example.py          ← example config with placeholder values, committed for reference
   .env                       ← API keys (never committed, in .gitignore)
-  .env.example               ← committed template showing required keys (values empty)
+  .env.example               ← example .env with variable names but no keys, committed for reference
   .gitignore                 ← covers: .env, config.py, *.log, *.json, __pycache__, .venv
   lib/
     context.py               ← FolderContext dataclass, get_folder_context(), classify_folder()
@@ -28,9 +28,9 @@ cratedigger/
     tags.py                  ← mutagen read/write wrappers for all formats
     mb.py                    ← MusicBrainz / AcoustID lookup with rate limiting
     logger.py                ← shared logging setup
-  01_tag.py                  ← fingerprint → MusicBrainz → folder genre → write tags
-  02_rename.py               ← normalise audio filenames using tags as source of truth
-  03_folders.py              ← normalise folder names, classify folder types
+  01_tag.py                  ← tag missing fields using MB and folder context, flag unresolvable cases
+  02_rename.py               ← rename song files using tags as source of truth
+  03_folders.py              ← rename folder names, classify folder types
   04_move.py                 ← intake routing, restructure, promote
   05_review.py               ← interactive resolution of files flagged in review log
   06_analyze.py              ← audio feature extraction for recommender (future)
@@ -48,12 +48,12 @@ from pathlib import Path
 MUSIC_ROOT = Path("/path/to/audio")
 
 # ── Intake / staging ──────────────────────────────────────────────────────────
-INCOMING_FOLDER      = MUSIC_ROOT / "incoming"   # drop zone
-STAGED_TRACKS_FOLDER = MUSIC_ROOT / "0new"       # loose files by genre, awaiting decision
-STAGED_ALBUMS_FOLDER = MUSIC_ROOT / "0new_albums"# albums by genre, review before promoting
+INCOMING_FOLDER      = MUSIC_ROOT / "incoming_foler"   # drop zone
+STAGED_TRACKS_FOLDER = MUSIC_ROOT / "new_songs"       # loose files by genre, awaiting decision
+STAGED_ALBUMS_FOLDER = MUSIC_ROOT / "new_albums"# albums by genre, review before promoting
 
 # ── Genre folders ─────────────────────────────────────────────────────────────
-# Single source of truth. GENRE_FOLDERS derived from this — never edit directly.
+# Single source of truth. GENRE_FOLDERS derived from this.
 FOLDER_TO_GENRE = {
     "50s": "50s", "60s": "60s", "70s": "70s", "80s": "80s",
     "african": "African", "blues": "Blues", "brazil": "Brazil",
@@ -69,24 +69,24 @@ FOLDER_TO_GENRE = {
 GENRE_FOLDERS = set(FOLDER_TO_GENRE.keys())  # derived — never edit
 
 SUBGENRE_BUCKETS = {
-    "0alt-rock": "Alt-Rock", "0blues-rock": "Blues Rock",
-    "0noise-rock": "Noise Rock", "0post-hardcore": "Post-Hardcore",
+    "alt-rock": "Alternative Rock", "blues-rock": "Blues Rock",
+    "noise-rock": "Noise Rock", "post-hardcore": "Post-Hardcore",
 }
 
 SPECIAL_FOLDERS = {
-    "0faves", "0faves_alltime", "0random", "0random_good",
-    "0new", "0new_albums", "0shacks", "0compilations", "0various", "0mixes",
+    "favorites", "mix_from_john", "random",
+    "new_songs", "new_albums", "compilations", "mixes"
 }
 
-SKIP_FOLDERS = {"0videos"}
+SKIP_FOLDERS = {"videos"}
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
 
 # Folders where albumartist tag is relevant
-ALBUMARTIST_FOLDERS = {"0compilations", "0various", "soundtrack"}
+ALBUMARTIST_FOLDERS = {"compilations", "various", "soundtrack"}
 
 # Folders where BPM makes no sense
-NO_BPM_FOLDERS = {"spoken", "0mixes"}
+NO_BPM_FOLDERS = {"spoken", "mixes"}
 
 # Placeholder values that indicate bad/missing data — trigger MB lookup
 SUSPICIOUS_TAG_VALUES = {
@@ -362,6 +362,7 @@ No GROUPING_FOLDERS, no grouping tag logic anywhere in pipeline.
 | Genre       | TCON      | genre             | ©gen  | slash-separated |
 | BPM         | TBPM      | bpm               | —     | integer, M4A unsupported |
 | Track       | TRCK      | tracknumber       | trkn  | preserve x/total format |
+| Disc        | TPOS      | discnumber        | disk  | multi-disc albums |
 | ISRC        | TSRC      | isrc              | —     | deduplication anchor |
 
 No grouping tag. All fields must be in tags.py field maps.
@@ -558,6 +559,10 @@ Or: `python3 intake.py --no-dry-run`
 
 ### Input (parser handles all)
 ```
+1-01 - Artist - Song Title.mp3
+Artist - 2-03 - Song Title.mp3
+1-04-Song Title.mp3
+1-01 Song Title.mp3
 01 - Artist - Song Title.mp3
 Artist - 01 - Song Title.mp3
 Artist - Song Title.mp3
@@ -568,7 +573,8 @@ Artist - Song Title.mp3
 
 ### Output target
 ```
-01 - Artist Name - Song Title.mp3
+01 - Artist Name - Song Title.mp3           # single-disc or no disc info
+1-01 - Artist Name - Song Title.mp3         # multi-disc (disc-track prefix)
 ```
 
 ### Folder target
@@ -583,6 +589,12 @@ Artist Name/Artist Name - Album Title (Year)/
 
 ### Patterns
 ```python
+# Disc-track patterns (must come before track-only patterns)
+r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s*-\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
+r"^(?P<artist>.+?)\s*-\s*(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s*-\s*(?P<title>.+)$"
+r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})-(?P<title>.+)$"
+r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s+(?P<title>.+)$"
+# Track-only patterns
 r"^(?P<track>\d{1,3})\s*-\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
 r"^(?P<artist>.+?)\s*-\s*(?P<track>\d{1,3})\s*-\s*(?P<title>.+)$"
 r"^(?P<artist>.+?)\s*-\s*(?P<title>.+)$"

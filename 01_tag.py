@@ -15,10 +15,11 @@ Usage:
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
 
 import config
-from lib.context import get_folder_context
+from lib.context import classify_folder, get_folder_context
 from lib.genres import has_meaningful_genres, merge_genres, normalise_genre
 from lib.logger import setup_logger
 from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata
@@ -66,6 +67,23 @@ def is_suspicious(value: str | None) -> bool:
     return (value or "").strip().lower() in config.SUSPICIOUS_TAG_VALUES
 
 
+_TRAILING_PAREN = re.compile(r'\(([^)]+)\)\s*$')
+
+
+def _extract_title_suffix(filename_title: str, tag_title: str) -> str | None:
+    """Return trailing parenthetical from *filename_title* missing in *tag_title*."""
+    m = _TRAILING_PAREN.search(filename_title)
+    if not m:
+        return None
+    suffix = m.group(0).strip()
+    if suffix.lower() in tag_title.lower():
+        return None
+    fn_base = filename_title[:m.start()].strip()
+    if fn_base.lower() == tag_title.strip().lower():
+        return suffix
+    return None
+
+
 def tag_file(
     path: Path,
     *,
@@ -77,7 +95,7 @@ def tag_file(
     review_items: list[dict],
 ) -> None:
     """Tag a single audio file."""
-    log.info("Processing %s", path)
+    log.debug("Processing %s", path)
 
     existing = read_tags(path)
     if existing is None:
@@ -86,12 +104,19 @@ def tag_file(
         return
     new_tags: dict[str, str | None] = {}
     ctx = get_folder_context(path)
+    parsed = parse_filename(path)
 
     effective_existing = dict(existing)
     if fix_suspicious:
         for field in ("artist", "title", "album", "year", "track"):
             if is_suspicious(existing.get(field)):
                 effective_existing[field] = None
+        # Track mismatch with filename is also suspicious
+        parsed_track = parsed.get("track")
+        if parsed_track and existing.get("track"):
+            existing_norm = existing["track"].split("/")[0].strip().lstrip("0") or "0"
+            if existing_norm != parsed_track:
+                effective_existing["track"] = None
 
     # --- Fingerprint + MusicBrainz ------------------------------------------
     needs_mb_for_identity = (
@@ -168,22 +193,22 @@ def tag_file(
     if overwrite or not effective_existing.get("year"):
         if mb_meta.get("year"):
             new_tags["year"] = mb_meta["year"]
+    # Track: filename preferred over MB (MB track is release-specific)
     if overwrite or not effective_existing.get("track"):
-        if mb_meta.get("track"):
+        if parsed.get("track"):
+            new_tags["track"] = parsed["track"]
+        elif mb_meta.get("track"):
             new_tags["track"] = mb_meta["track"]
 
     # --- Fallback: parse filename for artist / title if still missing --------
     # Only fills fields empty in BOTH existing tags and new_tags so far.
-    parsed = parse_filename(path)
     if not effective_existing.get("title") and not new_tags.get("title"):
         if parsed.get("title"):
+            
             new_tags["title"] = parsed["title"]
     if not effective_existing.get("artist") and not new_tags.get("artist"):
         if parsed.get("artist"):
             new_tags["artist"] = parsed["artist"]
-    if not effective_existing.get("track") and not new_tags.get("track"):
-        if parsed.get("track"):
-            new_tags["track"] = parsed["track"]
 
     # --- Fallback: parse parent folder for album / year if still missing -----
     # Only fills fields empty in BOTH existing tags and new_tags so far.
@@ -194,6 +219,30 @@ def tag_file(
     if not effective_existing.get("year") and not new_tags.get("year"):
         if folder_info.get("year"):
             new_tags["year"] = folder_info["year"]
+
+    # --- Preserve title suffix from filename (e.g. "(Take 3)", "(Live)") -----
+    final_title = new_tags.get("title") or effective_existing.get("title")
+    parsed_title = parsed.get("title")
+    if final_title and parsed_title:
+        suffix = _extract_title_suffix(parsed_title, final_title)
+        if suffix:
+            enhanced = final_title + " " + suffix
+            if enhanced != existing.get("title"):
+                new_tags["title"] = enhanced
+
+    # --- Flag track mismatch for review --------------------------------------
+    if (parsed.get("track") and existing.get("track")
+            and "track" not in new_tags):
+        existing_norm = existing["track"].split("/")[0].strip().lstrip("0") or "0"
+        if existing_norm != parsed.get("track"):
+            log.warning("Track mismatch: tag=%s, filename=%s for %s",
+                        existing_norm, parsed["track"], path.name)
+            review_items.append({
+                "path": str(path),
+                "reason": "track_mismatch",
+                "tag_track": existing_norm,
+                "filename_track": parsed["track"],
+            })
 
     # --- Genre ---------------------------------------------------------------
     # Always merge: folder genre + existing genre + MB genres (collect_set).
@@ -233,7 +282,7 @@ def tag_file(
     new_tags = {k: v for k, v in new_tags.items() if v is not None}
 
     if not new_tags:
-        log.info("  No changes needed for %s", path.name)
+        log.debug("  No changes needed for %s", path.name)
         return
 
     if dry_run:
@@ -247,15 +296,153 @@ def tag_file(
 
 
 # ---------------------------------------------------------------------------
+# Album consistency pass
+# ---------------------------------------------------------------------------
+
+_MAJORITY_THRESHOLD = 0.6  # ≥60% of files must agree for majority-wins
+
+
+def _normalise_whitespace(s: str) -> str:
+    """Collapse whitespace for comparison."""
+    return " ".join(s.split())
+
+
+def _pick_majority(values: list[str]) -> str | None:
+    """Return the majority value if one variant has ≥ MAJORITY_THRESHOLD share.
+
+    Comparison is case-insensitive + whitespace-normalised.  The returned
+    value uses the casing of the most common raw form.
+    """
+    if not values:
+        return None
+    # Group by normalised form
+    buckets: dict[str, list[str]] = {}
+    for v in values:
+        key = _normalise_whitespace(v).lower()
+        buckets.setdefault(key, []).append(v)
+    if len(buckets) <= 1:
+        return None  # already consistent
+
+    total = len(values)
+    best_key = max(buckets, key=lambda k: len(buckets[k]))
+    if len(buckets[best_key]) / total < _MAJORITY_THRESHOLD:
+        return None  # no clear majority
+
+    # Pick the most common raw form within the winning bucket
+    from collections import Counter
+    raw_counts = Counter(buckets[best_key])
+    return raw_counts.most_common(1)[0][0]
+
+
+def _consistency_pass_folder(
+    folder: Path,
+    *,
+    dry_run: bool = True,
+    review_items: list[dict],
+) -> None:
+    """Normalise album-level tags within a single album folder.
+
+    Only touches ``artist``, ``album``, and ``year``.  Loose files in
+    artist root folders are skipped — they can legitimately differ.
+    """
+    kind = classify_folder(folder)
+    if kind not in ("album", "disc"):
+        return
+
+    audio_files = sorted(
+        f for f in folder.iterdir()
+        if f.is_file() and f.suffix.lower() in config.AUDIO_EXTENSIONS
+    )
+    if len(audio_files) < 2:
+        return
+
+    # Read current tags from all files
+    file_tags: list[tuple[Path, dict[str, str | None]]] = []
+    for f in audio_files:
+        tags = read_tags(f)
+        if tags is not None:
+            file_tags.append((f, tags))
+
+    if len(file_tags) < 2:
+        return
+
+    for field in ("artist", "album", "year"):
+        values = [(tags.get(field) or "").strip() for _, tags in file_tags]
+        non_empty = [v for v in values if v]
+        if not non_empty:
+            continue
+
+        # Check if already consistent (case-insensitive)
+        normalised = {_normalise_whitespace(v).lower() for v in non_empty}
+        if len(normalised) <= 1:
+            continue
+
+        majority = _pick_majority(non_empty)
+        if majority is None:
+            log.warning("  No clear majority for %s in %s (%s) — flagging",
+                        field, folder.name,
+                        ", ".join(sorted(normalised)))
+            review_items.append({
+                "path": str(folder),
+                "reason": "inconsistent_tags",
+                "field": field,
+                "variants": sorted(normalised),
+            })
+            continue
+
+        # Fix outliers
+        for path, tags in file_tags:
+            current = (tags.get(field) or "").strip()
+            if not current:
+                continue
+            if _normalise_whitespace(current).lower() == _normalise_whitespace(majority).lower():
+                continue
+            if dry_run:
+                log.info("  [DRY-RUN] Would fix %s: %r → %r in %s",
+                         field, current, majority, path.name)
+            else:
+                write_tags(path, {field: majority}, dry_run=False)
+                log.info("  Fixed %s: %r → %r in %s",
+                         field, current, majority, path.name)
+
+
+def _consistency_pass(
+    root: Path,
+    *,
+    dry_run: bool = True,
+    review_items: list[dict],
+) -> None:
+    """Walk *root* and run album consistency on every album folder."""
+    for folder in sorted(root.rglob("*")):
+        if not folder.is_dir():
+            continue
+        _consistency_pass_folder(
+            folder, dry_run=dry_run, review_items=review_items,
+        )
+    # Also check the root itself if it's an album
+    _consistency_pass_folder(
+        root, dry_run=dry_run, review_items=review_items,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Walk and process
 # ---------------------------------------------------------------------------
 
 def walk_folder(folder: Path, **kwargs) -> list[dict]:
     """Process all audio files under *folder*."""
     review_items: list[dict] = []
+    dry_run = kwargs.get("dry_run", True)
+    no_consistency = kwargs.pop("no_consistency", False)
+
     for path in sorted(folder.rglob("*")):
         if path.suffix.lower() in config.AUDIO_EXTENSIONS and path.is_file():
             tag_file(path, review_items=review_items, **kwargs)
+
+    # Phase 2: normalise album-level consistency after all files are tagged
+    if not no_consistency:
+        _consistency_pass(folder, dry_run=dry_run, review_items=review_items)
+
     return review_items
 
 
@@ -281,6 +468,8 @@ def main() -> None:
                         help="Skip BPM detection (fast metadata-only pass)")
     parser.add_argument("--no-mb", action="store_true",
                         help="Skip MusicBrainz/AcoustID lookup entirely")
+    parser.add_argument("--no-consistency", action="store_true",
+                        help="Skip album-level tag consistency pass")
     parser.add_argument("--log", type=str, default="review.log",
                         help="Log file path (default: review.log)")
     args = parser.parse_args()
@@ -307,6 +496,7 @@ def main() -> None:
             fix_suspicious=args.fix_suspicious,
             no_bpm=args.no_bpm,
             no_mb=args.no_mb,
+            no_consistency=args.no_consistency,
         )
         all_review.extend(items)
 

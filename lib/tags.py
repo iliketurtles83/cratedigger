@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from mutagen import File as MutagenFile
-from mutagen.id3 import ID3, TBPM, TCON, TDRC, TIT2, TALB, TPE1, TPE2, TRCK, TSRC
+from mutagen.id3 import ID3, TBPM, TCON, TDRC, TIT2, TALB, TPE1, TPE2, TPOS, TRCK, TSRC
 
 
 # ---------------------------------------------------------------------------
@@ -18,6 +18,7 @@ _ID3_MAP = {
     "genre":    "TCON",
     "bpm":      "TBPM",
     "track":    "TRCK",
+    "disc":     "TPOS",
     "isrc":     "TSRC",
 }
 
@@ -30,6 +31,7 @@ _VORBIS_MAP = {
     "genre":    "genre",
     "bpm":      "bpm",
     "track":    "tracknumber",
+    "disc":     "discnumber",
     "isrc":     "isrc",
 }
 
@@ -41,6 +43,7 @@ _M4A_MAP = {
     "year":     "\xa9day",
     "genre":    "\xa9gen",
     "track":    "trkn",
+    "disc":     "disk",
     # BPM not supported in M4A
     # ISRC not supported in M4A
 }
@@ -69,7 +72,7 @@ def read_tags(path: Path) -> dict[str, str | None] | None:
     """
     result: dict[str, str | None] = {
         k: None for k in ("title", "artist", "albumartist", "album", "year",
-                          "genre", "bpm", "track", "isrc")
+                          "genre", "bpm", "track", "disc", "isrc")
     }
 
     try:
@@ -100,8 +103,8 @@ def read_tags(path: Path) -> dict[str, str | None] | None:
         tags = audio.tags or {}
         for field, key in _M4A_MAP.items():
             val = tags.get(key)
-            if field == "track" and isinstance(val, list) and val:
-                # trkn stores [(track, total)]
+            if field in ("track", "disc") and isinstance(val, list) and val:
+                # trkn/disk store [(num, total)]
                 result[field] = str(val[0][0]) if isinstance(val[0], tuple) else str(val[0])
             else:
                 result[field] = _first(val)
@@ -137,7 +140,7 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
         frame_classes = {
             "title": TIT2, "artist": TPE1, "albumartist": TPE2, "album": TALB,
             "year": TDRC, "genre": TCON, "bpm": TBPM,
-            "track": TRCK, "isrc": TSRC,
+            "track": TRCK, "disc": TPOS, "isrc": TSRC,
         }
         for field, val in tags.items():
             if val is None or field not in frame_classes:
@@ -162,8 +165,8 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
             if val is None or field not in _M4A_MAP:
                 continue
             key = _M4A_MAP[field]
-            if field == "track":
-                # trkn expects [(track_num, total)]
+            if field in ("track", "disc"):
+                # trkn/disk expect [(num, total)]
                 try:
                     audio.tags[key] = [(int(val), 0)]
                 except (ValueError, TypeError):
