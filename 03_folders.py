@@ -22,7 +22,7 @@ import shutil
 from pathlib import Path
 
 import config
-from lib.context import classify_folder, get_folder_context, is_disc_subfolder
+from lib.context import classify_folder, infer_compilation_folder, is_disc_subfolder
 from lib.logger import setup_logger
 from lib.parsers import parse_folder_name
 from lib.tags import read_tags
@@ -54,6 +54,7 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
       {
         "values": {"artist": str|None, "album": str|None, "year": str|None},
         "mixed_fields": [field, ...],
+        "tag_dicts": [tag_dict, ...],
       }
     """
     field_values: dict[str, set[str]] = {
@@ -61,6 +62,7 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
         "album": set(),
         "year": set(),
     }
+    tag_dicts: list[dict[str, str | None]] = []
 
     for f in sorted(folder.rglob("*")):
         if not f.is_file() or f.suffix.lower() not in config.AUDIO_EXTENSIONS:
@@ -68,6 +70,7 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
         tags = read_tags(f)
         if tags is None:
             continue
+        tag_dicts.append(tags)
 
         artist = (tags.get("artist") or "").strip()
         album = (tags.get("album") or "").strip()
@@ -92,6 +95,7 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
     return {
         "values": values,
         "mixed_fields": mixed_fields,
+        "tag_dicts": tag_dicts,
     }
 
 
@@ -142,8 +146,6 @@ def _normalise_folder(
 ) -> None:
     """Normalise a single album folder name."""
     name = folder.name
-    ctx = get_folder_context(folder)
-    is_comp = ctx.is_compilation or ctx.is_soundtrack
 
     parsed = _parse_album_name(name) or {
         "artist": None,
@@ -151,6 +153,10 @@ def _normalise_folder(
         "year": None,
     }
     tag_summary = _collect_consistent_tag_fields(folder)
+    is_comp = infer_compilation_folder(
+        folder,
+        file_tag_dicts=tag_summary["tag_dicts"],
+    )
     mixed_fields = tag_summary["mixed_fields"]
 
     # Compilations/soundtracks expect mixed artists — only flag other fields
@@ -235,9 +241,12 @@ def _normalise_album_child(
     Prepends the artist name from the parent folder to build canonical format.
     For compilation/soundtrack context, uses Album (Year) format instead.
     """
-    ctx = get_folder_context(folder)
-    is_comp = ctx.is_compilation or ctx.is_soundtrack
     album = folder.name
+    tag_summary = _collect_consistent_tag_fields(folder)
+    is_comp = infer_compilation_folder(
+        folder,
+        file_tag_dicts=tag_summary["tag_dicts"],
+    )
 
     # If the child name already starts with the artist name, it's probably
     # a malformed "Artist Album" folder missing the separator — flag it.
@@ -259,7 +268,6 @@ def _normalise_album_child(
         else:
             album = (before or after).strip()
 
-    tag_summary = _collect_consistent_tag_fields(folder)
     mixed_fields = tag_summary["mixed_fields"]
 
     # Compilations/soundtracks expect mixed artists — only flag other fields
@@ -376,10 +384,11 @@ def _handle_artist_flat(
     review_items: list[dict],
 ) -> None:
     """Propose canonical rename for artist_flat folders from tags only."""
-    ctx = get_folder_context(folder)
-    is_comp = ctx.is_compilation or ctx.is_soundtrack
-
     tag_summary = _collect_consistent_tag_fields(folder)
+    is_comp = infer_compilation_folder(
+        folder,
+        file_tag_dicts=tag_summary["tag_dicts"],
+    )
     mixed_fields = tag_summary["mixed_fields"]
 
     # Compilations/soundtracks expect mixed artists — only flag other fields

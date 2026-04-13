@@ -1,13 +1,22 @@
 """Folder context and classification helpers (single source of truth)."""
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 import re
 
 import config
+from lib.tags import read_tags
 
 
 _DISC_PATTERN = re.compile(r"^(cd|disc|disk)\s*\d+$", re.IGNORECASE)
+_COMPILATION_ALBUMARTISTS = {
+    "va",
+    "various",
+    "various artists",
+    "original soundtrack",
+    "soundtrack",
+}
 
 
 @dataclass
@@ -69,6 +78,82 @@ def classify_folder(folder: Path) -> str:
     if not has_album_subdirs and has_audio:
         return "artist_flat"
     return "unknown"
+
+
+def _normalise_tag_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalised = " ".join(value.split()).strip().lower()
+    return normalised or None
+
+
+def infer_compilation_folder(
+    folder: Path,
+    *,
+    file_tag_dicts: list[dict[str, str | None]] | None = None,
+) -> bool:
+    """Infer whether *folder* should be treated as a compilation album.
+
+    Explicit compilation/soundtrack folders are detected from path context.
+    Genre-local compilations are inferred from the tags inside the folder.
+    """
+    ctx = get_folder_context(folder)
+    if ctx.is_compilation or ctx.is_soundtrack:
+        return True
+
+    if ctx.folder_kind not in ("album", "artist_flat", "disc"):
+        return False
+
+    if file_tag_dicts is None:
+        file_tag_dicts = []
+        for child in sorted(folder.rglob("*")):
+            if not child.is_file() or child.suffix.lower() not in config.AUDIO_EXTENSIONS:
+                continue
+            tags = read_tags(child)
+            if tags is not None:
+                file_tag_dicts.append(tags)
+
+    if len(file_tag_dicts) < 2:
+        return False
+
+    artist_values = [
+        artist
+        for tags in file_tag_dicts
+        if (artist := _normalise_tag_value(tags.get("artist")))
+    ]
+    album_values = {
+        album
+        for tags in file_tag_dicts
+        if (album := _normalise_tag_value(tags.get("album")))
+    }
+    year_values = {
+        year[:4]
+        for tags in file_tag_dicts
+        if (year := _normalise_tag_value(tags.get("year"))) and re.match(r"^\d{4}", year)
+    }
+    albumartist_values = {
+        albumartist
+        for tags in file_tag_dicts
+        if (albumartist := _normalise_tag_value(tags.get("albumartist")))
+    }
+
+    if albumartist_values & _COMPILATION_ALBUMARTISTS:
+        return True
+
+    if len(albumartist_values) == 1 and artist_values:
+        albumartist = next(iter(albumartist_values))
+        if albumartist not in set(artist_values):
+            return True
+
+    if len(album_values) > 1 or len(year_values) > 1:
+        return False
+
+    if len(artist_values) < 3:
+        return False
+
+    artist_counts = Counter(artist_values)
+    dominant_share = artist_counts.most_common(1)[0][1] / len(artist_values)
+    return len(artist_counts) >= 3 and dominant_share <= 0.5
 
 
 def get_folder_context(path: Path) -> FolderContext:

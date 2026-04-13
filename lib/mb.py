@@ -90,26 +90,25 @@ def fingerprint_lookup(
         log.warning("AcoustID returned non-ok status for %s: %s", path.name, results)
         return empty
 
-    # ADD THIS DEBUG LOGGING
     log.debug("AcoustID results for %s: %d results found", path.name, len(results.get("results", [])))
 
     for res in results.get("results", []):
         score = res.get("score", 0)
-        log.debug("  Result score: %.2f (threshold: %.2f)", score, min_score)  # ADD THIS
+        log.debug("  Result score: %.2f (threshold: %.2f)", score, min_score)
         if score < min_score:
             continue
         for rec in res.get("recordings", []):
             title = rec.get("title")
             artists = rec.get("artists", [])
             artist = artists[0].get("name") if artists else None
-            log.info("Match found: %s by %s (score: %.2f)", title, artist, score)  # ADD THIS
+            log.info("Match found: %s by %s (score: %.2f)", title, artist, score)
             return {
                 "recording_id": rec.get("id"),
                 "title": title,
                 "artist": artist,
             }
 
-    log.warning("No matches above threshold for %s", path.name)  # ADD THIS
+    log.warning("No matches above threshold for %s", path.name)
     return empty
 
 

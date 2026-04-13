@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 
 import config
-from lib.context import classify_folder, get_folder_context
+from lib.context import classify_folder, get_folder_context, infer_compilation_folder
 from lib.genres import has_meaningful_genres, merge_genres, normalise_genre
 from lib.logger import setup_logger
 from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata
@@ -204,7 +204,6 @@ def tag_file(
     # Only fills fields empty in BOTH existing tags and new_tags so far.
     if not effective_existing.get("title") and not new_tags.get("title"):
         if parsed.get("title"):
-            
             new_tags["title"] = parsed["title"]
     if not effective_existing.get("artist") and not new_tags.get("artist"):
         if parsed.get("artist"):
@@ -334,6 +333,56 @@ def _pick_majority(values: list[str]) -> str | None:
     return raw_counts.most_common(1)[0][0]
 
 
+def _pick_preferred_value(values: list[str]) -> str | None:
+    """Return the stable raw value for a consistent or majority tag set."""
+    if not values:
+        return None
+
+    buckets: dict[str, list[str]] = {}
+    for value in values:
+        key = _normalise_whitespace(value).lower()
+        buckets.setdefault(key, []).append(value)
+
+    from collections import Counter
+
+    if len(buckets) == 1:
+        raw_counts = Counter(values)
+        return raw_counts.most_common(1)[0][0]
+
+    return _pick_majority(values)
+
+
+def _backfill_compilation_albumartist(
+    folder: Path,
+    file_tags: list[tuple[Path, dict[str, str | None]]],
+    *,
+    dry_run: bool = True,
+) -> None:
+    """Fill missing albumartist tags for compilation folders."""
+    ctx = get_folder_context(folder)
+    target = _pick_preferred_value([
+        albumartist
+        for _, tags in file_tags
+        if (albumartist := (tags.get("albumartist") or "").strip())
+    ])
+
+    if not target and not ctx.is_soundtrack:
+        target = "Various Artists"
+
+    if not target:
+        return
+
+    for path, tags in file_tags:
+        current = (tags.get("albumartist") or "").strip()
+        if current:
+            continue
+        if dry_run:
+            log.info("  [DRY-RUN] Would set albumartist = %s in %s", target, path.name)
+        else:
+            write_tags(path, {"albumartist": target}, dry_run=False)
+            log.info("  Set albumartist = %s in %s", target, path.name)
+
+
 def _consistency_pass_folder(
     folder: Path,
     *,
@@ -366,7 +415,15 @@ def _consistency_pass_folder(
     if len(file_tags) < 2:
         return
 
+    is_compilation = infer_compilation_folder(
+        folder,
+        file_tag_dicts=[tags for _, tags in file_tags],
+    )
+
     for field in ("artist", "album", "year"):
+        if is_compilation and field == "artist":
+            continue
+
         values = [(tags.get(field) or "").strip() for _, tags in file_tags]
         non_empty = [v for v in values if v]
         if not non_empty:
@@ -404,6 +461,13 @@ def _consistency_pass_folder(
                 write_tags(path, {field: majority}, dry_run=False)
                 log.info("  Fixed %s: %r → %r in %s",
                          field, current, majority, path.name)
+
+    if is_compilation:
+        _backfill_compilation_albumartist(
+            folder,
+            file_tags,
+            dry_run=dry_run,
+        )
 
 
 def _consistency_pass(
