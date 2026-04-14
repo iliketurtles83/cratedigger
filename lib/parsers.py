@@ -76,17 +76,19 @@ _RIPPER_ANNOTATIONS = re.compile(
     re.IGNORECASE
 )
 
-def _sanitise(value: str) -> str:
-    """Remove ripper annotations and illegal filename characters."""
+def sanitise_name(value: str) -> str:
+    """Remove ripper annotations and illegal filename/folder characters."""
     # Strip ripper damage/incomplete markers
     value = _RIPPER_ANNOTATIONS.sub("", value)
-    # Replace forward slash with dash
+    # Replace forward slash with dash (slash is path-separator on Linux/macOS)
     value = value.replace("/", "-")
     # Remove remaining illegal characters
     value = _ILLEGAL_CHARS.sub("", value)
     # Collapse multiple spaces
     value = re.sub(r" {2,}", " ", value)
     return value.strip()
+
+_sanitise = sanitise_name  # kept for internal callers
 
 def _clean_track(track: str | None) -> str | None:
     """Normalise track number — strip total tracks (e.g. '1/12' → '1')."""

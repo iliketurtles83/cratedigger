@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import re
+from collections import Counter
 from pathlib import Path
 
 import config
@@ -420,8 +421,25 @@ def _consistency_pass_folder(
         file_tag_dicts=[tags for _, tags in file_tags],
     )
 
+    # Detect multi-artist albums: 2+ distinct artists each with ≥ 2 tracks.
+    # A single outlier (1 track) is treated as a typo and still normalised.
+    # Multi-artist albums (below compilation threshold) preserve per-track
+    # artist tags without setting albumartist.
+    _artist_vals = [
+        _normalise_whitespace(v).lower()
+        for _, tags in file_tags
+        if (v := (tags.get("artist") or "").strip())
+    ]
+    _artist_counts = Counter(_artist_vals)
+    _real_artists = sum(1 for c in _artist_counts.values() if c >= 2)
+    is_multi_artist = _real_artists >= 2
+
+    if is_multi_artist and not is_compilation:
+        log.info("  Multi-artist album (%d artists) — preserving per-track artist tags: %s",
+                 _real_artists, folder.name)
+
     for field in ("artist", "album", "year"):
-        if is_compilation and field == "artist":
+        if (is_compilation or is_multi_artist) and field == "artist":
             continue
 
         values = [(tags.get(field) or "").strip() for _, tags in file_tags]

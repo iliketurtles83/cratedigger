@@ -95,6 +95,8 @@ SUSPICIOUS_TAG_VALUES = {
 
 ARTIST_FOLDER_THRESHOLD = 3
 
+COMPILATION_ARTIST_THRESHOLD = 3
+
 MB_RATE_LIMIT_SECONDS = 1.1
 ACOUSTID_MIN_SCORE    = 0.8
 MB_MIN_TAG_VOTES      = 2
@@ -119,9 +121,9 @@ Known cases of folders are:
 
 Types of albums:
 - regular album (e.g. rock/Radiohead/OK Computer/)
-- compilation (e.g. rock/0compilations/Best of 90s/)
+- compilation (e.g. rock/0compilations/Best of 90s/) — COMPILATION_ARTIST_THRESHOLD+ distinct artists
 - soundtrack (e.g. soundtrack/0various/Inception/) 
-- album that that has a couple different artists but is not a compilation (configurable threshold)
+- multi-artist album — 2+ real artists (each ≥ 2 tracks) but below COMPILATION_ARTIST_THRESHOLD. Per-track artist tags preserved, no albumartist set.
 
 
 ```python
@@ -179,7 +181,8 @@ Detection order:
 1. `ctx.is_compilation` or `ctx.is_soundtrack` → immediate True
 2. albumartist tag in compilation set ("various artists", "va", etc.) → True
 3. Single albumartist that doesn't match any track artist → True
-4. 3+ distinct artists with no dominant share (≤50%) → True
+4. Mixed album/year tags → False for `artist_flat` folders (genuine mixed content), but tolerated for `album` folders (likely sloppy metadata)
+5. COMPILATION_ARTIST_THRESHOLD+ distinct artists with no dominant share (≤50%) → True
 
 ```python
 def infer_compilation_folder(

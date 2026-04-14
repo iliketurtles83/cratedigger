@@ -48,6 +48,10 @@ SUSPICIOUS_TAG_VALUES = {
 # Below this they live flat in the genre root.
 ARTIST_FOLDER_THRESHOLD = 3
 
+# Albums with more distinct artists than this are treated as compilations.
+# Albums with 2+ artists at or below this are multi-artist albums.
+COMPILATION_ARTIST_THRESHOLD = 3
+
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
 
 MB_RATE_LIMIT_SECONDS = 1.1

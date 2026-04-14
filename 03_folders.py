@@ -24,7 +24,7 @@ from pathlib import Path
 import config
 from lib.context import classify_folder, infer_compilation_folder, is_disc_subfolder
 from lib.logger import setup_logger
-from lib.parsers import parse_folder_name
+from lib.parsers import parse_folder_name, sanitise_name
 from lib.tags import read_tags
 
 log: logging.Logger = None  # type: ignore[assignment]
@@ -126,6 +126,8 @@ def _parse_album_name(name: str) -> dict[str, str | None] | None:
 
 
 def _build_folder_name(artist: str, album: str, year: str | None) -> str:
+    artist = sanitise_name(artist)
+    album = sanitise_name(album)
     if year:
         return f"{artist} - {album} ({year})"
     return f"{artist} - {album}"
@@ -133,6 +135,7 @@ def _build_folder_name(artist: str, album: str, year: str | None) -> str:
 
 def _build_compilation_folder_name(album: str, year: str | None) -> str:
     """Build folder name for soundtracks/compilations: Album (Year)."""
+    album = sanitise_name(album)
     if year:
         return f"{album} ({year})"
     return album

@@ -146,14 +146,19 @@ def infer_compilation_folder(
             return True
 
     if len(album_values) > 1 or len(year_values) > 1:
-        return False
+        # For artist_flat folders, different albums/years means genuinely mixed
+        # content — not a single compilation.  For "album" folders (name has
+        # " - "), inconsistent tags are likely sloppy metadata, not different
+        # albums, so we continue checking artist distribution.
+        if ctx.folder_kind != "album":
+            return False
 
-    if len(artist_values) < 3:
+    if len(artist_values) < config.COMPILATION_ARTIST_THRESHOLD:
         return False
 
     artist_counts = Counter(artist_values)
     dominant_share = artist_counts.most_common(1)[0][1] / len(artist_values)
-    return len(artist_counts) >= 3 and dominant_share <= 0.5
+    return len(artist_counts) >= config.COMPILATION_ARTIST_THRESHOLD and dominant_share <= 0.5
 
 
 def get_folder_context(path: Path) -> FolderContext:
