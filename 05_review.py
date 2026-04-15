@@ -52,7 +52,7 @@ def handle_no_genre(item: dict, *, dry_run: bool) -> bool:
 
     tags = read_tags(path)
     if tags is None:
-        print(f"  [Cannot read tags from file]")
+        print("  [Cannot read tags from file]")
         tags = {}
     print(f"\n--- No genre: {path} ---")
     print(f"  Current tags: artist={tags.get('artist')}, title={tags.get('title')}")
@@ -201,6 +201,11 @@ def main() -> None:
     remaining: list[dict] = []
 
     for item in items:
+        # If the path no longer exists, consider it resolved
+        path = Path(item["path"])
+        if path and not path.exists():
+            continue
+        
         reason = item.get("reason", "unknown")
         handler = HANDLERS.get(reason, handle_generic)
         resolved = handler(item, dry_run=dry_run)

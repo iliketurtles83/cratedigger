@@ -137,14 +137,6 @@ def infer_compilation_folder(
         if (albumartist := _normalise_tag_value(tags.get("albumartist")))
     }
 
-    if albumartist_values & _COMPILATION_ALBUMARTISTS:
-        return True
-
-    if len(albumartist_values) == 1 and artist_values:
-        albumartist = next(iter(albumartist_values))
-        if albumartist not in set(artist_values):
-            return True
-
     if len(album_values) > 1 or len(year_values) > 1:
         # For artist_flat folders, different albums/years means genuinely mixed
         # content — not a single compilation.  For "album" folders (name has
@@ -153,12 +145,26 @@ def infer_compilation_folder(
         if ctx.folder_kind != "album":
             return False
 
-    if len(artist_values) < config.COMPILATION_ARTIST_THRESHOLD:
+    # Require COMPILATION_ARTIST_THRESHOLD distinct track artists before
+    # evaluating any compilation signal.  This ensures sloppy albumartist tags
+    # (e.g. albumartist="Sergio Mendes Featuring X" on a single-artist album,
+    # or one rogue track tagged albumartist="Various Artists") never trigger
+    # compilation logic on a genuine artist album.
+    artist_counts = Counter(artist_values)
+    if len(artist_counts) < config.COMPILATION_ARTIST_THRESHOLD:
         return False
 
-    artist_counts = Counter(artist_values)
+    # Enough distinct track artists — albumartist tags are now reliable signals.
+    if albumartist_values & _COMPILATION_ALBUMARTISTS:
+        return True
+
+    if len(albumartist_values) == 1:
+        albumartist = next(iter(albumartist_values))
+        if albumartist not in set(artist_values):
+            return True
+
     dominant_share = artist_counts.most_common(1)[0][1] / len(artist_values)
-    return len(artist_counts) >= config.COMPILATION_ARTIST_THRESHOLD and dominant_share <= 0.5
+    return dominant_share <= 0.5
 
 
 def get_folder_context(path: Path) -> FolderContext:

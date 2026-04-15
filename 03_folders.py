@@ -57,10 +57,11 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
         "tag_dicts": [tag_dict, ...],
       }
     """
-    field_values: dict[str, set[str]] = {
-        "artist": set(),
-        "album": set(),
-        "year": set(),
+    # Maps lowercase key → first-seen original value, for case-insensitive dedup.
+    field_values: dict[str, dict[str, str]] = {
+        "artist": {},
+        "album": {},
+        "year": {},
     }
     tag_dicts: list[dict[str, str | None]] = []
 
@@ -76,19 +77,19 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
         album = (tags.get("album") or "").strip()
         year = (tags.get("year") or "").strip()[:4]
 
-        if artist:
-            field_values["artist"].add(artist)
-        if album:
-            field_values["album"].add(album)
-        if re.match(r"^\d{4}$", year):
-            field_values["year"].add(year)
+        if artist and artist.lower() not in field_values["artist"]:
+            field_values["artist"][artist.lower()] = artist
+        if album and album.lower() not in field_values["album"]:
+            field_values["album"][album.lower()] = album
+        if re.match(r"^\d{4}$", year) and year not in field_values["year"]:
+            field_values["year"][year] = year
 
     mixed_fields = sorted(
         field for field, values in field_values.items() if len(values) > 1
     )
-    # next(iter(s)) is deterministic here: guarded by len == 1.
+    # next(iter(...)) is deterministic here: guarded by len == 1.
     values = {
-        field: next(iter(entries)) if len(entries) == 1 else None
+        field: next(iter(entries.values())) if len(entries) == 1 else None
         for field, entries in field_values.items()
     }
 
@@ -162,10 +163,11 @@ def _normalise_folder(
     )
     mixed_fields = tag_summary["mixed_fields"]
 
-    # Compilations/soundtracks expect mixed artists — only flag other fields
-    effective_mixed = (
-        [f for f in mixed_fields if f != "artist"] if is_comp else mixed_fields
-    )
+    # Compilations/soundtracks expect mixed artists — only flag other fields.
+    # Album folders (classified by " - " in name) also exclude artist from the
+    # mixed check: the folder name already encodes the album artist, so a single
+    # guest track with a different artist tag should not block normalisation.
+    effective_mixed = [f for f in mixed_fields if f != "artist"]
 
     if effective_mixed:
         log.warning("Mixed tag fields for %s: %s — flagging for review",
@@ -251,13 +253,17 @@ def _normalise_album_child(
         file_tag_dicts=tag_summary["tag_dicts"],
     )
 
-    # If the child name already starts with the artist name, it's probably
-    # a malformed "Artist Album" folder missing the separator — flag it.
+    # If the child folder name starts with the artist name it may be a
+    # malformed "Artist Album" folder missing the separator.  But if the album
+    # tag gives a clean title that does not itself start with the artist name,
+    # trust the tag and proceed — the folder just used a bad naming convention.
     if not is_comp and album.strip().lower().startswith(artist.strip().lower()):
-        log.warning("Folder may contain embedded artist name: %s "
-                     "— flagging for review", folder)
-        review_items.append({"path": str(folder), "reason": "unknown_pattern"})
-        return
+        tag_album = (tag_summary["values"]["album"] or "").strip()
+        if not tag_album or tag_album.lower().startswith(artist.strip().lower()):
+            log.warning("Folder may contain embedded artist name: %s "
+                        "— flagging for review", folder)
+            review_items.append({"path": str(folder), "reason": "unknown_pattern"})
+            return
 
     # Existing folder-name fallback values
     year_m = _EMBEDDED_YEAR.search(album)
@@ -273,10 +279,10 @@ def _normalise_album_child(
 
     mixed_fields = tag_summary["mixed_fields"]
 
-    # Compilations/soundtracks expect mixed artists — only flag other fields
-    effective_mixed = (
-        [f for f in mixed_fields if f != "artist"] if is_comp else mixed_fields
-    )
+    # Compilations/soundtracks expect mixed artists — only flag other fields.
+    # The artist is always supplied by the parent folder, so mixed track-artist
+    # tags should not block a child album rename.
+    effective_mixed = [f for f in mixed_fields if f != "artist"]
 
     if effective_mixed:
         log.warning("Mixed tag fields for %s: %s — flagging for review",

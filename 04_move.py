@@ -249,8 +249,12 @@ def _count_album_subdirs(folder: Path) -> int:
     return count
 
 
-def _album_from_tags(folder: Path) -> dict[str, set[str]]:
-    """Read album/year tags from audio files directly in *folder*."""
+def _album_from_tags(folder: Path) -> dict[str, object]:
+    """Read artist/album/year tags from audio files directly in *folder*.
+
+    Artist values are deduplicated case-insensitively; first-seen casing wins.
+    """
+    artists: dict[str, str] = {}  # normalised-lower → first-seen original
     albums: set[str] = set()
     years: set[str] = set()
     for f in sorted(folder.iterdir()):
@@ -259,13 +263,16 @@ def _album_from_tags(folder: Path) -> dict[str, set[str]]:
         tags = read_tags(f)
         if tags is None:
             continue
+        artist = (tags.get("artist") or "").strip()
+        if artist and artist.lower() not in artists:
+            artists[artist.lower()] = artist
         album = tags.get("album") or ""
         if album:
             albums.add(album)
         year = (tags.get("year") or "")[:4]
         if year:
             years.add(year)
-    return {"albums": albums, "years": years}
+    return {"artists": set(artists.values()), "albums": albums, "years": years}
 
 
 def _build_album_folder_name(artist: str, album: str, year: str | None) -> str:
@@ -282,11 +289,24 @@ def restructure_artist_flat(
     review_items: list[dict],
 ) -> None:
     """Apply N=3 threshold rule to an artist_flat folder."""
-    artist = folder.name
     existing_albums = _count_album_subdirs(folder)
     tag_info = _album_from_tags(folder)
+    tag_artists = tag_info["artists"]
     albums = tag_info["albums"]
     years = tag_info["years"]
+
+    # Determine artist from tags, not folder name — folder name may be an
+    # album title, a truncated string, or include a year in parentheses.
+    if len(tag_artists) > 1:
+        # Mixed track artists → compilation-like folder already in the right
+        # place; leave it for 03_folders.py to normalise.
+        log.info("artist_flat has mixed track artists: %s — skipping "
+                 "restructure (likely inline compilation)", folder.name)
+        return
+    elif len(tag_artists) == 1:
+        artist = next(iter(tag_artists))
+    else:
+        artist = folder.name  # no readable tags — fall back
 
     audio_files = [
         f for f in sorted(folder.iterdir())
