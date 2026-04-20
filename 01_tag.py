@@ -16,11 +16,12 @@ import argparse
 import json
 import logging
 import re
+import warnings
 from collections import Counter
 from pathlib import Path
 
 import config
-from lib.context import classify_folder, get_folder_context, infer_compilation_folder
+from lib.context import classify_folder, get_folder_context, infer_best_of_folder, infer_compilation_folder
 from lib.genres import has_meaningful_genres, merge_genres, normalise_genre
 from lib.logger import setup_logger
 from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata
@@ -51,7 +52,15 @@ def detect_bpm(path: Path) -> int | None:
         return None
 
     try:
-        y, sr = _librosa.load(str(path), sr=None, duration=60)
+        with warnings.catch_warnings():
+            # libsndfile (soundfile) can't decode M4A/AAC natively; librosa
+            # falls back to audioread which is deprecated as of 0.10.0 but
+            # still functional.  Suppress both noisy warnings.
+            warnings.filterwarnings("ignore", message="PySoundFile failed",
+                                    category=UserWarning)
+            warnings.filterwarnings("ignore", message=".*audioread.*",
+                                    category=FutureWarning)
+            y, sr = _librosa.load(str(path), sr=None, duration=60)
         tempo, _ = _librosa.beat.beat_track(y=y, sr=sr)
         bpm = round(float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo))
         return bpm if bpm > 0 else None
@@ -179,7 +188,7 @@ def tag_file(
         else:
             log.info("  API lookup: no AcoustID recording match")
     elif needs_mb and no_mb:
-        log.info("  API lookup needed but skipped (--no-mb)")
+        log.info("  API lookup required for %s but --no-mb specified — skipping lookup", path.name)
 
     # --- Fill missing fields from MB ----------------------------------------
     if overwrite or not effective_existing.get("title"):
@@ -438,8 +447,18 @@ def _consistency_pass_folder(
         log.info("  Multi-artist album (%d artists) — preserving per-track artist tags: %s",
                  _real_artists, folder.name)
 
+    is_best_of = infer_best_of_folder(
+        folder,
+        file_tag_dicts=[tags for _, tags in file_tags],
+    )
+    if is_best_of:
+        log.info("  Single-artist best-of detected — skipping year consistency: %s",
+                 folder.name)
+
     for field in ("artist", "album", "year"):
         if (is_compilation or is_multi_artist) and field == "artist":
+            continue
+        if is_best_of and field == "year":
             continue
 
         values = [(tags.get(field) or "").strip() for _, tags in file_tags]

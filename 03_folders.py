@@ -22,7 +22,7 @@ import shutil
 from pathlib import Path
 
 import config
-from lib.context import classify_folder, infer_compilation_folder, is_disc_subfolder
+from lib.context import classify_folder, infer_best_of_folder, infer_compilation_folder, is_disc_subfolder
 from lib.logger import setup_logger
 from lib.parsers import parse_folder_name, sanitise_name
 from lib.tags import read_tags
@@ -161,13 +161,22 @@ def _normalise_folder(
         folder,
         file_tag_dicts=tag_summary["tag_dicts"],
     )
+    is_best_of = infer_best_of_folder(
+        folder,
+        file_tag_dicts=tag_summary["tag_dicts"],
+    )
     mixed_fields = tag_summary["mixed_fields"]
 
     # Compilations/soundtracks expect mixed artists — only flag other fields.
     # Album folders (classified by " - " in name) also exclude artist from the
     # mixed check: the folder name already encodes the album artist, so a single
     # guest track with a different artist tag should not block normalisation.
-    effective_mixed = [f for f in mixed_fields if f != "artist"]
+    # Single-artist best-of albums have intentionally varied per-track years
+    # (original recording dates) — exclude year from the mixed check too.
+    _excluded = {"artist"}
+    if is_best_of:
+        _excluded.add("year")
+    effective_mixed = [f for f in mixed_fields if f not in _excluded]
 
     if effective_mixed:
         log.warning("Mixed tag fields for %s: %s — flagging for review",
@@ -277,12 +286,20 @@ def _normalise_album_child(
         else:
             album = (before or after).strip()
 
+    is_best_of = infer_best_of_folder(
+        folder,
+        file_tag_dicts=tag_summary["tag_dicts"],
+    )
     mixed_fields = tag_summary["mixed_fields"]
 
     # Compilations/soundtracks expect mixed artists — only flag other fields.
     # The artist is always supplied by the parent folder, so mixed track-artist
     # tags should not block a child album rename.
-    effective_mixed = [f for f in mixed_fields if f != "artist"]
+    # Single-artist best-of albums have intentionally varied per-track years.
+    _excluded = {"artist"}
+    if is_best_of:
+        _excluded.add("year")
+    effective_mixed = [f for f in mixed_fields if f not in _excluded]
 
     if effective_mixed:
         log.warning("Mixed tag fields for %s: %s — flagging for review",
@@ -398,12 +415,20 @@ def _handle_artist_flat(
         folder,
         file_tag_dicts=tag_summary["tag_dicts"],
     )
+    is_best_of = infer_best_of_folder(
+        folder,
+        file_tag_dicts=tag_summary["tag_dicts"],
+    )
     mixed_fields = tag_summary["mixed_fields"]
 
-    # Compilations/soundtracks expect mixed artists — only flag other fields
-    effective_mixed = (
-        [f for f in mixed_fields if f != "artist"] if is_comp else mixed_fields
-    )
+    # Compilations/soundtracks expect mixed artists — only flag other fields.
+    # Single-artist best-of albums have intentionally varied per-track years.
+    _excluded = set()
+    if is_comp:
+        _excluded.add("artist")
+    if is_best_of:
+        _excluded.add("year")
+    effective_mixed = [f for f in mixed_fields if f not in _excluded]
 
     if effective_mixed:
         log.warning("artist_flat with mixed tag fields: %s (%s) — flagging for "

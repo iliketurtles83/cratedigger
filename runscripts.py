@@ -4,7 +4,7 @@ import sys
 # scripts to run from the command line
 
 folder_names = [
-    'african', 'blues', 'brazil', 'classical'
+    'post-punk', 'post-rock', 'punk', 'reggae', 'rnb'
 ]
 
 
@@ -23,20 +23,18 @@ scripts = [
         'name': '03_folders.py',
         'dry_args': [],
         'live_args': [],
-    },
-    {
-        'name': '04_move.py',
-        'dry_args': ['--restructure'],
-        'live_args': ['--restructure'],
-    },
+    }
+    # {
+    #     'name': '04_move.py',
+    #     'dry_args': ['--restructure'],
+    #     'live_args': ['--restructure'],
+    # },
 ]
 
 def run_step(script_name: str, args: list[str]) -> subprocess.CompletedProcess:
     """Run a step script with the given arguments. Returns the result."""
     result = subprocess.run(
         [sys.executable, script_name] + args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
         text=True,
     )
     return result
@@ -53,13 +51,11 @@ for folder in folder_names:
         args = ['--dry-run', '--folder', folder] + dry_extra_args
 
         # Run in dry-run mode
-        result = run_step(script_name, args)
-        print(result.stdout)
+        run_step(script_name, args)
 
         # Prompt user to run live
         if input(f"Run {script_name} live? (y/n): ").lower() == 'y':
             live_args = ['--no-dry-run', '--folder', folder] + live_extra_args
-            result = run_step(script_name, live_args)
-            print(result.stdout)
+            run_step(script_name, live_args)
         else:
             print(f"Skipped {script_name}")

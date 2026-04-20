@@ -167,6 +167,49 @@ def infer_compilation_folder(
     return dominant_share <= 0.5
 
 
+def infer_best_of_folder(
+    folder: Path,
+    *,
+    file_tag_dicts: list[dict[str, str | None]] | None = None,
+) -> bool:
+    """Return True when *folder* looks like a single-artist best-of/anthology.
+
+    Detection: exactly one distinct track artist AND year tags spanning at
+    least 5 years.  These albums have intentionally varied per-track years
+    (original recording dates) and should not be subject to year-consistency
+    enforcement.
+    """
+    if file_tag_dicts is None:
+        file_tag_dicts = []
+        for child in sorted(folder.rglob("*")):
+            if not child.is_file() or child.suffix.lower() not in config.AUDIO_EXTENSIONS:
+                continue
+            tags = read_tags(child)
+            if tags is not None:
+                file_tag_dicts.append(tags)
+
+    if len(file_tag_dicts) < 2:
+        return False
+
+    artist_values = {
+        _normalise_tag_value(tags.get("artist"))
+        for tags in file_tag_dicts
+        if _normalise_tag_value(tags.get("artist"))
+    }
+    if len(artist_values) != 1:
+        return False
+
+    years = [
+        int(year[:4])
+        for tags in file_tag_dicts
+        if (year := _normalise_tag_value(tags.get("year"))) and re.match(r"^\d{4}", year)
+    ]
+    if len(years) < 2:
+        return False
+
+    return (max(years) - min(years)) >= 5
+
+
 def get_folder_context(path: Path) -> FolderContext:
     """Build folder context for an audio file path or folder path."""
     candidate = path if path.is_dir() else path.parent

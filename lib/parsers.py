@@ -39,6 +39,10 @@ _PATTERNS = [
     re.compile(
         r"^(?P<track>\d{1,3})\.\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
     ),
+    # 06 Artist Name - Song Title.ext  (space-separated track with artist and title)
+    re.compile(
+        r"^(?P<track>\d{1,3})\s+(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
+    ),
     # Artist Name - Song Title.ext
     re.compile(
         r"^(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
