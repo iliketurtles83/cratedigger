@@ -219,3 +219,29 @@ Album Title (Year)/                   # compilations and soundtracks
 - `musicbrainzngs` — MusicBrainz metadata *(optional)*
 - `librosa` — BPM detection *(optional)*
 
+---
+
+## Testing
+
+The repo uses the standard library `unittest` runner; no extra test dependency is required.
+
+```bash
+.venv/bin/python -m unittest discover -s tests
+```
+
+That default suite only covers pure helper logic and temporary-directory folder-shape tests, so it is fast and does not touch your music library.
+
+There is also an opt-in, read-only smoke test that uses your real `config.MUSIC_ROOT` and scans for one actual audio file:
+
+```bash
+CRATEDIGGER_RUN_REAL_AUDIO_TESTS=1 .venv/bin/python -m unittest discover -s tests
+```
+
+Use the real-audio tests sparingly. They do not write anything, but they do depend on your local library and current `config.py`.
+
+If you want those dry-run integration tests to target a specific top-level library folder, set `CRATEDIGGER_TEST_FOLDER`:
+
+```bash
+CRATEDIGGER_RUN_REAL_AUDIO_TESTS=1 CRATEDIGGER_TEST_FOLDER=pop .venv/bin/python -m unittest discover -s tests
+```
+
