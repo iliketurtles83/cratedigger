@@ -80,6 +80,10 @@ _RIPPER_ANNOTATIONS = re.compile(
     re.IGNORECASE
 )
 
+_COMPACT_DISC_TRACK_PREFIX = re.compile(
+    r"^(?P<compact>\d{3,4})(?:[\s._-]+)(?P<title>.+)$"
+)
+
 def sanitise_name(value: str) -> str:
     """Remove ripper annotations and illegal filename/folder characters."""
     # Strip ripper damage/incomplete markers
@@ -107,6 +111,64 @@ def _clean_disc(disc: str | None) -> str | None:
         return None
     num = disc.split("/")[0].strip().lstrip("0")
     return num or None
+
+
+def split_compact_disc_track(number: str) -> tuple[str | None, str | None]:
+    """Split compact disc-track number like ``101`` into (disc, track).
+
+    Returns ``(None, None)`` when the value is not a supported compact form.
+    """
+    if not number.isdigit() or len(number) not in (3, 4):
+        return (None, None)
+
+    disc_raw = number[:-2].lstrip("0")
+    track_raw = number[-2:]
+
+    if not disc_raw:
+        return (None, None)
+
+    try:
+        track_num = int(track_raw)
+    except ValueError:
+        return (None, None)
+
+    if track_num <= 0:
+        return (None, None)
+
+    return (disc_raw, str(track_num))
+
+
+def parse_compact_disc_track_candidate(path: Path) -> dict[str, str | None]:
+    """Parse compact disc-track prefix from filename stem when present.
+
+    Example: ``101-Track Title.mp3`` -> ``{"disc": "1", "track": "1", ...}``.
+    """
+    stem = path.stem.strip()
+    m = _COMPACT_DISC_TRACK_PREFIX.match(stem)
+    if not m:
+        return {
+            "compact": None,
+            "disc": None,
+            "track": None,
+            "title": None,
+        }
+
+    compact = m.group("compact")
+    disc, track = split_compact_disc_track(compact)
+    if not disc or not track:
+        return {
+            "compact": compact,
+            "disc": None,
+            "track": None,
+            "title": m.group("title").strip() or None,
+        }
+
+    return {
+        "compact": compact,
+        "disc": disc,
+        "track": track,
+        "title": m.group("title").strip() or None,
+    }
 
 
 def parse_filename(path: Path) -> dict[str, str | None]:

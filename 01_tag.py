@@ -21,11 +21,11 @@ from collections import Counter
 from pathlib import Path
 
 import config
-from lib.context import classify_folder, get_folder_context, infer_best_of_folder, infer_compilation_folder
+from lib.context import classify_folder, get_folder_context, infer_best_of_folder, infer_compilation_folder, is_disc_subfolder
 from lib.genres import has_meaningful_genres, merge_genres, normalise_genre
 from lib.logger import setup_logger
 from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata
-from lib.parsers import parse_filename, parse_folder_name
+from lib.parsers import parse_compact_disc_track_candidate, parse_filename, parse_folder_name
 from lib.tags import read_tags, write_tags
 
 log: logging.Logger = None  # type: ignore[assignment]
@@ -78,6 +78,8 @@ def is_suspicious(value: str | None) -> bool:
 
 
 _TRAILING_PAREN = re.compile(r'\(([^)]+)\)\s*$')
+_DISC_IN_FOLDER_NAME = re.compile(r"[\(\[]\s*disc\s*\d+\s*[\)\]]", re.IGNORECASE)
+_MULTIDISC_PARENT_CACHE: dict[Path, tuple[bool, str | None]] = {}
 
 
 def _extract_title_suffix(filename_title: str, tag_title: str) -> str | None:
@@ -94,18 +96,95 @@ def _extract_title_suffix(filename_title: str, tag_title: str) -> str | None:
     return None
 
 
+def _normalise_tag_number(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.split("/")[0].strip().lstrip("0") or "0"
+
+
+def _infer_multidisc_context_from_parent(parent: Path) -> tuple[bool, str | None]:
+    cached = _MULTIDISC_PARENT_CACHE.get(parent)
+    if cached is not None:
+        return cached
+
+    if is_disc_subfolder(parent.name):
+        result = (True, "disc_subfolder")
+        _MULTIDISC_PARENT_CACHE[parent] = result
+        return result
+
+    if _DISC_IN_FOLDER_NAME.search(parent.name):
+        result = (True, "disc_indicator_in_folder_name")
+        _MULTIDISC_PARENT_CACHE[parent] = result
+        return result
+
+    compact_discs: set[str] = set()
+    try:
+        children = sorted(parent.iterdir())
+    except OSError:
+        result = (False, None)
+        _MULTIDISC_PARENT_CACHE[parent] = result
+        return result
+
+    for child in children:
+        if not child.is_file() or child.suffix.lower() not in config.AUDIO_EXTENSIONS:
+            continue
+
+        sibling_parsed = parse_filename(child)
+        if sibling_parsed.get("disc"):
+            result = (True, "explicit_disc_track_filename")
+            _MULTIDISC_PARENT_CACHE[parent] = result
+            return result
+
+        compact = parse_compact_disc_track_candidate(child)
+        if compact.get("disc"):
+            compact_discs.add(compact["disc"])
+            if len(compact_discs) > 1:
+                result = (True, "multiple_compact_disc_prefixes")
+                _MULTIDISC_PARENT_CACHE[parent] = result
+                return result
+
+    result = (False, None)
+    _MULTIDISC_PARENT_CACHE[parent] = result
+    return result
+
+
+def _interpret_compact_disc_track(
+    path: Path,
+    parsed: dict[str, str | None],
+) -> tuple[dict[str, str | None], bool, str | None]:
+    """Interpret 101-style prefixes as disc-track only in multidisc context."""
+    if parsed.get("disc"):
+        return parsed, False, None
+
+    compact = parse_compact_disc_track_candidate(path)
+    if not compact.get("disc") or not compact.get("track"):
+        return parsed, False, None
+
+    has_multidisc, reason = _infer_multidisc_context_from_parent(path.parent)
+    if not has_multidisc:
+        return parsed, False, None
+
+    interpreted = dict(parsed)
+    interpreted["disc"] = compact["disc"]
+    interpreted["track"] = compact["track"]
+    if not interpreted.get("title") and compact.get("title"):
+        interpreted["title"] = compact["title"]
+    return interpreted, True, reason
+
+
 def tag_file(
     path: Path,
     *,
     dry_run: bool = True,
     overwrite: bool = False,
     fix_suspicious: bool = False,
+    fix_track_mismatch: bool = False,
     no_bpm: bool = False,
     no_mb: bool = False,
     review_items: list[dict],
 ) -> None:
     """Tag a single audio file."""
-    log.debug("Processing %s", path)
+    log.info("Processing %s", path)
 
     existing = read_tags(path)
     if existing is None:
@@ -114,7 +193,8 @@ def tag_file(
         return
     new_tags: dict[str, str | None] = {}
     ctx = get_folder_context(path)
-    parsed = parse_filename(path)
+    parsed_raw = parse_filename(path)
+    parsed, compact_interpreted, compact_reason = _interpret_compact_disc_track(path, parsed_raw)
 
     effective_existing = dict(existing)
     if fix_suspicious:
@@ -127,6 +207,19 @@ def tag_file(
             existing_norm = existing["track"].split("/")[0].strip().lstrip("0") or "0"
             if existing_norm != parsed_track:
                 effective_existing["track"] = None
+
+    if fix_track_mismatch:
+        parsed_track = parsed.get("track")
+        existing_track = _normalise_tag_number(existing.get("track"))
+        if parsed_track and existing_track and existing_track != parsed_track:
+            effective_existing["track"] = None
+
+        parsed_disc = parsed.get("disc")
+        existing_disc = _normalise_tag_number(existing.get("disc"))
+        if parsed_disc and existing_disc and existing_disc != parsed_disc:
+            effective_existing["disc"] = None
+        elif parsed_disc and not existing_disc:
+            effective_existing["disc"] = None
 
     # --- Fingerprint + MusicBrainz ------------------------------------------
     needs_mb_for_identity = (
@@ -209,6 +302,9 @@ def tag_file(
             new_tags["track"] = parsed["track"]
         elif mb_meta.get("track"):
             new_tags["track"] = mb_meta["track"]
+    if overwrite or (fix_track_mismatch and not effective_existing.get("disc")):
+        if parsed.get("disc"):
+            new_tags["disc"] = parsed["disc"]
 
     # --- Fallback: parse filename for artist / title if still missing --------
     # Only fills fields empty in BOTH existing tags and new_tags so far.
@@ -251,6 +347,11 @@ def tag_file(
                 "reason": "track_mismatch",
                 "tag_track": existing_norm,
                 "filename_track": parsed["track"],
+                "filename_track_raw": parsed_raw.get("track"),
+                "tag_disc": _normalise_tag_number(existing.get("disc")),
+                "filename_disc": parsed.get("disc"),
+                "compact_disc_track_interpreted": compact_interpreted,
+                "multidisc_context_reason": compact_reason,
             })
 
     # --- Genre ---------------------------------------------------------------
@@ -535,6 +636,7 @@ def _consistency_pass(
 def walk_folder(folder: Path, **kwargs) -> list[dict]:
     """Process all audio files under *folder*."""
     review_items: list[dict] = []
+    _MULTIDISC_PARENT_CACHE.clear()
     dry_run = kwargs.get("dry_run", True)
     no_consistency = kwargs.pop("no_consistency", False)
 
@@ -567,6 +669,8 @@ def main() -> None:
                         help="Overwrite existing artist/title/album/year tags")
     parser.add_argument("--fix-suspicious", action="store_true",
                         help="Replace suspicious placeholder values only")
+    parser.add_argument("--fix-track-mismatch", action="store_true",
+                        help="When filename track/disc conflicts with tags, update track/disc from filename")
     parser.add_argument("--no-bpm", action="store_true",
                         help="Skip BPM detection (fast metadata-only pass)")
     parser.add_argument("--no-mb", action="store_true",
@@ -597,6 +701,7 @@ def main() -> None:
             dry_run=dry_run,
             overwrite=args.overwrite,
             fix_suspicious=args.fix_suspicious,
+            fix_track_mismatch=args.fix_track_mismatch,
             no_bpm=args.no_bpm,
             no_mb=args.no_mb,
             no_consistency=args.no_consistency,
