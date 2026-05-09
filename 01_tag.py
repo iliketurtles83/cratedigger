@@ -458,6 +458,8 @@ def _consistency_pass_folder(
     for field in ("artist", "album", "year"):
         if (is_compilation or is_multi_artist) and field == "artist":
             continue
+        if (is_compilation or is_best_of) and field == "album":
+            continue
         if is_best_of and field == "year":
             continue
 

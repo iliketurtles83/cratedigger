@@ -167,6 +167,17 @@ def infer_compilation_folder(
     return dominant_share <= 0.5
 
 
+_BEST_OF_KEYWORDS = re.compile(
+    r"\b(best\s+of|greatest\s+hits?|anthology|retrospective|"
+    r"the\s+collection|essential|singles\s+collection|"
+    r"complete\s+collection|rarities|b[\-\s]?sides)\b",
+    re.IGNORECASE,
+)
+
+# Any 4-digit year (1900–2099) in a folder name signals a single dated release
+_FOLDER_YEAR = re.compile(r"\b(19|20)\d{2}\b")
+
+
 def infer_best_of_folder(
     folder: Path,
     *,
@@ -174,11 +185,35 @@ def infer_best_of_folder(
 ) -> bool:
     """Return True when *folder* looks like a single-artist best-of/anthology.
 
-    Detection: exactly one distinct track artist AND year tags spanning at
-    least 5 years.  These albums have intentionally varied per-track years
-    (original recording dates) and should not be subject to year-consistency
-    enforcement.
+    Detection order:
+    1. Folder name contains best-of keywords (e.g. "Greatest Hits") → True.
+    2. Folder name contains a year (e.g. "[1979]", "(2003)") → False;
+       a release year in the name means it is a regular dated album, not a
+       retrospective, even if per-track years are messy.
+    3. Exactly one distinct track artist AND year tags spanning ≥ 5 years →
+       True (tracks carry original recording dates, a hallmark of best-ofs).
     """
+    folder_name = folder.name
+
+    # Rule 1 — keyword match: always a best-of regardless of year in name
+    if _BEST_OF_KEYWORDS.search(folder_name):
+        # Still require single artist in tags to exclude multi-artist comps
+        if file_tag_dicts is None:
+            file_tag_dicts = []
+            for child in sorted(folder.rglob("*")):
+                if not child.is_file() or child.suffix.lower() not in config.AUDIO_EXTENSIONS:
+                    continue
+                tags = read_tags(child)
+                if tags is not None:
+                    file_tag_dicts.append(tags)
+        artist_values = {
+            _normalise_tag_value(tags.get("artist"))
+            for tags in file_tag_dicts
+            if _normalise_tag_value(tags.get("artist"))
+        }
+        if len(artist_values) == 1:
+            return True
+
     if file_tag_dicts is None:
         file_tag_dicts = []
         for child in sorted(folder.rglob("*")):
@@ -191,6 +226,10 @@ def infer_best_of_folder(
     if len(file_tag_dicts) < 2:
         return False
 
+    # Rule 2 — folder name has a year → regular dated release, not a best-of
+    if _FOLDER_YEAR.search(folder_name):
+        return False
+
     artist_values = {
         _normalise_tag_value(tags.get("artist"))
         for tags in file_tag_dicts
@@ -199,6 +238,7 @@ def infer_best_of_folder(
     if len(artist_values) != 1:
         return False
 
+    # Rule 3 — year-span heuristic
     years = [
         int(year[:4])
         for tags in file_tag_dicts
