@@ -9,13 +9,33 @@ INCOMING_FOLDER      = MUSIC_ROOT / "incoming"        # drop zone
 STAGED_TRACKS_FOLDER = MUSIC_ROOT / "new_songs"       # loose files by genre, awaiting decision
 STAGED_ALBUMS_FOLDER = MUSIC_ROOT / "new_albums"      # albums by genre, review before promoting
 
-# Special folders — tag only, never move or rename files
-SPECIAL_FOLDERS = {
-    "0faves", "0faves_alltime", "0random", "0random_good",
-    "0new", "0shacks", "0compilations", "0various", "0mixes",
+# ── Artist-root letter bucketing ──────────────────────────────────────────────
+LETTER_BUCKETING  = True
+ARTICLE_STRIP     = ["The", "A", "An"]    # stripped for bucketing only, not from folder name
+SYMBOL_BUCKET     = "#"                   # bucket for artists starting with numbers/symbols
+
+ARTIST_SINGLES_FOLDER = "0singles"        # created under artist folder when needed
+ROOT_SINGLES_FOLDER   = "0singles"        # root-level holding pen for homeless singles
+
+# Top-level special folders — never renamed, never moved, no genre injected from path
+TOP_LEVEL_SPECIAL = {
+    "0compilations",
+    "0various",
+    "0mixes",
+    "0singles",
+    "0random",
+    "#",
 }
 
-SKIP_FOLDERS = {"0videos"}
+LETTER_BUCKETS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+# SKIP_FOLDERS includes letter buckets, the symbol bucket, and top-level special folders.
+# The pipeline descends into letter buckets rather than treating them as genre contexts.
+# TOP_LEVEL_SPECIAL folders are never renamed, never moved, never have genre injected from path.
+SKIP_FOLDERS = TOP_LEVEL_SPECIAL | LETTER_BUCKETS | {SYMBOL_BUCKET}
+
+# Special folders — tag only, never move or rename files (kept for backward compatibility)
+SPECIAL_FOLDERS = TOP_LEVEL_SPECIAL
 
 # Folders where BPM detection makes no sense (speech, ambient, mixes)
 NO_BPM_FOLDERS = {"spoken", "0mixes"}

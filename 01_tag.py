@@ -102,6 +102,18 @@ def _normalise_tag_number(value: str | None) -> str | None:
     return value.split("/")[0].strip().lstrip("0") or "0"
 
 
+def _metadata_source_folder(path: Path) -> Path:
+    """Return folder to use for album/year fallback metadata.
+
+    For disc subfolders like "Disc 1" or "(disc 2)", metadata is usually
+    encoded in the parent album folder name.
+    """
+    parent = path.parent
+    if is_disc_subfolder(parent.name) or _DISC_IN_FOLDER_NAME.search(parent.name):
+        return parent.parent
+    return parent
+
+
 def _infer_multidisc_context_from_parent(parent: Path) -> tuple[bool, str | None]:
     cached = _MULTIDISC_PARENT_CACHE.get(parent)
     if cached is not None:
@@ -184,7 +196,7 @@ def tag_file(
     review_items: list[dict],
 ) -> None:
     """Tag a single audio file."""
-    log.info("Processing %s", path)
+    log.debug("Processing %s", path)
 
     existing = read_tags(path)
     if existing is None:
@@ -232,7 +244,7 @@ def tag_file(
 
     needs_mb_for_year = (
         not effective_existing.get("year") and
-        not parse_folder_name(path.parent.name).get("year")
+        not parse_folder_name(_metadata_source_folder(path).name).get("year")
     )
 
     needs_mb_for_genre = not has_meaningful_genres(existing.get("genre"))
@@ -317,7 +329,7 @@ def tag_file(
 
     # --- Fallback: parse parent folder for album / year if still missing -----
     # Only fills fields empty in BOTH existing tags and new_tags so far.
-    folder_info = parse_folder_name(path.parent.name)
+    folder_info = parse_folder_name(_metadata_source_folder(path).name)
     if not effective_existing.get("album") and not new_tags.get("album"):
         if folder_info.get("album"):
             new_tags["album"] = folder_info["album"]
@@ -355,8 +367,9 @@ def tag_file(
             })
 
     # --- Genre ---------------------------------------------------------------
-    # Always merge: folder genre + existing genre + MB genres (collect_set).
-    # Existing genre is included so it is never lost, only enriched.
+    # For regular folders: merge folder genre + existing tags + MB genres.
+    # For special folders: SPECIAL_FOLDER_GENRE_POLICY controls source order;
+    # first non-empty source wins; fallback:X applied only when all others empty.
     folder_genre = ctx.genre
     existing_genres = [
         g.strip()
@@ -364,15 +377,47 @@ def tag_file(
         if g.strip()
     ]
     normalised_mb = [normalise_genre(g) for g in mb_genre_list]
-    genre_str = merge_genres(folder_genre, existing_genres + normalised_mb)
+
+    special_policy = None
+    if ctx.is_special_folder:
+        special_policy = getattr(config, "SPECIAL_FOLDER_GENRE_POLICY", {}).get(ctx.top)
+
+    if special_policy is not None:
+        genre_str = None
+        fallback_genre: str | None = None
+        for source in special_policy:
+            if source == "existing_tag":
+                if existing_genres:
+                    genre_str = merge_genres(None, existing_genres)
+                    break
+            elif source == "mb":
+                if normalised_mb:
+                    genre_str = merge_genres(None, normalised_mb)
+                    break
+            elif source.startswith("fallback:"):
+                fallback_genre = normalise_genre(source.split(":", 1)[1].strip())
+
+        if not genre_str and fallback_genre:
+            genre_str = fallback_genre
+            log.info("Genre fallback %r applied to %s", genre_str, path.name)
+            review_items.append({
+                "path": str(path),
+                "reason": "genre_fallback_applied",
+                "genre": genre_str,
+            })
+        elif not genre_str:
+            log.warning("No genre resolved for %s — flagging for review", path.name)
+            review_items.append({"path": str(path), "reason": "no_genre"})
+    else:
+        genre_str = merge_genres(folder_genre, existing_genres + normalised_mb)
+        if not genre_str:
+            log.warning("No genre resolved for %s — flagging for review", path.name)
+            review_items.append({"path": str(path), "reason": "no_genre"})
 
     if genre_str:
         # Only write if the merged result differs from what is already stored
         if genre_str != existing.get("genre"):
             new_tags["genre"] = genre_str
-    else:
-        log.warning("No genre resolved for %s — flagging for review", path.name)
-        review_items.append({"path": str(path), "reason": "no_genre"})
 
     # --- AlbumArtist / ISRC --------------------------------------------------
     if (ctx.is_compilation or ctx.is_soundtrack) and not existing.get("albumartist"):
@@ -461,6 +506,57 @@ def _pick_preferred_value(values: list[str]) -> str | None:
         return raw_counts.most_common(1)[0][0]
 
     return _pick_majority(values)
+
+
+def _normalise_year_for_consistency(year: str | None) -> str | None:
+    """Extract YYYY from year values with dates or annotations for comparison.
+    
+    Examples:
+      '1987' -> '1987'
+      '1987-05-09' -> '1987'
+      '1987 Remaster' -> '1987'
+      '2005 (Reissue)' -> '2005'
+    """
+    if not year:
+        return None
+    # Extract just the 4-digit year
+    m = re.search(r'\d{4}', year)
+    return m.group(0) if m else None
+
+
+def _pick_majority_year(values: list[str]) -> str | None:
+    """Pick majority year after normalizing year variants (dates, remasters, etc.).
+    
+    Groups year values by their base YYYY, then returns the most common base year.
+    """
+    if not values:
+        return None
+    
+    # Map normalized year (YYYY) -> list of original values
+    normalized: dict[str, list[str]] = {}
+    for val in values:
+        norm = _normalise_year_for_consistency(val)
+        if norm:
+            normalized.setdefault(norm, []).append(val)
+    
+    if not normalized:
+        return None
+    if len(normalized) == 1:
+        # All values normalize to the same year; return the most common form
+        from collections import Counter
+        counts = Counter(list(normalized.values())[0])
+        return counts.most_common(1)[0][0]
+    
+    # Multiple distinct years: apply majority logic
+    total = len(values)
+    best_year = max(normalized, key=lambda k: len(normalized[k]))
+    if len(normalized[best_year]) / total >= _MAJORITY_THRESHOLD:
+        # Return the most common raw form for the majority year
+        from collections import Counter
+        counts = Counter(normalized[best_year])
+        return counts.most_common(1)[0][0]
+    
+    return None
 
 
 def _backfill_compilation_albumartist(
@@ -569,31 +665,59 @@ def _consistency_pass_folder(
         if not non_empty:
             continue
 
-        # Check if already consistent (case-insensitive)
-        normalised = {_normalise_whitespace(v).lower() for v in non_empty}
-        if len(normalised) <= 1:
-            continue
+        # For year field, normalize before checking consistency (handle date variants, remasters, etc.)
+        if field == "year":
+            # Normalize all year values and check if they normalize to a single year
+            normalized_years = [_normalise_year_for_consistency(v) for v in non_empty]
+            if len(set(normalized_years)) <= 1:
+                # All years normalize to the same value; no action needed
+                continue
+            # Multiple distinct years; try to pick majority
+            majority = _pick_majority_year(non_empty)
+            if majority is None:
+                log.warning("  No clear majority for %s in %s (%s) — flagging",
+                            field, folder.name,
+                            ", ".join(sorted(set(normalized_years))))
+                review_items.append({
+                    "path": str(folder),
+                    "reason": "inconsistent_tags",
+                    "field": field,
+                    "variants": sorted(set(normalized_years)),
+                })
+                continue
+        else:
+            # Check if already consistent (case-insensitive) for non-year fields
+            normalised = {_normalise_whitespace(v).lower() for v in non_empty}
+            if len(normalised) <= 1:
+                continue
 
-        majority = _pick_majority(non_empty)
-        if majority is None:
-            log.warning("  No clear majority for %s in %s (%s) — flagging",
-                        field, folder.name,
-                        ", ".join(sorted(normalised)))
-            review_items.append({
-                "path": str(folder),
-                "reason": "inconsistent_tags",
-                "field": field,
-                "variants": sorted(normalised),
-            })
-            continue
+            majority = _pick_majority(non_empty)
+            if majority is None:
+                log.warning("  No clear majority for %s in %s (%s) — flagging",
+                            field, folder.name,
+                            ", ".join(sorted(normalised)))
+                review_items.append({
+                    "path": str(folder),
+                    "reason": "inconsistent_tags",
+                    "field": field,
+                    "variants": sorted(normalised),
+                })
+                continue
 
         # Fix outliers
         for path, tags in file_tags:
             current = (tags.get(field) or "").strip()
             if not current:
                 continue
-            if _normalise_whitespace(current).lower() == _normalise_whitespace(majority).lower():
-                continue
+            
+            # For year field, compare normalized values; for others, use whitespace-normalized comparison
+            if field == "year":
+                if _normalise_year_for_consistency(current) == _normalise_year_for_consistency(majority):
+                    continue
+            else:
+                if _normalise_whitespace(current).lower() == _normalise_whitespace(majority).lower():
+                    continue
+            
             if dry_run:
                 log.info("  [DRY-RUN] Would fix %s: %r → %r in %s",
                          field, current, majority, path.name)
@@ -626,6 +750,27 @@ def _consistency_pass(
     # Also check the root itself if it's an album
     _consistency_pass_folder(
         root, dry_run=dry_run, review_items=review_items,
+    )
+
+
+def _review_item_key(item: dict) -> str:
+    """Return stable identity key for review item dedupe.
+
+    Includes path, reason, and sorted payload so distinct variants are kept.
+    """
+    payload = {
+        key: item.get(key)
+        for key in sorted(item)
+        if key not in {"path", "reason"}
+    }
+    return json.dumps(
+        {
+            "path": item.get("path"),
+            "reason": item.get("reason"),
+            "payload": payload,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
     )
 
 
@@ -718,9 +863,13 @@ def main() -> None:
                 pass
 
         if not dry_run:
-            seen = {(e["path"], e["reason"]) for e in existing_review}
+            seen = {
+                _review_item_key(e)
+                for e in existing_review
+                if isinstance(e, dict)
+            }
             for item in all_review:
-                key = (item["path"], item["reason"])
+                key = _review_item_key(item)
                 if key not in seen:
                     existing_review.append(item)
                     seen.add(key)

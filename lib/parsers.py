@@ -31,6 +31,10 @@ _PATTERNS = [
     re.compile(
         r"^(?P<artist>.+?)\s*-\s*(?P<track>\d{1,3})\s*-\s*(?P<title>.+)$"
     ),
+    # 01 - Song Title.ext  (track with dash and spaces, no artist)
+    re.compile(
+        r"^(?P<track>\d{1,3})\s*-\s*(?P<title>.+)$"
+    ),
     # 04-Song Title.ext  (dash without spaces, ripper format)
     re.compile(
         r"^(?P<track>\d{1,3})-(?P<title>.+)$"
@@ -182,7 +186,7 @@ def parse_filename(path: Path) -> dict[str, str | None]:
                 "artist": groups.get("artist", "").strip() or None,
                 "title":  groups.get("title",  "").strip() or None,
                 "track":  _clean_track(groups.get("track")),
-                "disc":   groups.get("disc", "").strip() or None,
+                "disc":   _clean_disc(groups.get("disc")),
             }
     # Fallback — treat the whole stem as title
     return {"artist": None, "title": stem.strip() or None, "track": None, "disc": None}

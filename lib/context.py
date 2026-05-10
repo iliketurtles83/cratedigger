@@ -63,6 +63,12 @@ def classify_folder(folder: Path) -> str:
     starts_with_0 = name.startswith("0")
     has_separator = " - " in name
 
+    # Artist-root: single A-Z letter bucket or symbol bucket (#)
+    _letter_buckets = getattr(config, "LETTER_BUCKETS", set())
+    _symbol_bucket  = getattr(config, "SYMBOL_BUCKET", "#")
+    if name == _symbol_bucket or (len(name) == 1 and name.upper() in _letter_buckets):
+        return "letter_bucket"
+
     if is_disc_subfolder(name):
         return "disc"
     if starts_with_0 and name in config.SUBGENRE_BUCKETS:
@@ -275,15 +281,21 @@ def get_folder_context(path: Path) -> FolderContext:
             bucket = parts[1]
             if bucket in config.SUBGENRE_BUCKETS:
                 subgenre = config.SUBGENRE_BUCKETS[bucket]
-    elif top in {"0random", "0random_good"} and len(parts) >= 2:
-        genre = config.FOLDER_TO_GENRE.get(parts[1].lower())
+    # Note: 0random / 0mixes genre is resolved via SPECIAL_FOLDER_GENRE_POLICY
+    # in 01_tag.py, not from the subfolder path.  No genre is path-inferred here.
 
-    # Compilation context: top-level ALBUMARTIST_FOLDERS OR local
-    # 0compilations/0various subfolders inside genre folders.
-    local_parts = {p.lower() for p in parts}
+    # Compilation context:
+    # 1) top-level ALBUMARTIST_FOLDERS (0compilations, 0various, soundtrack)
+    # 2) explicit local compilation buckets directly under a genre folder (legacy)
+    local_compilation_bucket = (
+        is_genre_folder
+        and len(parts) >= 2
+        and parts[1].lower() in {"0compilations", "0various"}
+    )
     is_compilation = (
         top in config.ALBUMARTIST_FOLDERS
-        or bool(local_parts & {"0compilations", "0various"})
+        or top in {"0compilations", "0various"}
+        or local_compilation_bucket
     )
     is_soundtrack = top == "soundtrack"
     needs_bpm = top not in config.NO_BPM_FOLDERS

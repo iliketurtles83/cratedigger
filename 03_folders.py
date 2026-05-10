@@ -10,6 +10,9 @@ In two-level setups:
 Never renames: SPECIAL_FOLDERS, SKIP_FOLDERS, subgenre buckets, disc
 subfolders, or genre root folders themselves.
 
+Does NOT move files. All file movement (singles, intake staging, etc.)
+is handled exclusively by 04_move.py.
+
 Usage:
     python 03_folders.py [--dry-run] [--folder NAME] [--log FILE]
 """
@@ -36,6 +39,34 @@ _FOLDER_NO_YEAR = re.compile(r"^(?P<artist>.+?)\s+-\s+(?P<album>.+)$")
 
 # Year in parentheses embedded in album text
 _EMBEDDED_YEAR = re.compile(r"[\(\[](\d{4})[\)\]]")
+
+# Patterns indicating multi-album/multi-era content (compilations, discographies, etc.)
+_MULTI_ALBUM_INDICATORS = re.compile(
+    r"\b(discography|compilation|collection|anthology|retrospective|"
+    r"best of|greatest hits|box set|remaster|reissue|expanded|deluxe)",
+    re.IGNORECASE
+)
+
+
+def _normalise_year_for_comparison(year: str) -> str | None:
+    """Extract YYYY from year values with dates or annotations.
+    
+    Examples:
+      '1987' -> '1987'
+      '1987-05-09' -> '1987'
+      '1987 Remaster' -> '1987'
+      '2005 (Reissue)' -> '2005'
+    """
+    if not year:
+        return None
+    # Try to extract just the year part
+    m = re.search(r'\d{4}', year)
+    return m.group(0) if m else None
+
+
+def _has_multi_album_indicators(folder_name: str) -> bool:
+    """Detect if folder name suggests multi-album content."""
+    return bool(_MULTI_ALBUM_INDICATORS.search(folder_name))
 
 
 def _fix_the(name: str) -> str:
@@ -75,13 +106,14 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
 
         artist = (tags.get("artist") or "").strip()
         album = (tags.get("album") or "").strip()
-        year = (tags.get("year") or "").strip()[:4]
+        year_raw = (tags.get("year") or "").strip()
+        year = _normalise_year_for_comparison(year_raw)
 
         if artist and artist.lower() not in field_values["artist"]:
             field_values["artist"][artist.lower()] = artist
         if album and album.lower() not in field_values["album"]:
             field_values["album"][album.lower()] = album
-        if re.match(r"^\d{4}$", year) and year not in field_values["year"]:
+        if year and year not in field_values["year"]:
             field_values["year"][year] = year
 
     mixed_fields = sorted(
@@ -165,6 +197,7 @@ def _normalise_folder(
         folder,
         file_tag_dicts=tag_summary["tag_dicts"],
     )
+    is_multi_album = _has_multi_album_indicators(name)
     mixed_fields = tag_summary["mixed_fields"]
 
     # Compilations/soundtracks expect mixed artists — only flag other fields.
@@ -175,8 +208,12 @@ def _normalise_folder(
     # (original recording dates) — exclude year from the mixed check too.
     # Album field is also excluded for best-ofs: tracks come from different
     # releases so mixed album tags are expected.
+    # Multi-album folders (discographies, collections) also expect mixed year/album.
     _excluded = {"artist"}
     if is_best_of:
+        _excluded.add("year")
+        _excluded.add("album")
+    if is_multi_album:
         _excluded.add("year")
         _excluded.add("album")
     effective_mixed = [f for f in mixed_fields if f not in _excluded]
@@ -293,6 +330,7 @@ def _normalise_album_child(
         folder,
         file_tag_dicts=tag_summary["tag_dicts"],
     )
+    is_multi_album = _has_multi_album_indicators(album)
     mixed_fields = tag_summary["mixed_fields"]
 
     # Compilations/soundtracks expect mixed artists — only flag other fields.
@@ -300,8 +338,12 @@ def _normalise_album_child(
     # tags should not block a child album rename.
     # Single-artist best-of albums have intentionally varied per-track years
     # and mixed album tags (tracks from different releases).
+    # Multi-album folders (discographies, collections) also expect mixed year/album.
     _excluded = {"artist"}
     if is_best_of:
+        _excluded.add("year")
+        _excluded.add("album")
+    if is_multi_album:
         _excluded.add("year")
         _excluded.add("album")
     effective_mixed = [f for f in mixed_fields if f not in _excluded]
@@ -591,8 +633,8 @@ def _process_level2(
                                      review_items=review_items)
 
         elif kind == "artist_mixed":
-            _move_loose_to_singles(child, dry_run=dry_run,
-                                   review_items=review_items)
+            # Note: loose files in artist folders are NOT moved here.
+            # File movement (singles, etc.) is handled by 04_move.py.
             _normalise_artist_folder(child, dry_run=dry_run,
                                      review_items=review_items)
 
@@ -614,6 +656,24 @@ def walk_folder(folder: Path, **kwargs) -> list[dict]:
     review_items: list[dict] = []
     _process_level2(folder, review_items=review_items, **kwargs)
     return review_items
+
+
+def _review_item_key(item: dict) -> str:
+    """Return stable identity key for review item dedupe."""
+    payload = {
+        key: item.get(key)
+        for key in sorted(item)
+        if key not in {"path", "reason"}
+    }
+    return json.dumps(
+        {
+            "path": item.get("path"),
+            "reason": item.get("reason"),
+            "payload": payload,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
 
 
 def main() -> None:
@@ -659,9 +719,13 @@ def main() -> None:
                 pass
 
         if not dry_run:
-            seen = {(e["path"], e["reason"]) for e in existing}
+            seen = {
+                _review_item_key(e)
+                for e in existing
+                if isinstance(e, dict)
+            }
             for item in all_review:
-                key = (item["path"], item["reason"])
+                key = _review_item_key(item)
                 if key not in seen:
                     existing.append(item)
                     seen.add(key)

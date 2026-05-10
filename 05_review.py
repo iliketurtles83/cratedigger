@@ -174,7 +174,71 @@ HANDLERS = {
     "artist_flat_incomplete": handle_generic,
     "artist_flat_rename_proposal": handle_artist_flat_proposal,
     "artist_flat_rename_conflict": handle_rename_conflict,
+    "genre_fallback_applied": handle_generic,
+    "no_artist_tag": handle_generic,
 }
+
+
+# ---------------------------------------------------------------------------
+# Batch mode
+# ---------------------------------------------------------------------------
+
+# Reasons where "dismiss all" is safe because the action was already applied
+# automatically (the pipeline writes the tag; review is informational only).
+_BATCH_AUTO_DISMISS = {"genre_fallback_applied"}
+
+
+def run_batch_mode(items: list[dict], *, dry_run: bool) -> list[dict]:
+    """Process review items grouped by reason.
+
+    For each reason group:
+      [a] dismiss all  — available only for auto-dismiss reasons
+      [i] review individually (falls back to per-item handlers)
+      [s] skip entire group (keep all in review)
+    """
+    from collections import defaultdict
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for item in items:
+        groups[item.get("reason", "unknown")].append(item)
+
+    print(f"\n=== Batch review: {len(items)} item(s) across {len(groups)} reason(s) ===")
+    for reason, group in sorted(groups.items(), key=lambda x: -len(x[1])):
+        marker = "  [auto-dismiss available]" if reason in _BATCH_AUTO_DISMISS else ""
+        print(f"  {len(group):4d}  {reason}{marker}")
+    print()
+
+    remaining: list[dict] = []
+
+    for reason, group in sorted(groups.items(), key=lambda x: -len(x[1])):
+        print(f"\n{'='*60}")
+        print(f"  Group: {reason}  ({len(group)} item(s))")
+
+        if reason in _BATCH_AUTO_DISMISS:
+            print("  Tag action already applied by pipeline. Options:")
+            print("    [a] Dismiss all (remove from review)")
+        else:
+            print("  Options:")
+        print("    [i] Review individually")
+        print("    [s] Skip group (keep all in review)")
+
+        choice = input("  Choice: ").strip().lower()
+
+        if choice == "a" and reason in _BATCH_AUTO_DISMISS:
+            log.info("Batch dismissed %d '%s' item(s)", len(group), reason)
+        elif choice == "i":
+            handler = HANDLERS.get(reason, handle_generic)
+            for item in group:
+                path_val = item.get("path")
+                if path_val and not Path(path_val).exists():
+                    continue
+                resolved = handler(item, dry_run=dry_run)
+                if not resolved:
+                    remaining.append(item)
+        else:
+            remaining.extend(group)
+
+    return remaining
 
 
 def main() -> None:
@@ -185,6 +249,8 @@ def main() -> None:
                         help="Show changes without writing (default: True)")
     parser.add_argument("--no-dry-run", action="store_true",
                         help="Actually apply changes")
+    parser.add_argument("--batch", action="store_true",
+                        help="Group items by reason; offer bulk actions where safe")
     parser.add_argument("--log", type=str, default="review.log",
                         help="Log file path (default: review.log)")
     args = parser.parse_args()
@@ -198,19 +264,22 @@ def main() -> None:
         return
 
     log.info("Loaded %d review items", len(items))
-    remaining: list[dict] = []
 
-    for item in items:
-        # If the path no longer exists, consider it resolved
-        path = Path(item["path"])
-        if path and not path.exists():
-            continue
-        
-        reason = item.get("reason", "unknown")
-        handler = HANDLERS.get(reason, handle_generic)
-        resolved = handler(item, dry_run=dry_run)
-        if not resolved:
-            remaining.append(item)
+    if args.batch:
+        remaining = run_batch_mode(items, dry_run=dry_run)
+    else:
+        remaining: list[dict] = []
+        for item in items:
+            # If the path no longer exists, consider it resolved
+            path = Path(item["path"])
+            if path and not path.exists():
+                continue
+
+            reason = item.get("reason", "unknown")
+            handler = HANDLERS.get(reason, handle_generic)
+            resolved = handler(item, dry_run=dry_run)
+            if not resolved:
+                remaining.append(item)
 
     save_review(remaining, dry_run=dry_run)
     log.info("Done — %d items remaining (%s)", len(remaining),

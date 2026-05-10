@@ -4,7 +4,7 @@ import sys
 # scripts to run from the command line
 
 folder_names = [
-    'post-punk', 'post-rock', 'punk', 'reggae', 'rnb'
+    'punk', 'reggae', 'rnb'
 ]
 
 

@@ -97,6 +97,31 @@ class ContextTests(unittest.TestCase):
         self.assertTrue(context.is_compilation)
         self.assertFalse(context.is_soundtrack)
 
+    def test_get_folder_context_marks_local_various_bucket_compilation(self) -> None:
+        path = self._touch("rock/0various/Collection/01 - Artist - Track.mp3")
+
+        context = get_folder_context(path)
+
+        self.assertEqual(context.top, "rock")
+        self.assertTrue(context.is_compilation)
+
+    def test_get_folder_context_does_not_mark_nested_bucket_name_as_compilation(self) -> None:
+        path = self._touch("rock/Artist/0compilations/Best of 90s/01 - Artist - Track.mp3")
+
+        context = get_folder_context(path)
+
+        self.assertEqual(context.top, "rock")
+        self.assertFalse(context.is_compilation)
+
+    def test_get_folder_context_does_not_mark_subgenre_nested_compilation_bucket(self) -> None:
+        path = self._touch("rock/0alt rock/0compilations/Best of 90s/01 - Artist - Track.mp3")
+
+        context = get_folder_context(path)
+
+        self.assertEqual(context.top, "rock")
+        self.assertEqual(context.subgenre, "Alt-Rock")
+        self.assertFalse(context.is_compilation)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,12 @@ class ParserTests(unittest.TestCase):
             },
         )
 
+    def test_parse_filename_normalises_zero_padded_disc_number(self) -> None:
+        parsed = parse_filename(Path("01-07 - Tycho - Melanine.mp3"))
+
+        self.assertEqual(parsed["disc"], "1")
+        self.assertEqual(parsed["track"], "7")
+
     def test_parse_filename_falls_back_to_title_only(self) -> None:
         parsed = parse_filename(Path("Unstructured filename.mp3"))
 

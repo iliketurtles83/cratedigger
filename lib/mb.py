@@ -48,6 +48,55 @@ def _rate_limit(min_seconds: float) -> None:
     _last_mb_call = time.monotonic()
 
 
+def _release_sort_key(release: dict[str, object]) -> tuple[str, str, str]:
+    """Stable key for deterministic release fallback selection."""
+    date = str(release.get("date") or "")
+    title = str(release.get("title") or "")
+    release_id = str(release.get("id") or "")
+    # Prefer dated releases first; then earliest date lexicographically.
+    return ("1" if not date else "0", date, f"{title}|{release_id}")
+
+
+def _release_albumartist(release: dict[str, object]) -> str | None:
+    """Extract release-level album artist from artist-credit."""
+    artist_credit = release.get("artist-credit", [])
+    if not isinstance(artist_credit, list) or not artist_credit:
+        return None
+    first_credit = artist_credit[0]
+    if isinstance(first_credit, dict):
+        artist_obj = first_credit.get("artist", {})
+        if isinstance(artist_obj, dict):
+            name = artist_obj.get("name")
+            return str(name) if name else None
+    return None
+
+
+def _find_recording_track_number(release: dict[str, object], recording_id: str) -> str | None:
+    """Return track number whose embedded recording id matches recording_id."""
+    media = release.get("medium-list", [])
+    if not isinstance(media, list):
+        return None
+
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        tracks = medium.get("track-list", [])
+        if not isinstance(tracks, list):
+            continue
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            rec_obj = track.get("recording")
+            if isinstance(rec_obj, dict) and rec_obj.get("id") == recording_id:
+                number = track.get("number")
+                return str(number) if number else None
+            if track.get("recording-id") == recording_id:
+                number = track.get("number")
+                return str(number) if number else None
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # AcoustID fingerprint lookup
 # ---------------------------------------------------------------------------
@@ -200,23 +249,28 @@ def mb_recording_metadata(
     if not releases:
         return result
 
-    release = releases[0]
-    result["album"] = release.get("title")
-    result["year"] = release.get("date", "")[:4] or None
+    # Prefer releases where we can match the current recording in track lists.
+    selected_release: dict[str, object] | None = None
+    selected_track: str | None = None
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        track_number = _find_recording_track_number(release, recording_id)
+        if track_number:
+            selected_release = release
+            selected_track = track_number
+            break
 
-    # Album artist from the release artist-credit
-    artist_credit = release.get("artist-credit", [])
-    if artist_credit:
-        first_credit = artist_credit[0]
-        if isinstance(first_credit, dict):
-            artist_obj = first_credit.get("artist", {})
-            result["albumartist"] = artist_obj.get("name")
+    if selected_release is None:
+        dict_releases = [r for r in releases if isinstance(r, dict)]
+        if not dict_releases:
+            return result
+        selected_release = sorted(dict_releases, key=_release_sort_key)[0]
 
-    # Track number from the medium list
-    media = release.get("medium-list", [])
-    if media:
-        tracks = media[0].get("track-list", [])
-        if tracks:
-            result["track"] = tracks[0].get("number")
+    result["album"] = str(selected_release.get("title") or "") or None
+    date = str(selected_release.get("date") or "")
+    result["year"] = date[:4] or None
+    result["albumartist"] = _release_albumartist(selected_release)
+    result["track"] = selected_track
 
     return result

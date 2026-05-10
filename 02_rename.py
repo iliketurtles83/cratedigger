@@ -185,6 +185,24 @@ def walk_folder(folder: Path, **kwargs) -> list[dict]:
     return review_items
 
 
+def _review_item_key(item: dict) -> str:
+    """Return stable identity key for review item dedupe."""
+    payload = {
+        key: item.get(key)
+        for key in sorted(item)
+        if key not in {"path", "reason"}
+    }
+    return json.dumps(
+        {
+            "path": item.get("path"),
+            "reason": item.get("reason"),
+            "payload": payload,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
 def main() -> None:
     global log
 
@@ -228,9 +246,13 @@ def main() -> None:
                 pass
 
         if not dry_run:
-            seen = {(e["path"], e["reason"]) for e in existing}
+            seen = {
+                _review_item_key(e)
+                for e in existing
+                if isinstance(e, dict)
+            }
             for item in all_review:
-                key = (item["path"], item["reason"])
+                key = _review_item_key(item)
                 if key not in seen:
                     existing.append(item)
                     seen.add(key)

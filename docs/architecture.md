@@ -69,6 +69,24 @@ New files never go directly to genre folders:
 
 Consequence: User can validate and fix issues before files are integrated into the library.
 
+### 6. Classification Does Not Depend on Tags
+
+Folder classification is based only on path structure and config, never tag content.
+Tags inform *naming* (what to call the folder) but not *kind* (what type of folder it is).
+If structure is ambiguous without tags, classify as Tier 2 and flag for review.
+`infer_compilation_folder()` is a secondary validation step, not a classification input.
+
+This resolves the circular dependency: tags needed to classify → classification needed to write tags.
+
+### 7. Genre is Tag-Only, Never Path-Inferred for Regular Albums
+
+With artist-root structure, genre is never inferred from folder path for regular artist albums.
+`FolderContext.genre` is always `None` for folders under letter buckets.
+Genre comes exclusively from existing tags and MusicBrainz lookup.
+`FOLDER_TO_GENRE` is empty for artist-root libraries.
+
+This simplifies `context.py` significantly — top-level folder name carries no genre signal for regular albums. Only `TOP_LEVEL_SPECIAL` folders have defined genre behavior via `SPECIAL_FOLDER_GENRE_POLICY`.
+
 ---
 
 ## Repository Structure
@@ -158,6 +176,71 @@ intake.py       INCOMING_FOLDER → orchestrate 01→02→04
 
 ---
 
+## Folder Contract
+
+The pipeline enforces a two-tier folder contract. All paths in the library are either in canonical (Tier 1) form or transitional (Tier 2) form.
+
+### Tier 1 — Canonical Shapes (target state after pipeline runs)
+
+Artist-root with letter bucketing:
+
+```
+music/
+  0compilations/
+    Album Title (Year)/
+  0various/
+    Album Title (Year)/
+  0mixes/
+    DJ - Mix Title (Year)/
+  0singles/                          ← root-level homeless singles
+    Artist - Track Title.flac
+  0random/
+    genre-name/                      ← existing folder, kept as-is
+      Track Title.flac
+  #/                                 ← artists starting with numbers/symbols
+  A/
+    Artist Name/
+      Artist Name - Album (Year)/
+      0singles/                      ← only created if artist folder exists
+        Track Title.flac
+  B/
+    ...
+```
+
+Letter bucketing rules:
+- Articles stripped for bucketing only: `The Cure` → `C/The Cure/`; strip list: `["The", "A", "An"]`
+- Symbol/number artists → `#/` bucket
+- Joint credits (`Fela Kuti & Koola Lobitos`) → first artist's letter: `F/`
+- `Various Artists` as artist credit → absorbed into `0various/`, not given own artist folder
+
+These shapes must classify deterministically with no tag reads required. Any folder already in Tier 1 canonical form is a fast path — no review flags are generated during re-runs.
+
+### Tier 2 — Intake Tolerance (transitional shapes the pipeline accepts as input)
+
+```
+genre/artist - album                             # needs restructure to artist-root
+genre/artist/artist - album                      # needs restructure to artist-root
+genre/artist/*.mp3                               # artist_flat, needs restructure
+genre/Artist/album + loose files                 # artist_mixed, needs restructure
+somefolder/compilation_album                     # ambiguous compilation
+```
+
+Tier 2 shapes are migration targets, not permanent classification states. They route through a migration path and terminate in `review.json` if unresolvable. `classify_folder()` must distinguish Tier 1 from Tier 2 explicitly.
+
+**`05_review.py` is the migration completion tool**, not just an error handler. Items in `review.json` are Tier 2 cases awaiting manual resolution into Tier 1 form.
+
+### Singles Policy
+
+Singles routing, in priority order:
+
+1. Artist folder exists → create `0singles/` under artist folder; file lives there
+2. Artist folder does not exist, genre is known → `0random/genre-name/` (existing structure, preserved as-is)
+3. No artist, no reliable genre → `0singles/` at root as holding pen until tagged
+
+`0random/` is kept and treated as `local_special`. Its genre subfolders are also `local_special`. Neither is renamed or restructured by the pipeline. Files inside are tagged normally.
+
+---
+
 ## lib/context.py — The Single Source of Truth for Structure
 
 All path-based decisions flow from this module. No script reimplements folder classification.
@@ -167,13 +250,13 @@ All path-based decisions flow from this module. No script reimplements folder cl
 ```python
 @dataclass
 class FolderContext:
-    top: str                  # raw top-level folder name (e.g., "rock", "pop")
-    genre: str | None         # display genre (e.g., "Rock"), or None
-    subgenre: str | None      # if in SUBGENRE_BUCKETS, (e.g., "Alt-Rock"), else None
+    top: str                  # raw top-level folder name (e.g., "A", "B", "0compilations")
+    genre: str | None         # always None for letter-bucket paths; None for most paths in artist-root
+    subgenre: str | None      # always None in artist-root libraries (subgenre buckets removed)
     folder_kind: str          # album | artist | artist_mixed | artist_flat | 
-                              # subgenre | local_special | disc | unknown
-    is_genre_folder: bool     # top in GENRE_FOLDERS
-    is_special_folder: bool   # top in SPECIAL_FOLDERS (favorites, mixes, etc.)
+                              # local_special | disc | unknown
+    is_genre_folder: bool     # always False in artist-root libraries (GENRE_FOLDERS is empty)
+    is_special_folder: bool   # top in TOP_LEVEL_SPECIAL (compilations, mixes, singles, etc.)
     is_compilation: bool      # should have albumartist tag
     is_soundtrack: bool       # should have albumartist tag
     needs_bpm: bool           # not in NO_BPM_FOLDERS
@@ -246,7 +329,7 @@ Jazz / Soul
 ```
 
 **Merge order** (lib/genres.py `merge_genres()`):
-1. Folder context genre (FOLDER_TO_GENRE[top] or SUBGENRE_BUCKETS)
+1. Folder context genre — always `None` in artist-root (no `FOLDER_TO_GENRE` mapping); used only for `SPECIAL_FOLDER_GENRE_POLICY` fallbacks
 2. Existing tag genres (never lost)
 3. MusicBrainz genres (appended, blacklisted entries discarded)
 4. Deduplicate case-insensitively, join with ` / `
@@ -254,10 +337,28 @@ Jazz / Soul
 **Genre source by folder type**:
 | Folder Type | Source |
 |---|---|
-| Genre folder (e.g., `rock/`) | `FOLDER_TO_GENRE[top]` |
-| Subgenre bucket (e.g., `rock/0alt-rock/`) | `FOLDER_TO_GENRE[top]` + `SUBGENRE_BUCKETS[level2]` |
-| Special folder (e.g., `0favorites/`) | MB fingerprint only (no default) |
-| Compilation/various | Per-track MB lookup (no folder default) |
+| Letter bucket (e.g., `A/`, `#/`) | None — genre never inferred from path for regular albums |
+| `TOP_LEVEL_SPECIAL` (e.g., `0mixes/`, `0random/`) | Per-folder policy (`SPECIAL_FOLDER_GENRE_POLICY`) — see below |
+| `0compilations/`, `0various/` | Per-track MB lookup (no folder default) |
+| Legacy genre folder (Tier 2, migration only) | `FOLDER_TO_GENRE[top]` if configured (empty by default) |
+
+### Special Folder Genre Policy
+
+Special folders (`0bestof`, `0mixes`, etc.) are intentionally context-neutral — they are not anchored to a single genre. Genre sourcing for files inside special folders follows a per-folder ordered policy defined in `config.py`:
+
+```python
+SPECIAL_FOLDER_GENRE_POLICY = {
+    "0bestof": ["existing_tag", "mb"],
+    "0mixes":  ["existing_tag", "mb", "fallback:Electronic"],
+    "0random": ["existing_tag", "mb"],
+}
+```
+
+Behavior:
+- Sources are evaluated left to right; first non-empty result wins
+- `fallback:X` sentinel applies a single configured genre if all prior sources are empty
+- When a fallback is applied, the file is flagged in `review.json` with `reason: "genre_fallback_applied"`
+- No `fallback` entry = strict behavior (no genre injected for that folder)
 
 **Blacklist**: `other`, `unknown`, `miscellaneous`, `seen live`, `favorites`, `good` — these are filtered out from MB results.
 
@@ -329,10 +430,33 @@ def classify_folder(folder: Path) -> str:
 
 User configuration is the single source of truth for:
 - Music library root (`MUSIC_ROOT`)
-- Folder taxonomy (`FOLDER_TO_GENRE`, `SUBGENRE_BUCKETS`, `SPECIAL_FOLDERS`, `SKIP_FOLDERS`)
+- Folder taxonomy (`TOP_LEVEL_SPECIAL`, `LETTER_BUCKETS`, `SKIP_FOLDERS`)
+- Letter bucketing (`LETTER_BUCKETING`, `ARTICLE_STRIP`, `SYMBOL_BUCKET`)
+- Singles routing (`ARTIST_SINGLES_FOLDER`, `ROOT_SINGLES_FOLDER`)
 - Feature eligibility (`NO_BPM_FOLDERS`, `ALBUMARTIST_FOLDERS`)
 - Thresholds (`ARTIST_FOLDER_THRESHOLD`, `COMPILATION_ARTIST_THRESHOLD`)
 - Quality gates (`ACOUSTID_MIN_SCORE`, `MB_RATE_LIMIT_SECONDS`)
+
+Key config additions for artist-root:
+
+```python
+LETTER_BUCKETING  = True
+ARTICLE_STRIP     = ["The", "A", "An"]    # stripped for bucketing only, not from folder name
+SYMBOL_BUCKET     = "#"                   # bucket for artists starting with numbers/symbols
+
+ARTIST_SINGLES_FOLDER = "0singles"
+ROOT_SINGLES_FOLDER   = "0singles"
+
+TOP_LEVEL_SPECIAL = {
+    "0compilations", "0various", "0mixes", "0singles", "0random", "#",
+}
+LETTER_BUCKETS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+SKIP_FOLDERS   = TOP_LEVEL_SPECIAL | LETTER_BUCKETS | {"#"}
+```
+
+`SKIP_FOLDERS` now includes letter buckets and top-level special folders. The pipeline descends into letter buckets rather than treating them as genre contexts. `TOP_LEVEL_SPECIAL` folders are never renamed, never moved, never have genre injected from path.
+
+**Pipeline simplification**: Routing in `04_move.py` no longer needs a genre-to-folder mapping for regular albums. Destination is fully deterministic: `artist[0].upper()` after article stripping → letter bucket → artist folder — no config lookup required. `get_folder_context()` reads the top-level folder name only to determine if the path is under a letter bucket, a `TOP_LEVEL_SPECIAL`, or unknown — not for genre signal.
 
 **Critical principle**: Never hardcode folder names, genre lists, or paths outside `config.py`. All scripts import config and respect its values.
 

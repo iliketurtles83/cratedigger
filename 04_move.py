@@ -50,11 +50,48 @@ def resolve_target_folder(genre_tag: str) -> Path | None:
     return config.MUSIC_ROOT / folder_name
 
 
+def _artist_letter_bucket(artist: str) -> str:
+    """Return the Tier 1 letter bucket for an artist name.
+
+    Articles in ARTICLE_STRIP are stripped for bucketing only (the folder name
+    itself is never changed).  Artists starting with a non-alpha character go
+    to SYMBOL_BUCKET.
+    """
+    stripped = artist
+    for article in getattr(config, "ARTICLE_STRIP", ["The", "A", "An"]):
+        if stripped.lower().startswith(article.lower() + " "):
+            stripped = stripped[len(article) + 1:]
+            break
+    first = stripped.strip()[:1].upper() if stripped.strip() else ""
+    if not first or not first.isalpha():
+        return getattr(config, "SYMBOL_BUCKET", "#")
+    buckets = getattr(config, "LETTER_BUCKETS", set("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    return first if first in buckets else getattr(config, "SYMBOL_BUCKET", "#")
+
+
 def _first_audio_file(folder: Path) -> Path | None:
     for path in sorted(folder.rglob("*")):
         if path.is_file() and path.suffix.lower() in config.AUDIO_EXTENSIONS:
             return path
     return None
+
+
+def _review_item_key(item: dict) -> str:
+    """Return stable identity key for review item dedupe."""
+    payload = {
+        key: item.get(key)
+        for key in sorted(item)
+        if key not in {"path", "reason"}
+    }
+    return json.dumps(
+        {
+            "path": item.get("path"),
+            "reason": item.get("reason"),
+            "payload": payload,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
 
 
 def _write_review_items(all_review: list[dict], *, dry_run: bool) -> None:
@@ -70,9 +107,13 @@ def _write_review_items(all_review: list[dict], *, dry_run: bool) -> None:
             pass
 
     if not dry_run:
-        seen = {(e["path"], e["reason"]) for e in existing}
+        seen = {
+            _review_item_key(e)
+            for e in existing
+            if isinstance(e, dict)
+        }
         for item in all_review:
-            key = (item["path"], item["reason"])
+            key = _review_item_key(item)
             if key not in seen:
                 existing.append(item)
                 seen.add(key)
@@ -389,7 +430,9 @@ def run_restructure_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
     if folder:
         folders = [config.MUSIC_ROOT / folder]
     else:
-        skip = config.SPECIAL_FOLDERS | config.SKIP_FOLDERS
+        _letter_skip = {b.lower() for b in getattr(config, "LETTER_BUCKETS", set())}
+        _symbol = getattr(config, "SYMBOL_BUCKET", "#")
+        skip = config.SPECIAL_FOLDERS | config.SKIP_FOLDERS | _letter_skip | {_symbol}
         folders = sorted(
             p for p in config.MUSIC_ROOT.iterdir()
             if p.is_dir() and p.name.lower() not in skip
@@ -462,6 +505,131 @@ def run_promote_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
     return review_items
 
 
+# ── Artist-root restructure (genre-root → letter-bucket/artist/album) ────────────────
+
+def _migrate_album_to_artist_root(
+    folder: Path,
+    *,
+    dry_run: bool,
+    review_items: list[dict],
+) -> None:
+    """Move one album folder from any genre-root path to artist-root layout.
+
+    Reads artist from tags (albumartist preferred over artist), falls back to
+    parsing the folder name before " - ".
+    """
+    artist: str | None = None
+    sample = _first_audio_file(folder)
+    if sample is not None:
+        tags = read_tags(sample)
+        if tags:
+            artist = (
+                (tags.get("albumartist") or "").strip()
+                or (tags.get("artist") or "").strip()
+                or None
+            )
+
+    if not artist and " - " in folder.name:
+        artist = folder.name.split(" - ")[0].strip() or None
+
+    if not artist:
+        log.warning("Cannot determine artist for %s — flagging", folder.name)
+        review_items.append({"path": str(folder), "reason": "no_artist_tag"})
+        return
+
+    bucket = _artist_letter_bucket(artist)
+    dest = config.MUSIC_ROOT / bucket / artist / folder.name
+
+    if dest.exists():
+        log.warning("Target exists, skipping: %s → %s", folder, dest)
+        review_items.append({
+            "path": str(folder),
+            "reason": "move_conflict",
+            "target": str(dest),
+        })
+        return
+
+    _move_path(folder, dest, dry_run=dry_run)
+
+
+def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
+    """Walk one genre folder and migrate its contents to artist-root layout."""
+    review_items: list[dict] = []
+    for child in sorted(genre_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        kind = classify_folder(child)
+
+        if kind == "album":
+            # genre/Artist - Album (Year)/ → bucket/Artist/Artist - Album (Year)/
+            _migrate_album_to_artist_root(
+                child, dry_run=dry_run, review_items=review_items)
+
+        elif kind in ("artist", "artist_flat", "artist_mixed"):
+            # genre/Artist/ → bucket/Artist/  (move the whole artist folder)
+            artist_name = child.name
+            bucket = _artist_letter_bucket(artist_name)
+            dest = config.MUSIC_ROOT / bucket / artist_name
+
+            if dest.exists():
+                # Artist already has a folder under the letter bucket (from
+                # another genre).  Merge by moving each child individually.
+                log.info("Merging artist folder: %s → %s", child, dest)
+                for sub in sorted(child.iterdir()):
+                    sub_dest = dest / sub.name
+                    if sub_dest.exists():
+                        log.warning("Merge conflict, skipping: %s", sub)
+                        review_items.append({
+                            "path": str(sub),
+                            "reason": "move_conflict",
+                            "target": str(sub_dest),
+                        })
+                    else:
+                        _move_path(sub, sub_dest, dry_run=dry_run)
+                _remove_if_empty(child, dry_run=dry_run)
+            else:
+                _move_path(child, dest, dry_run=dry_run)
+
+        elif kind == "disc":
+            # Disc subfolder at genre root is unusual; flag for review
+            review_items.append({
+                "path": str(child),
+                "reason": "unexpected_disc_at_genre_root",
+            })
+        # local_special and unknown at genre root are left in place
+
+    return review_items
+
+
+def run_to_artist_root_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
+    """Restructure genre-root folders to artist-root letter-bucket layout.
+
+    Walks each top-level genre folder (Tier 2 paths) and moves its contents
+    to the canonical artist-root shape under MUSIC_ROOT/letter/Artist/.
+    Letter buckets, top-level specials, and SKIP_FOLDERS are not touched.
+    """
+    _letter_skip = {b.lower() for b in getattr(config, "LETTER_BUCKETS", set())}
+    _symbol = getattr(config, "SYMBOL_BUCKET", "#")
+    _special = {s.lower() for s in getattr(config, "TOP_LEVEL_SPECIAL", config.SPECIAL_FOLDERS)}
+    skip = _special | _letter_skip | {_symbol} | {s.lower() for s in config.SKIP_FOLDERS}
+
+    if folder:
+        genre_dirs = [config.MUSIC_ROOT / folder]
+    else:
+        genre_dirs = sorted(
+            p for p in config.MUSIC_ROOT.iterdir()
+            if p.is_dir() and p.name.lower() not in skip
+        )
+
+    all_review: list[dict] = []
+    for genre_dir in genre_dirs:
+        log.info("To-artist-root: %s", genre_dir.name)
+        items = _walk_genre_to_artist_root(genre_dir, dry_run=dry_run)
+        all_review.extend(items)
+
+    return all_review
+
+
 def main() -> None:
     global log
 
@@ -474,6 +642,8 @@ def main() -> None:
                       help="Apply artist folder threshold restructure")
     mode.add_argument("--promote", action="store_true",
                       help="Promote staged albums to main genre folders")
+    mode.add_argument("--to-artist-root", action="store_true",
+                      help="Restructure genre-root folders to artist-root layout (dry-run safe)")
     parser.add_argument("--dry-run", action="store_true", default=True,
                         help="Show changes without writing (default: True)")
     parser.add_argument("--no-dry-run", action="store_true",
@@ -491,6 +661,8 @@ def main() -> None:
         all_review = run_intake_mode(dry_run=dry_run, folder=args.folder)
     elif args.restructure:
         all_review = run_restructure_mode(dry_run=dry_run, folder=args.folder)
+    elif args.to_artist_root:
+        all_review = run_to_artist_root_mode(dry_run=dry_run, folder=args.folder)
     else:
         all_review = run_promote_mode(dry_run=dry_run, folder=args.folder)
 
