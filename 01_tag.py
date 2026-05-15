@@ -194,7 +194,7 @@ def tag_file(
     no_bpm: bool = False,
     no_mb: bool = False,
     review_items: list[dict],
-) -> None:
+) -> dict[str, str | None] | None:
     """Tag a single audio file."""
     log.debug("Processing %s", path)
 
@@ -202,7 +202,7 @@ def tag_file(
     if existing is None:
         log.warning("Skipping unreadable file: %s", path)
         review_items.append({"path": str(path), "reason": "unreadable"})
-        return
+        return None
     new_tags: dict[str, str | None] = {}
     ctx = get_folder_context(path)
     parsed_raw = parse_filename(path)
@@ -236,10 +236,10 @@ def tag_file(
     # --- Fingerprint + MusicBrainz ------------------------------------------
     needs_mb_for_identity = (
         overwrite or
-        (fix_suspicious and is_suspicious(existing.get("artist"))) or
-        (fix_suspicious and is_suspicious(existing.get("title"))) or
         not existing.get("artist") or
-        not existing.get("title")
+        not existing.get("title") or
+        is_suspicious(existing.get("artist")) or
+        is_suspicious(existing.get("title"))
     )
 
     needs_mb_for_year = (
@@ -273,6 +273,8 @@ def tag_file(
             path,
             min_score=config.ACOUSTID_MIN_SCORE,
             rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
+            existing_artist=existing.get("artist") or None,
+            existing_title=existing.get("title") or None,
         )
         recording_id = fp.get("recording_id")
         mb_title = fp.get("title")
@@ -314,7 +316,7 @@ def tag_file(
             new_tags["track"] = parsed["track"]
         elif mb_meta.get("track"):
             new_tags["track"] = mb_meta["track"]
-    if overwrite or (fix_track_mismatch and not effective_existing.get("disc")):
+    if overwrite or not effective_existing.get("disc"):
         if parsed.get("disc"):
             new_tags["disc"] = parsed["disc"]
 
@@ -438,16 +440,17 @@ def tag_file(
 
     if not new_tags:
         log.debug("  No changes needed for %s", path.name)
-        return
+        return dict(existing)
 
     if dry_run:
         for field, val in new_tags.items():
             log.info("  [DRY-RUN] Would set %s = %s", field, val)
     else:
-        log.info("  Writing %d tag(s) to %s", len(new_tags), path.name)
         written = write_tags(path, new_tags, dry_run=False)
+        log.info("  Writing %d tag(s) to %s", len(written), path.name)
         for field, val in written.items():
             log.info("  Set %s = %s", field, val)
+    return {**existing, **new_tags}
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +576,11 @@ def _backfill_compilation_albumartist(
         if (albumartist := (tags.get("albumartist") or "").strip())
     ])
 
+    # Normalise common abbreviations to the canonical form
+    _VA_ALIASES = frozenset({"va", "various"})
+    if target and target.lower() in _VA_ALIASES:
+        target = "Various Artists"
+
     if not target and not ctx.is_soundtrack:
         target = "Various Artists"
 
@@ -595,6 +603,7 @@ def _consistency_pass_folder(
     *,
     dry_run: bool = True,
     review_items: list[dict],
+    tag_cache: dict[Path, dict[str, str | None]] | None = None,
 ) -> None:
     """Normalise album-level tags within a single album folder.
 
@@ -612,12 +621,15 @@ def _consistency_pass_folder(
     if len(audio_files) < 2:
         return
 
-    # Read current tags from all files
+    # Read current tags from all files (prefer in-memory cache from Phase 1)
     file_tags: list[tuple[Path, dict[str, str | None]]] = []
     for f in audio_files:
-        tags = read_tags(f)
-        if tags is not None:
-            file_tags.append((f, tags))
+        if tag_cache is not None and f in tag_cache:
+            file_tags.append((f, tag_cache[f]))
+        else:
+            tags = read_tags(f)
+            if tags is not None:
+                file_tags.append((f, tags))
 
     if len(file_tags) < 2:
         return
@@ -666,25 +678,31 @@ def _consistency_pass_folder(
             continue
 
         # For year field, normalize before checking consistency (handle date variants, remasters, etc.)
+        same_base_year = False
         if field == "year":
             # Normalize all year values and check if they normalize to a single year
             normalized_years = [_normalise_year_for_consistency(v) for v in non_empty]
             if len(set(normalized_years)) <= 1:
-                # All years normalize to the same value; no action needed
-                continue
-            # Multiple distinct years; try to pick majority
-            majority = _pick_majority_year(non_empty)
-            if majority is None:
-                log.warning("  No clear majority for %s in %s (%s) — flagging",
-                            field, folder.name,
-                            ", ".join(sorted(set(normalized_years))))
-                review_items.append({
-                    "path": str(folder),
-                    "reason": "inconsistent_tags",
-                    "field": field,
-                    "variants": sorted(set(normalized_years)),
-                })
-                continue
+                # Same base year — normalise raw form inconsistencies if any
+                # (e.g. "1987" vs "1987-05-09" should both become "1987")
+                if len(set(non_empty)) <= 1:
+                    continue
+                majority = Counter(non_empty).most_common(1)[0][0]
+                same_base_year = True
+            else:
+                # Multiple distinct years; try to pick majority
+                majority = _pick_majority_year(non_empty)
+                if majority is None:
+                    log.warning("  No clear majority for %s in %s (%s) — flagging",
+                                field, folder.name,
+                                ", ".join(sorted(set(normalized_years))))
+                    review_items.append({
+                        "path": str(folder),
+                        "reason": "inconsistent_tags",
+                        "field": field,
+                        "variants": sorted(set(normalized_years)),
+                    })
+                    continue
         else:
             # Check if already consistent (case-insensitive) for non-year fields
             normalised = {_normalise_whitespace(v).lower() for v in non_empty}
@@ -712,7 +730,10 @@ def _consistency_pass_folder(
             
             # For year field, compare normalized values; for others, use whitespace-normalized comparison
             if field == "year":
-                if _normalise_year_for_consistency(current) == _normalise_year_for_consistency(majority):
+                if same_base_year:
+                    if current == majority:
+                        continue
+                elif _normalise_year_for_consistency(current) == _normalise_year_for_consistency(majority):
                     continue
             else:
                 if _normalise_whitespace(current).lower() == _normalise_whitespace(majority).lower():
@@ -739,6 +760,7 @@ def _consistency_pass(
     *,
     dry_run: bool = True,
     review_items: list[dict],
+    tag_cache: dict[Path, dict[str, str | None]] | None = None,
 ) -> None:
     """Walk *root* and run album consistency on every album folder."""
     for folder in sorted(root.rglob("*")):
@@ -746,10 +768,12 @@ def _consistency_pass(
             continue
         _consistency_pass_folder(
             folder, dry_run=dry_run, review_items=review_items,
+            tag_cache=tag_cache,
         )
     # Also check the root itself if it's an album
     _consistency_pass_folder(
         root, dry_run=dry_run, review_items=review_items,
+        tag_cache=tag_cache,
     )
 
 
@@ -785,13 +809,17 @@ def walk_folder(folder: Path, **kwargs) -> list[dict]:
     dry_run = kwargs.get("dry_run", True)
     no_consistency = kwargs.pop("no_consistency", False)
 
+    tag_cache: dict[Path, dict[str, str | None]] = {}
     for path in sorted(folder.rglob("*")):
         if path.suffix.lower() in config.AUDIO_EXTENSIONS and path.is_file():
-            tag_file(path, review_items=review_items, **kwargs)
+            merged = tag_file(path, review_items=review_items, **kwargs)
+            if merged is not None:
+                tag_cache[path] = merged
 
     # Phase 2: normalise album-level consistency after all files are tagged
     if not no_consistency:
-        _consistency_pass(folder, dry_run=dry_run, review_items=review_items)
+        _consistency_pass(folder, dry_run=dry_run, review_items=review_items,
+                          tag_cache=tag_cache)
 
     return review_items
 

@@ -106,6 +106,8 @@ def fingerprint_lookup(
     *,
     min_score: float = 0.8,
     rate_limit_seconds: float = 1.1,
+    existing_artist: str | None = None,
+    existing_title: str | None = None,
 ) -> dict[str, str | None]:
     """Fingerprint *path* via AcoustID and return best-match metadata."""
     empty: dict[str, str | None] = {
@@ -141,24 +143,46 @@ def fingerprint_lookup(
 
     log.debug("AcoustID results for %s: %d results found", path.name, len(results.get("results", [])))
 
+    # Collect all qualifying recordings across results, then prefer those
+    # that match existing artist/title tags for disambiguation.
+    candidates: list[dict] = []
     for res in results.get("results", []):
         score = res.get("score", 0)
         log.debug("  Result score: %.2f (threshold: %.2f)", score, min_score)
         if score < min_score:
             continue
         for rec in res.get("recordings", []):
-            title = rec.get("title")
-            artists = rec.get("artists", [])
-            artist = artists[0].get("name") if artists else None
-            log.info("Match found: %s by %s (score: %.2f)", title, artist, score)
-            return {
-                "recording_id": rec.get("id"),
-                "title": title,
-                "artist": artist,
-            }
+            candidates.append(rec)
 
-    log.warning("No matches above threshold for %s", path.name)
-    return empty
+    if not candidates:
+        log.warning("No matches above threshold for %s", path.name)
+        return empty
+
+    def _match_score(rec: dict) -> int:
+        s = 0
+        if existing_artist:
+            artists = rec.get("artists", [])
+            ra = (artists[0].get("name") or "") if artists else ""
+            if ra.lower() == existing_artist.lower():
+                s += 1
+        if existing_title:
+            if (rec.get("title") or "").lower() == existing_title.lower():
+                s += 1
+        return s
+
+    if existing_artist or existing_title:
+        candidates.sort(key=_match_score, reverse=True)
+
+    best_rec = candidates[0]
+    title = best_rec.get("title")
+    artists = best_rec.get("artists", [])
+    artist = artists[0].get("name") if artists else None
+    log.info("Match found: %s by %s", title, artist)
+    return {
+        "recording_id": best_rec.get("id"),
+        "title": title,
+        "artist": artist,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +273,17 @@ def mb_recording_metadata(
     if not releases:
         return result
 
-    # Prefer releases where we can match the current recording in track lists.
+    # Prefer the earliest-dated release where we can match the recording in
+    # track lists.  Sort first so that when multiple releases have a track
+    # match, the earliest-dated one wins rather than an arbitrary API order.
+    dict_releases = [r for r in releases if isinstance(r, dict)]
+    if not dict_releases:
+        return result
+    sorted_releases = sorted(dict_releases, key=_release_sort_key)
+
     selected_release: dict[str, object] | None = None
     selected_track: str | None = None
-    for release in releases:
-        if not isinstance(release, dict):
-            continue
+    for release in sorted_releases:
         track_number = _find_recording_track_number(release, recording_id)
         if track_number:
             selected_release = release
@@ -262,10 +291,7 @@ def mb_recording_metadata(
             break
 
     if selected_release is None:
-        dict_releases = [r for r in releases if isinstance(r, dict)]
-        if not dict_releases:
-            return result
-        selected_release = sorted(dict_releases, key=_release_sort_key)[0]
+        selected_release = sorted_releases[0]
 
     result["album"] = str(selected_release.get("title") or "") or None
     date = str(selected_release.get("date") or "")
