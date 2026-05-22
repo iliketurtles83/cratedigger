@@ -22,10 +22,11 @@ from pathlib import Path
 
 import config
 from lib.context import classify_folder, get_folder_context, infer_best_of_folder, infer_compilation_folder, is_disc_subfolder
-from lib.genres import has_meaningful_genres, merge_genres, normalise_genre
+from lib.genres import has_meaningful_genres, merge_genres, normalise_genre, parent_genre
 from lib.logger import setup_logger
-from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata
+from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata, mb_recording_search
 from lib.parsers import parse_compact_disc_track_candidate, parse_filename, parse_folder_name
+from lib.preferences import remap_genre_value, resolve_preference_labels, write_preference_labels
 from lib.tags import read_tags, write_tags
 
 log: logging.Logger = None  # type: ignore[assignment]
@@ -100,6 +101,23 @@ def _normalise_tag_number(value: str | None) -> str | None:
     if not value:
         return None
     return value.split("/")[0].strip().lstrip("0") or "0"
+
+
+def _apply_preference_labels(
+    path: Path,
+    *,
+    artist: str | None,
+    genre_value: str | None,
+    dry_run: bool,
+) -> None:
+    labels = resolve_preference_labels(artist=artist, genre_value=genre_value)
+    if not labels:
+        return
+
+    changed = write_preference_labels(path, labels, dry_run=dry_run)
+    if changed:
+        mode = "[DRY-RUN] Would set" if dry_run else "Set"
+        log.info("  %s preference labels = %s in %s", mode, ", ".join(labels), path.name)
 
 
 def _metadata_source_folder(path: Path) -> Path:
@@ -294,8 +312,56 @@ def tag_file(
             )
         else:
             log.info("  API lookup: no AcoustID recording match")
+            fallback_artist = (existing.get("artist") or "").strip()
+            fallback_title = (existing.get("title") or "").strip()
+            if fallback_artist and fallback_title:
+                fallback_genre_hints: list[str] = []
+                if ctx.genre:
+                    fallback_genre_hints.append(ctx.genre)
+                fallback_genre_hints.extend(
+                    g.strip() for g in (existing.get("genre") or "").split("/") if g.strip()
+                )
+                log.info(
+                    "  API fallback: MB artist/title search for %r - %r (reason=no_acoustid_match)",
+                    fallback_artist,
+                    fallback_title,
+                )
+                fallback = mb_recording_search(
+                    fallback_artist,
+                    fallback_title,
+                    genre_hints=fallback_genre_hints,
+                    rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
+                )
+                recording_id = fallback.get("recording_id")
+                mb_title = fallback.get("title") or mb_title
+                mb_artist = fallback.get("artist") or mb_artist
+
+                if recording_id:
+                    log.info("  API lookup: MusicBrainz fallback recording %s", recording_id)
+                    mb_meta.update(mb_recording_metadata(
+                        recording_id,
+                        rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
+                    ))
+                    mb_genre_list = mb_genres(
+                        recording_id,
+                        min_votes=config.MB_MIN_TAG_VOTES,
+                        max_genres=config.MB_MAX_GENRES,
+                        rate_limit_seconds=config.MB_RATE_LIMIT_SECONDS,
+                    )
+                else:
+                    log.info("  API fallback: no MB recording match from artist/title search")
     elif needs_mb and no_mb:
         log.info("  API lookup required for %s but --no-mb specified — skipping lookup", path.name)
+
+    # --- Pre-fill album / year from folder name (local evidence, before external lookup) ---
+    # Local folder context takes priority over MB; MB fills only what folder cannot provide.
+    folder_info = parse_folder_name(_metadata_source_folder(path).name)
+    if overwrite or not effective_existing.get("album"):
+        if folder_info.get("album"):
+            new_tags["album"] = folder_info["album"]
+    if overwrite or not effective_existing.get("year"):
+        if folder_info.get("year"):
+            new_tags["year"] = folder_info["year"]
 
     # --- Fill missing fields from MB ----------------------------------------
     if overwrite or not effective_existing.get("title"):
@@ -305,10 +371,10 @@ def tag_file(
         if mb_artist:
             new_tags["artist"] = mb_artist
     if overwrite or not effective_existing.get("album"):
-        if mb_meta.get("album"):
+        if mb_meta.get("album") and not new_tags.get("album"):
             new_tags["album"] = mb_meta["album"]
     if overwrite or not effective_existing.get("year"):
-        if mb_meta.get("year"):
+        if mb_meta.get("year") and not new_tags.get("year"):
             new_tags["year"] = mb_meta["year"]
     # Track: filename preferred over MB (MB track is release-specific)
     if overwrite or not effective_existing.get("track"):
@@ -328,16 +394,6 @@ def tag_file(
     if not effective_existing.get("artist") and not new_tags.get("artist"):
         if parsed.get("artist"):
             new_tags["artist"] = parsed["artist"]
-
-    # --- Fallback: parse parent folder for album / year if still missing -----
-    # Only fills fields empty in BOTH existing tags and new_tags so far.
-    folder_info = parse_folder_name(_metadata_source_folder(path).name)
-    if not effective_existing.get("album") and not new_tags.get("album"):
-        if folder_info.get("album"):
-            new_tags["album"] = folder_info["album"]
-    if not effective_existing.get("year") and not new_tags.get("year"):
-        if folder_info.get("year"):
-            new_tags["year"] = folder_info["year"]
 
     # --- Preserve title suffix from filename (e.g. "(Take 3)", "(Live)") -----
     final_title = new_tags.get("title") or effective_existing.get("title")
@@ -379,6 +435,20 @@ def tag_file(
         if g.strip()
     ]
     normalised_mb = [normalise_genre(g) for g in mb_genre_list]
+    mb_with_parents: list[str] = []
+    seen_mb_genres: set[str] = set()
+    for genre in normalised_mb:
+        parent = parent_genre(genre)
+        if parent:
+            parent_key = parent.lower()
+            if parent_key not in seen_mb_genres:
+                mb_with_parents.append(parent)
+                seen_mb_genres.add(parent_key)
+
+        genre_key = genre.lower()
+        if genre_key not in seen_mb_genres:
+            mb_with_parents.append(genre)
+            seen_mb_genres.add(genre_key)
 
     special_policy = None
     if ctx.is_special_folder:
@@ -393,8 +463,8 @@ def tag_file(
                     genre_str = merge_genres(None, existing_genres)
                     break
             elif source == "mb":
-                if normalised_mb:
-                    genre_str = merge_genres(None, normalised_mb)
+                if mb_with_parents:
+                    genre_str = merge_genres(None, mb_with_parents)
                     break
             elif source.startswith("fallback:"):
                 fallback_genre = normalise_genre(source.split(":", 1)[1].strip())
@@ -411,12 +481,16 @@ def tag_file(
             log.warning("No genre resolved for %s — flagging for review", path.name)
             review_items.append({"path": str(path), "reason": "no_genre"})
     else:
-        genre_str = merge_genres(folder_genre, existing_genres + normalised_mb)
+        genre_str = merge_genres(folder_genre, existing_genres + mb_with_parents)
         if not genre_str:
             log.warning("No genre resolved for %s — flagging for review", path.name)
             review_items.append({"path": str(path), "reason": "no_genre"})
 
     if genre_str:
+        remapped_genre = remap_genre_value(genre_str)
+        if remapped_genre:
+            genre_str = remapped_genre
+
         # Only write if the merged result differs from what is already stored
         if genre_str != existing.get("genre"):
             new_tags["genre"] = genre_str
@@ -437,6 +511,20 @@ def tag_file(
 
     # --- Strip None values ---------------------------------------------------
     new_tags = {k: v for k, v in new_tags.items() if v is not None}
+
+    final_artist = (
+        new_tags.get("artist")
+        or effective_existing.get("artist")
+        or existing.get("artist")
+        or parsed.get("artist")
+    )
+    final_genre = new_tags.get("genre") or remap_genre_value(existing.get("genre"))
+    _apply_preference_labels(
+        path,
+        artist=final_artist,
+        genre_value=final_genre,
+        dry_run=dry_run,
+    )
 
     if not new_tags:
         log.debug("  No changes needed for %s", path.name)

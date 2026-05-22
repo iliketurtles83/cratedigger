@@ -15,7 +15,7 @@ Personal music collection management pipeline. Tags audio files with genre and m
 | `03_folders.py` | Rename folders to canonical `Artist - Album (Year)/` format. Classifies each folder (album, artist, compilation, subgenre, etc.) to determine the right naming pattern and what to flag for review. |
 | `04_move.py` | Route incoming music to genre-appropriate staging folders; restructure existing folders using the artist threshold rule; promote reviewed albums to the library. Uses tags for genre routing and folder classification to determine destination. |
 | `05_review.py` | Interactive resolution of files and folders flagged during earlier pipeline steps. |
-| `06_analyze.py` | Audio feature extraction for recommender *(future)* |
+| `06_analyze.py` | Phase 5: audio feature extraction (librosa + pyloudnorm) into a pickled pandas DataFrame. |
 
 Run in order: `01 → 02 → 03 → 04`. Or use `intake.py` to orchestrate `01 → 02 → 04` for new arrivals.
 
@@ -138,6 +138,24 @@ python3 04_move.py --promote --dry-run
 python3 04_move.py --promote --no-dry-run
 ```
 
+Phase 4 additions in `config.py`:
+
+- `GENRE_REMAP_RULES`: map incoming genres to local taxonomy before routing/writing.
+- `PREFERENCE_OVERRIDES`: scoped overrides (`global`, `genre`, `artist`) for
+	`artist_folder_threshold` and `preference_labels`.
+- `MOVE_HOOKS`: optional `pre_move` / `post_move` callbacks.
+
+Hook safety and failure semantics:
+
+- Hook commands must resolve under `HOOK_ALLOWED_PATHS` (sandbox boundary).
+- Hooks run with `shell=False`, JSON payload via stdin, and timeout control.
+- `HOOK_FAILURE_POLICY` controls behavior:
+	`continue` logs warning, `review` logs and appends `hook_failure` in
+	`review.json`, `abort` stops processing.
+
+Preference labels are written to `PREFERENCE_LABELS_PATH` as sidecar metadata
+and do not alter folder routing unless explicitly used by custom logic.
+
 ### 05_review.py — Resolve flagged files
 
 ```bash
@@ -145,6 +163,30 @@ python3 05_review.py
 ```
 
 Interactively resolves files and folders flagged in `review.json` during earlier pipeline steps.
+
+### 06_analyze.py — Audio feature extraction
+
+Walks a folder of songs/albums and extracts audio features (BPM, key, mode,
+energy, LUFS loudness, spectral centroid, ZCR, danceability, duration) into a
+pickled `pandas.DataFrame`. Runs independently of tagging and never mutates
+audio tags.
+
+```bash
+# First run: full analysis
+python3 06_analyze.py --folder rock --no-dry-run
+
+# Re-run: incremental, only new/changed files are re-analyzed
+python3 06_analyze.py --folder rock
+
+# Re-analyze everything (e.g. after a schema bump)
+python3 06_analyze.py --folder rock --force
+```
+
+The output path defaults to `config.FEATURES_STORE_PATH` (`features.pkl`).
+The DataFrame is keyed by absolute file path with incremental detection via
+`(mtime, size, schema_version)`. To migrate the schema, bump
+`FEATURE_SCHEMA_VERSION` in `06_analyze.py`; rows with an older version are
+re-analyzed automatically on the next run.
 
 ### intake.py — Full intake in one command
 

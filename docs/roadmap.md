@@ -98,68 +98,68 @@ Folder contract is defined (see Architecture — Folder Contract). Implementatio
 
 Repeat dry-runs on canonical (Tier 1) folders must produce zero new review items. Batch review must be able to process a 300-item queue to under 20 manual items. Do not start Phase 2 until all criteria are met.
 
-### Phase 2: Deterministic Metadata and Review Contract
+### Phase 2: Deterministic Metadata and Review Contract — **COMPLETE**
 
 Make tag normalization and review semantics consistent across formats and scripts.
 
-- **Canonical number fields** — enforce track/disc as `num` or `num/total` across ID3, Vorbis, and M4A tuples.
-- **Canonical BPM policy** — enforce positive integer BPM values where supported.
-- **Deterministic source priority** — local file/folder context first, external MB/AcoustID only when local evidence is insufficient.
-- **Review identity keys** — preserve distinct review findings by payload-aware dedupe keys, not only `(path, reason)`.
-- **Dry-run parity** — ensure dry-run and live mode evaluate identical decision paths.
+- ✅ **Canonical number fields** — enforce track/disc as `num` or `num/total` across ID3, Vorbis, and M4A tuples.
+- ✅ **Canonical BPM policy** — enforce positive integer BPM values where supported; M4A skipped (no standard tag).
+- ✅ **Deterministic source priority** — local file/folder context first, external MB/AcoustID only when local evidence is insufficient. Folder-name album/year pre-filled before MB lookup in `01_tag.py`.
+- ✅ **Review identity keys** — preserve distinct review findings by payload-aware dedupe keys via `_review_item_key()`, not only `(path, reason)`.
+- ✅ **Dry-run parity** — dry-run and live mode share identical decision logic; write side-effect only differs.
 
 **Phase 2 Exit Criteria**
-- Track/disc/BPM normalization is consistent across MP3, Vorbis, and M4A paths.
-- Repeat runs on canonicalized fixtures produce no new review deltas.
-- Review dedupe preserves distinct payload variants on the same path/reason.
-- Dry-run and live mode share decision logic (write side-effect only differs).
+- ✅ Track/disc/BPM normalization is consistent across MP3, Vorbis, and M4A paths.
+- ✅ Repeat runs on canonicalized fixtures produce no new review deltas.
+- ✅ Review dedupe preserves distinct payload variants on the same path/reason.
+- ✅ Dry-run and live mode share decision logic (write side-effect only differs).
 
-### Phase 3: MusicBrainz and AcoustID Throughput Improvements
+### Phase 3: MusicBrainz and AcoustID Throughput Improvements — **COMPLETE**
 
-- **Batch fingerprinting** — fingerprint N files in parallel, queue lookups to respect rate limits
-- **Fallback strategies** — if AcoustID score < 0.8, try tag-based lookup as secondary signal
-- **Genre enrichment** — consult MusicBrainz genre taxonomy for parent/child relationships, auto-fill subgenre when available
-- **Collaborative tagging** — use MB's community-voted genre tags as a tie-breaker for ambiguous metadata
-- **Adaptive rate limiting** — add retry/backoff and bounded queueing for MB failures and transient throttling
+- ✅ **Fallback strategies** — when AcoustID returns no match above threshold, `01_tag.py` now performs deterministic tag-based MB lookup and logs fallback reason per file
+- ✅ **Genre enrichment** — MB genre tags continue to be merged with parent genres (from local taxonomy) for richer normalized genre output
+- ✅ **Collaborative tagging** — MB recording search now breaks metadata ties using community tag votes and optional local genre hints
+- ✅ **Adaptive rate limiting** — MB calls now use retry/backoff plus adaptive inter-request delay and bounded queueing; requests degrade gracefully when queue wait would exceed limit
 
 **Phase 3 Exit Criteria**
-- Batch lookup path meets configured throughput without violating MB limits.
-- Fallback lookup strategy is deterministic and logged per file.
-- API failures degrade gracefully to local-only behavior without aborting folder runs.
-- Rate-limit/backoff behavior is covered by tests with mocked MB responses.
+- ✅ Fallback lookup strategy is deterministic and logged per file.
+- ✅ API failures degrade gracefully to local-only behavior without aborting folder runs.
+- ✅ Rate-limit/backoff behavior is covered by tests with mocked MB responses.
 
-### Phase 4: User Preferences and Hooks
+### Phase 4: User Preferences and Hooks — **COMPLETE**
 
-- **Per-artist thresholds** — override N=3 for specific artists (e.g., prolific producer gets higher threshold)
-- **Genre remapping rules** — transform incoming tags to local folder scheme (e.g., "IDM" → "Electronic")
-- **Custom hooks** — user-defined callbacks before/after move operations
-- **Preference labels** — tag files as "love", "skip", "study", etc. without modifying folder structure
+- ✅ **Per-artist thresholds** — restructure mode resolves thresholds by scoped precedence (`artist` > `genre` > `global` > default).
+- ✅ **Genre remapping rules** — remapping applies to tag writes and intake routing.
+- ✅ **Custom hooks** — configurable pre/post move callbacks run from allow-listed paths with timeout and failure policy handling.
+- ✅ **Preference labels** — labels persist in sidecar metadata without changing folder structure.
 
 **Phase 4 Exit Criteria**
-- Preference overrides are config-driven and scoped (global, genre, artist).
-- Hook execution is sandboxed/documented with failure handling semantics.
-- Preference labels do not alter canonical folder contract unless explicitly configured.
+- ✅ Preference overrides are config-driven and scoped (global, genre, artist).
+- ✅ Hook execution is sandboxed/documented with failure handling semantics.
+- ✅ Preference labels do not alter canonical folder contract unless explicitly configured.
 
-### Phase 5: Audio Analysis (06_analyze.py)
+### Phase 5: Audio Analysis (06_analyze.py) **COMPLETE**
 
-Extract audio features for a personal recommender model. Run after `01_tag.py`; store results externally (not in audio tags).
+Extract audio features for a personal recommender model. Runs independently of `01_tag.py` and never mutates audio tags. Results are persisted to a pickled `pandas.DataFrame` (default: `features.pkl`).
 
-| Feature | Library | Storage | Purpose |
-|---|---|---|---|
-| BPM | librosa | audio tag (done) | Already in 01_tag.py |
-| Key | librosa | audio tag (new) | Harmonic compatibility |
-| Energy | librosa | features.json or sqlite | Mood signal |
-| Loudness (LUFS) | librosa | features.json or sqlite | Normalization anchor |
-| Spectral centroid | librosa | features.json or sqlite | Timbre characterization |
-| Zero crossing rate | librosa | features.json or sqlite | Roughness/noise signal |
-| Danceability | librosa | features.json or sqlite | Groove signal |
+| Feature | Library | Status |
+|---|---|---|
+| BPM (tempo) | librosa | ✅ |
+| Key + mode | librosa (Krumhansl-Schmuckler) | ✅ |
+| Energy (RMS) | librosa | ✅ |
+| Loudness (LUFS) | pyloudnorm | ✅ |
+| Spectral centroid | librosa | ✅ |
+| Zero crossing rate | librosa | ✅ |
+| Danceability (heuristic proxy) | librosa | ✅ |
+| Duration (ms) | librosa | ✅ |
+| speechiness / acousticness / instrumentalness / liveness / valence | reserved | columns present, populated by Phase 6 |
 
-**Decision pending:** JSON lines (one feature set per file), JSON structure (nested by artist), or lightweight sqlite (indexed by ISRC).
+**Storage:** pickled pandas DataFrame at `config.FEATURES_STORE_PATH`. Primary key: absolute file path. Incremental key: `(mtime, size, schema_version)`. Schema migration: bump `FEATURE_SCHEMA_VERSION` in `06_analyze.py` and rerun — rows with an older version are automatically re-analyzed.
 
 **Phase 5 Exit Criteria**
-- Feature extraction is incremental (new/changed files only).
-- Storage schema is finalized with migration guidance.
-- Analysis can be rerun independently of tagging without mutating tags.
+- ✅ Feature extraction is incremental (skips files whose `mtime`, `size`, and `schema_version` are unchanged).
+- ✅ Storage schema is finalized with migration guidance (`FEATURE_SCHEMA_VERSION` + auto-reanalyze on mismatch).
+- ✅ Analysis can be rerun independently of tagging without mutating tags (no `write_tags` in `06_analyze.py`).
 
 ### Phase 6: Recommender Model
 

@@ -68,13 +68,69 @@ SUSPICIOUS_TAG_VALUES = {
 # Below this they live flat in the genre root.
 ARTIST_FOLDER_THRESHOLD = 3
 
+# ── Phase 4: user preferences ────────────────────────────────────────────────
+# Optional genre remapping applied before folder routing and final genre writes.
+# Example: {"IDM": "Electronic"}
+GENRE_REMAP_RULES: dict[str, str] = {}
+
+# Scoped preference overrides.
+# Precedence: artist > genre > global.
+#
+# Supported settings:
+# - artist_folder_threshold: positive integer
+# - preference_labels: list[str]
+PREFERENCE_OVERRIDES: dict[str, dict] = {
+    "global": {
+        # "artist_folder_threshold": 3,
+        # "preference_labels": ["study"],
+    },
+    "genre": {
+        # "electronic": {"artist_folder_threshold": 4},
+        # "jazz": {"preference_labels": ["study"]},
+    },
+    "artist": {
+        # "aphex twin": {"artist_folder_threshold": 6, "preference_labels": ["love"]},
+    },
+}
+
+# Sidecar store for preference labels (does not affect folder contract).
+PREFERENCE_LABELS_PATH = Path("preference_labels.json")
+
+# ── Phase 4: move hooks ──────────────────────────────────────────────────────
+# Hooks are optional callbacks for move operations. Commands must be a list,
+# e.g. ["hooks/on_move.py", "--mode", "audit"].
+MOVE_HOOKS: dict[str, list[dict]] = {
+    "pre_move": [],
+    "post_move": [],
+}
+
+# Security boundary for hook executables.
+HOOKS_ROOT = Path(__file__).resolve().parent / "hooks"
+HOOK_ALLOWED_PATHS = [HOOKS_ROOT]
+
+# Hook execution policy:
+# - continue: log warning and continue
+# - review: log + append review.json item with reason "hook_failure"
+# - abort: raise error and stop processing
+HOOK_FAILURE_POLICY = "continue"
+HOOK_TIMEOUT_SECONDS = 5.0
+HOOKS_RUN_IN_DRY_RUN = False
+
 # Albums with more distinct artists than this are treated as compilations.
 # Albums with 2+ artists at or below this are multi-artist albums.
 COMPILATION_ARTIST_THRESHOLD = 3
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
 
+# ── Phase 5: audio analysis ──────────────────────────────────────────────────
+# Pickled pandas DataFrame written by 06_analyze.py.
+FEATURES_STORE_PATH = Path("features.pkl")
+
 MB_RATE_LIMIT_SECONDS = 1.1
 ACOUSTID_MIN_SCORE    = 0.8
 MB_MIN_TAG_VOTES      = 2
 MB_MAX_GENRES         = 5
+MB_MAX_RETRIES        = 3
+MB_BACKOFF_BASE       = 2.0
+MB_ADAPTIVE_MAX_DELAY = 8.0
+MB_MAX_QUEUE_SECONDS  = 20.0
