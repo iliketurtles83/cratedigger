@@ -15,13 +15,16 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import config
 from lib.context import classify_folder
 from lib.genres import normalise_genre, parent_genre
 from lib.logger import setup_logger
+from lib.preferences import remap_genre, resolve_artist_folder_threshold
 from lib.tags import read_tags
 
 log: logging.Logger = None  # type: ignore[assignment]
@@ -33,7 +36,7 @@ _GENRE_TO_FOLDER: dict[str, str] = {v.lower(): k for k, v in config.FOLDER_TO_GE
 def resolve_target_folder(genre_tag: str) -> Path | None:
     """Return the target genre folder Path for the primary genre, or None."""
     primary = genre_tag.split("/")[0].strip()
-    normed = normalise_genre(primary).lower()
+    normed = remap_genre(normalise_genre(primary)).lower()
 
     # Direct match
     folder_name = _GENRE_TO_FOLDER.get(normed)
@@ -132,13 +135,207 @@ def _map_folder_name_from_genre(genre_tag: str) -> str | None:
     return target_dir.name
 
 
-def _move_path(src: Path, dest: Path, *, dry_run: bool) -> None:
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _allowed_hook_roots() -> list[Path]:
+    configured = getattr(config, "HOOK_ALLOWED_PATHS", None)
+    roots: list[Path] = []
+    if isinstance(configured, (list, tuple)) and configured:
+        for raw in configured:
+            roots.append(Path(raw).expanduser().resolve())
+    else:
+        default_root = Path(getattr(config, "HOOKS_ROOT", _project_root() / "hooks"))
+        roots.append(default_root.expanduser().resolve())
+    return roots
+
+
+def _hook_policy() -> str:
+    policy = str(getattr(config, "HOOK_FAILURE_POLICY", "continue")).strip().lower()
+    if policy in {"continue", "review", "abort"}:
+        return policy
+    return "continue"
+
+
+def _resolve_hook_command(command: object) -> list[str] | None:
+    if not isinstance(command, list) or not command:
+        return None
+    parts = [str(p) for p in command]
+    executable = Path(parts[0])
+    if not executable.is_absolute():
+        executable = (_project_root() / executable).resolve()
+    else:
+        executable = executable.resolve()
+
+    for root in _allowed_hook_roots():
+        try:
+            executable.relative_to(root)
+            break
+        except ValueError:
+            continue
+    else:
+        log.warning("Hook executable outside allowed roots: %s", executable)
+        return None
+
+    if not executable.exists() or not executable.is_file():
+        log.warning("Hook executable missing: %s", executable)
+        return None
+
+    return [str(executable), *parts[1:]]
+
+
+def _handle_hook_failure(
+    *,
+    event: str,
+    hook_name: str,
+    error_message: str,
+    payload: dict[str, object],
+    review_items: list[dict] | None,
+) -> None:
+    policy = _hook_policy()
+    if policy == "abort":
+        raise RuntimeError(error_message)
+
+    log.warning(error_message)
+    if policy == "review" and review_items is not None:
+        review_items.append(
+            {
+                "path": str(payload.get("src", "")),
+                "reason": "hook_failure",
+                "hook": hook_name,
+                "event": event,
+                "error": error_message,
+                "target": str(payload.get("dest", "")),
+            }
+        )
+
+
+def _run_move_hooks(
+    event: str,
+    *,
+    payload: dict[str, object],
+    dry_run: bool,
+    review_items: list[dict] | None,
+) -> None:
+    run_in_dry_run = bool(getattr(config, "HOOKS_RUN_IN_DRY_RUN", False))
+    if dry_run and not run_in_dry_run:
+        return
+
+    hook_map = getattr(config, "MOVE_HOOKS", {})
+    if not isinstance(hook_map, dict):
+        return
+
+    hook_specs = hook_map.get(event, [])
+    if not isinstance(hook_specs, list):
+        return
+
+    try:
+        default_timeout = float(getattr(config, "HOOK_TIMEOUT_SECONDS", 5.0))
+    except (TypeError, ValueError):
+        default_timeout = 5.0
+    for idx, spec in enumerate(hook_specs, start=1):
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("enabled", True) is False:
+            continue
+
+        hook_name = str(spec.get("name") or f"{event}#{idx}")
+        command = _resolve_hook_command(spec.get("command"))
+        if command is None:
+            _handle_hook_failure(
+                event=event,
+                hook_name=hook_name,
+                error_message=f"Hook {hook_name} has invalid command configuration",
+                payload=payload,
+                review_items=review_items,
+            )
+            continue
+
+        try:
+            timeout = float(spec.get("timeout_seconds", default_timeout))
+        except (TypeError, ValueError):
+            timeout = default_timeout
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "CRATEDIGGER_HOOK_EVENT": event,
+            "CRATEDIGGER_HOOK_NAME": hook_name,
+        }
+        try:
+            proc = subprocess.run(
+                command,
+                input=json.dumps(payload, ensure_ascii=False),
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                cwd=str(config.MUSIC_ROOT),
+                env=env,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _handle_hook_failure(
+                event=event,
+                hook_name=hook_name,
+                error_message=f"Hook {hook_name} failed: {exc}",
+                payload=payload,
+                review_items=review_items,
+            )
+            continue
+
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            details = stderr if stderr else f"exit_code={proc.returncode}"
+            _handle_hook_failure(
+                event=event,
+                hook_name=hook_name,
+                error_message=f"Hook {hook_name} failed: {details}",
+                payload=payload,
+                review_items=review_items,
+            )
+            continue
+
+        log.info("Hook %s succeeded for %s", hook_name, event)
+
+
+def _move_path(
+    src: Path,
+    dest: Path,
+    *,
+    dry_run: bool,
+    review_items: list[dict] | None = None,
+) -> None:
+    payload = {
+        "src": str(src),
+        "dest": str(dest),
+        "dry_run": dry_run,
+    }
+    _run_move_hooks(
+        "pre_move",
+        payload=payload,
+        dry_run=dry_run,
+        review_items=review_items,
+    )
+
     if dry_run:
         log.info("[DRY-RUN] Would move: %s → %s", src, dest)
+        _run_move_hooks(
+            "post_move",
+            payload=payload,
+            dry_run=True,
+            review_items=review_items,
+        )
         return
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dest))
     log.info("Moved: %s → %s", src, dest)
+    payload["dry_run"] = False
+    _run_move_hooks(
+        "post_move",
+        payload=payload,
+        dry_run=False,
+        review_items=review_items,
+    )
 
 
 def _remove_if_empty(folder: Path, *, dry_run: bool) -> None:
@@ -191,7 +388,7 @@ def _route_loose_file_from_intake(
         })
         return
 
-    _move_path(path, dest, dry_run=dry_run)
+    _move_path(path, dest, dry_run=dry_run, review_items=review_items)
 
 
 def _route_album_folder_from_intake(
@@ -242,7 +439,7 @@ def _route_album_folder_from_intake(
         })
         return
 
-    _move_path(album_folder, dest, dry_run=dry_run)
+    _move_path(album_folder, dest, dry_run=dry_run, review_items=review_items)
 
 
 def run_intake_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
@@ -279,7 +476,7 @@ def run_intake_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
 
 
 
-# ── Artist folder threshold (N=3) ────────────────────────────────────────────
+# ── Artist folder threshold (configurable) ───────────────────────────────────
 
 def _count_album_subdirs(folder: Path) -> int:
     """Count immediate child directories that classify as album."""
@@ -329,7 +526,7 @@ def restructure_artist_flat(
     dry_run: bool = True,
     review_items: list[dict],
 ) -> None:
-    """Apply N=3 threshold rule to an artist_flat folder."""
+    """Apply threshold rule to an artist_flat folder."""
     existing_albums = _count_album_subdirs(folder)
     tag_info = _album_from_tags(folder)
     tag_artists = tag_info["artists"]
@@ -348,6 +545,12 @@ def restructure_artist_flat(
         artist = next(iter(tag_artists))
     else:
         artist = folder.name  # no readable tags — fall back
+
+    threshold = resolve_artist_folder_threshold(
+        artist=artist,
+        genre_folder=genre_dir.name,
+        default=config.ARTIST_FOLDER_THRESHOLD,
+    )
 
     audio_files = [
         f for f in sorted(folder.iterdir())
@@ -374,7 +577,7 @@ def restructure_artist_flat(
     if existing_albums == 0 and len(albums) <= 1:
         # Flatten to genre root: Artist - Album (Year)/
         dest_dir = genre_dir / dest_folder_name
-    elif existing_albums < config.ARTIST_FOLDER_THRESHOLD:
+    elif existing_albums < threshold:
         # Below threshold — create in genre root
         dest_dir = genre_dir / dest_folder_name
     else:
@@ -391,15 +594,10 @@ def restructure_artist_flat(
                 "target": str(dest_path),
             })
             continue
-        if dry_run:
-            log.info("[DRY-RUN] Would move: %s → %s", f.name, dest_path)
-        else:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(f), str(dest_path))
-            log.info("Moved: %s → %s", f.name, dest_path)
+        _move_path(f, dest_path, dry_run=dry_run, review_items=review_items)
 
     # Clean up empty artist folder (only if below threshold — files moved out)
-    if not dry_run and existing_albums < config.ARTIST_FOLDER_THRESHOLD:
+    if not dry_run and existing_albums < threshold:
         try:
             if not any(folder.iterdir()):
                 folder.rmdir()
@@ -426,7 +624,7 @@ def walk_artist_folders(genre_dir: Path, **kwargs) -> list[dict]:
 
 
 def run_restructure_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
-    """Apply N-threshold artist-folder restructuring to collection folders."""
+    """Apply threshold-based artist-folder restructuring to collection folders."""
     if folder:
         folders = [config.MUSIC_ROOT / folder]
     else:
@@ -498,7 +696,7 @@ def run_promote_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
                 })
                 continue
 
-            _move_path(album_folder, dest, dry_run=dry_run)
+            _move_path(album_folder, dest, dry_run=dry_run, review_items=review_items)
 
         _remove_if_empty(staged_genre_dir, dry_run=dry_run)
 
@@ -549,7 +747,7 @@ def _migrate_album_to_artist_root(
         })
         return
 
-    _move_path(folder, dest, dry_run=dry_run)
+    _move_path(folder, dest, dry_run=dry_run, review_items=review_items)
 
 
 def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
@@ -585,10 +783,10 @@ def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
                             "target": str(sub_dest),
                         })
                     else:
-                        _move_path(sub, sub_dest, dry_run=dry_run)
+                        _move_path(sub, sub_dest, dry_run=dry_run, review_items=review_items)
                 _remove_if_empty(child, dry_run=dry_run)
             else:
-                _move_path(child, dest, dry_run=dry_run)
+                _move_path(child, dest, dry_run=dry_run, review_items=review_items)
 
         elif kind == "disc":
             # Disc subfolder at genre root is unusual; flag for review
