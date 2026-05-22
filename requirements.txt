@@ -10,3 +10,7 @@ musicbrainzngs>=0.7
 
 # Optional — BPM detection
 librosa>=0.10
+
+# Phase 5 — audio analysis (06_analyze.py)
+pandas>=2.0
+pyloudnorm>=0.1
