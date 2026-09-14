@@ -82,14 +82,33 @@ def _build_disc_context(
 
     for album_key, entries in albums.items():
         disc_numbers = {num for _, num, _ in entries if num is not None}
-        has_total_gt_1 = any(
-            total is not None and total > 1 for _, _, total in entries
-        )
 
-        # Rule 3: disc total > 1, or Rule 4: multiple disc numbers
-        if has_total_gt_1 or len(disc_numbers) > 1:
-            for path, _, _ in entries:
-                use_disc.add(path)
+        # Rule 3 (removed): disc total > 1 alone is not sufficient — a folder
+        # containing only disc-1 tracks from a 2-disc release has no ambiguity
+        # and does not need a prefix.
+        # Rule 4: multiple disc numbers present AND track numbers would collide
+        # without a disc prefix. Disc tags in compilation folders often reflect
+        # the source album, not the compilation's disc structure — checking for
+        # actual collisions avoids spurious prefixes in those cases.
+        if len(disc_numbers) <= 1:
+            continue
+
+        track_nums: list[int] = []
+        for path, _, _ in entries:
+            track_raw = file_tags[path].get("track") or parse_filename(path).get("track")
+            if track_raw:
+                try:
+                    n = int(track_raw.split("/")[0].strip().lstrip("0") or "0")
+                    track_nums.append(n)
+                except ValueError:
+                    pass
+
+        # If all track numbers are unique, there is no collision risk — skip prefix.
+        if track_nums and len(track_nums) == len(set(track_nums)):
+            continue
+
+        for path, _, _ in entries:
+            use_disc.add(path)
 
     return use_disc
 

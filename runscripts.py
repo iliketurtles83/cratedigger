@@ -4,15 +4,15 @@ import sys
 # scripts to run from the command line
 
 folder_names = [
-    'punk', 'reggae', 'rnb'
+    'metal', 'pop', 'post-punk', 'post-rock', 'punk', 'reggae', 'rnb', 'rock'
 ]
 
 
 scripts = [
     {
         'name': '01_tag.py',
-        'dry_args': ['--no-bpm', '--no-mb'],
-        'live_args': [],
+        'dry_args': ['--no-bpm', '--no-mb', '--fix-track-mismatch'],
+        'live_args': ['--fix-track-mismatch'],
     },
     {
         'name': '02_rename.py',

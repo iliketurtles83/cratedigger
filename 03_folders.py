@@ -206,6 +206,7 @@ def _normalise_folder(
     # guest track with a different artist tag should not block normalisation.
     # Single-artist best-of albums have intentionally varied per-track years
     # (original recording dates) — exclude year from the mixed check too.
+    # Compilation albums also expect mixed years — exclude year from the mixed check.
     # Album field is also excluded for best-ofs: tracks come from different
     # releases so mixed album tags are expected.
     # Multi-album folders (discographies, collections) also expect mixed year/album.
@@ -213,6 +214,8 @@ def _normalise_folder(
     if is_best_of:
         _excluded.add("year")
         _excluded.add("album")
+    if is_comp:
+        _excluded.add("year")
     if is_multi_album:
         _excluded.add("year")
         _excluded.add("album")
@@ -338,11 +341,14 @@ def _normalise_album_child(
     # tags should not block a child album rename.
     # Single-artist best-of albums have intentionally varied per-track years
     # and mixed album tags (tracks from different releases).
+    # Compilation albums also expect mixed years — exclude year from the mixed check.
     # Multi-album folders (discographies, collections) also expect mixed year/album.
     _excluded = {"artist"}
     if is_best_of:
         _excluded.add("year")
         _excluded.add("album")
+    if is_comp:
+        _excluded.add("year")
     if is_multi_album:
         _excluded.add("year")
         _excluded.add("album")
@@ -471,9 +477,11 @@ def _handle_artist_flat(
     # Compilations/soundtracks expect mixed artists — only flag other fields.
     # Single-artist best-of albums have intentionally varied per-track years
     # and mixed album tags (tracks from different releases).
+    # Compilation albums also expect mixed years — exclude year from the mixed check.
     _excluded = set()
     if is_comp:
         _excluded.add("artist")
+        _excluded.add("year")
     if is_best_of:
         _excluded.add("year")
         _excluded.add("album")

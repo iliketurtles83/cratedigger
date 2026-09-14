@@ -781,14 +781,15 @@ def _consistency_pass_folder(
                 # Multiple distinct years; try to pick majority
                 majority = _pick_majority_year(non_empty)
                 if majority is None:
+                    displayable = sorted(v for v in set(normalized_years) if v is not None)
                     log.warning("  No clear majority for %s in %s (%s) — flagging",
                                 field, folder.name,
-                                ", ".join(sorted(set(normalized_years))))
+                                ", ".join(displayable))
                     review_items.append({
                         "path": str(folder),
                         "reason": "inconsistent_tags",
                         "field": field,
-                        "variants": sorted(set(normalized_years)),
+                        "variants": displayable,
                     })
                     continue
         else:
