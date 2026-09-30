@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,22 +36,23 @@ _GENRE_TO_FOLDER: dict[str, str] = {v.lower(): k for k, v in config.FOLDER_TO_GE
 
 def resolve_target_folder(genre_tag: str) -> Path | None:
     """Return the target genre folder Path for the primary genre, or None."""
-    primary = genre_tag.split("/")[0].strip()
-    normed = remap_genre(normalise_genre(primary)).lower()
+    candidates = [c.strip() for c in re.split(r"[/;,]", genre_tag) if c.strip()]
+    for primary in candidates:
+        normed = remap_genre(normalise_genre(primary)).lower()
 
-    # Direct match
-    folder_name = _GENRE_TO_FOLDER.get(normed)
+        # Direct match
+        folder_name = _GENRE_TO_FOLDER.get(normed)
 
-    # Try parent genre
-    if folder_name is None:
-        par = parent_genre(primary)
-        if par:
-            folder_name = _GENRE_TO_FOLDER.get(par.lower())
+        # Try parent genre
+        if folder_name is None:
+            par = parent_genre(primary)
+            if par:
+                folder_name = _GENRE_TO_FOLDER.get(par.lower())
 
-    if folder_name is None:
-        return None
+        if folder_name is not None:
+            return config.MUSIC_ROOT / folder_name
 
-    return config.MUSIC_ROOT / folder_name
+    return None
 
 
 def _artist_letter_bucket(artist: str) -> str:
