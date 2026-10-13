@@ -220,6 +220,17 @@ class FeedbackStandardsTests(unittest.TestCase):
             tags = read_tags(Path("test.mp3"))
         self.assertEqual(tags["artists"], "Gorillaz / Del the Funky Homosapien")
 
+    def test_rename_file_in_0singles_omits_track_number(self):
+        import importlib
+        mod = importlib.import_module("02_rename")
+        p = Path("/music/A/Amyl and the Sniffers/0singles/05 - Amyl and the Sniffers - Hertz.mp3")
+        tags = {"artist": "Amyl and the Sniffers", "title": "Hertz", "track": "5"}
+        review_items = []
+
+        with patch.object(Path, "rename") as mock_rename:
+            mod.rename_file(p, tags=tags, use_disc=False, dry_run=False, review_items=review_items)
+            mock_rename.assert_called_once_with(p.parent / "Amyl and the Sniffers - Hertz.mp3")
+
 
 if __name__ == "__main__":
     unittest.main()

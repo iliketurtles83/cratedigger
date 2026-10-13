@@ -23,7 +23,7 @@ from lib.logger import setup_logger
 from lib.parsers import build_filename, parse_filename
 from lib.tags import read_tags
 
-log: logging.Logger = None  # type: ignore[assignment]
+log: logging.Logger = logging.getLogger("02_rename")
 
 # Folder name pattern indicating disc number, e.g. "Album (disc 1)" or "[disc 2]"
 _DISC_IN_FOLDER_NAME = re.compile(r"[\(\[]\s*disc\s*\d+\s*[\)\]]", re.IGNORECASE)
@@ -128,6 +128,10 @@ def rename_file(
     artist = tags.get("artist") or parsed.get("artist")
     title = tags.get("title") or parsed.get("title")
     track = tags.get("track") or parsed.get("track")
+    # In singles folders (0singles/), omit track and disc numbering from filenames
+    if path.parent.name == "0singles":
+        track = None
+        use_disc = False
 
     # Only include disc in filename when multi-disc context is confirmed
     disc = (tags.get("disc") or parsed.get("disc")) if use_disc else None
