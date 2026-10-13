@@ -565,7 +565,7 @@ def _normalise_artist_folder(
 ) -> None:
     """Fix artist folder name (The-suffix) and process album children."""
     name = folder.name
-    fixed = _fix_the(name)
+    fixed = _fix_the(sanitise_name(name))
     current = folder
 
     if fixed != name:

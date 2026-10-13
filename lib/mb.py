@@ -147,6 +147,34 @@ def _release_albumartist(release: dict[str, object]) -> str | None:
     return None
 
 
+def _release_albumartist_id(release: dict[str, object]) -> str | None:
+    """Extract release-level album artist MBID from artist-credit."""
+    artist_credit = release.get("artist-credit", [])
+    if not isinstance(artist_credit, list) or not artist_credit:
+        return None
+    first_credit = artist_credit[0]
+    if isinstance(first_credit, dict):
+        artist_obj = first_credit.get("artist", {})
+        if isinstance(artist_obj, dict):
+            mbid = artist_obj.get("id")
+            return str(mbid) if mbid else None
+    return None
+
+
+def _recording_artist_id(recording: dict[str, object]) -> str | None:
+    """Extract recording-level artist MBID from artist-credit."""
+    artist_credit = recording.get("artist-credit", [])
+    if not isinstance(artist_credit, list) or not artist_credit:
+        return None
+    first_credit = artist_credit[0]
+    if isinstance(first_credit, dict):
+        artist_obj = first_credit.get("artist", {})
+        if isinstance(artist_obj, dict):
+            mbid = artist_obj.get("id")
+            return str(mbid) if mbid else None
+    return None
+
+
 def _find_recording_track_number(release: dict[str, object], recording_id: str) -> str | None:
     """Return track number whose embedded recording id matches recording_id."""
     media = release.get("medium-list", [])
@@ -454,7 +482,7 @@ def mb_genres(
 
 
 # ---------------------------------------------------------------------------
-# MusicBrainz recording metadata (album, year, track, albumartist, isrc)
+# MusicBrainz recording metadata (album, year, track, albumartist, isrc, MBIDs)
 # ---------------------------------------------------------------------------
 
 def mb_recording_metadata(
@@ -462,14 +490,19 @@ def mb_recording_metadata(
     *,
     rate_limit_seconds: float = 1.1,
 ) -> dict[str, str | None]:
-    """Fetch album, year, track, albumartist, and isrc from MusicBrainz.
+    """Fetch album, year, track, albumartist, isrc, and MBIDs from MusicBrainz.
 
-    Returns ``{album, year, track, albumartist, isrc}`` — values ``None``
-    when unavailable.
+    Returns ``{album, year, track, albumartist, isrc, mb_trackid, mb_albumid,
+    mb_artistid, mb_albumartistid, mb_releasegroupid}`` — values ``None`` when unavailable.
     """
     result: dict[str, str | None] = {
         "album": None, "year": None, "track": None,
         "albumartist": None, "isrc": None,
+        "mb_trackid": recording_id or None,
+        "mb_albumid": None,
+        "mb_artistid": None,
+        "mb_albumartistid": None,
+        "mb_releasegroupid": None,
     }
 
     if not _HAS_MB or musicbrainzngs is None or not recording_id:
@@ -480,7 +513,7 @@ def mb_recording_metadata(
     data = _mb_call_with_retry(
         mb_client.get_recording_by_id,
         recording_id,
-        includes=["releases", "isrcs"],
+        includes=["releases", "isrcs", "artists"],
         rate_limit_seconds=rate_limit_seconds,
     )
     if data is None:
@@ -488,6 +521,7 @@ def mb_recording_metadata(
         return result
 
     recording = data.get("recording", {})
+    result["mb_artistid"] = _recording_artist_id(recording)
 
     # ISRC from recording level
     isrc_list = recording.get("isrc-list", [])
@@ -519,9 +553,14 @@ def mb_recording_metadata(
         selected_release = sorted_releases[0]
 
     result["album"] = str(selected_release.get("title") or "") or None
+    result["mb_albumid"] = str(selected_release.get("id") or "") or None
     date = str(selected_release.get("date") or "")
     result["year"] = date[:4] or None
     result["albumartist"] = _release_albumartist(selected_release)
+    result["mb_albumartistid"] = _release_albumartist_id(selected_release)
+    rg = selected_release.get("release-group")
+    if isinstance(rg, dict) and rg.get("id"):
+        result["mb_releasegroupid"] = str(rg.get("id"))
     result["track"] = selected_track
 
     return result

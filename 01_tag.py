@@ -25,11 +25,16 @@ from lib.context import classify_folder, get_folder_context, infer_best_of_folde
 from lib.genres import has_meaningful_genres, merge_genres, normalise_genre, parent_genre
 from lib.logger import setup_logger
 from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata, mb_recording_search
-from lib.parsers import parse_compact_disc_track_candidate, parse_filename, parse_folder_name
+from lib.parsers import (
+    parse_compact_disc_track_candidate,
+    parse_filename,
+    parse_folder_name,
+    validate_albumartist,
+)
 from lib.preferences import remap_genre_value, resolve_preference_labels, write_preference_labels
 from lib.tags import read_tags, write_tags
 
-log: logging.Logger = None  # type: ignore[assignment]
+log: logging.Logger = logging.getLogger("01_tag")
 
 # ---------------------------------------------------------------------------
 # BPM detection (optional — librosa may not be installed)
@@ -209,6 +214,7 @@ def tag_file(
     overwrite: bool = False,
     fix_suspicious: bool = False,
     fix_track_mismatch: bool = False,
+    remap_genres: bool = False,
     no_bpm: bool = False,
     no_mb: bool = False,
     review_items: list[dict],
@@ -227,6 +233,19 @@ def tag_file(
     parsed, compact_interpreted, compact_reason = _interpret_compact_disc_track(path, parsed_raw)
 
     effective_existing = dict(existing)
+
+    # Validate existing albumartist: clear if bogus (e.g. numeric track leak or URL)
+    existing_aa = effective_existing.get("albumartist")
+    if existing_aa:
+        valid_aa = validate_albumartist(
+            existing_aa,
+            artist=effective_existing.get("artist") or parsed.get("artist"),
+            track=effective_existing.get("track") or parsed.get("track"),
+        )
+        if not valid_aa:
+            log.warning("Bogus albumartist %r detected in %s — clearing", existing_aa, path.name)
+            effective_existing["albumartist"] = None
+
     if fix_suspicious:
         for field in ("artist", "title", "album", "year", "track"):
             if is_suspicious(existing.get(field)):
@@ -481,24 +500,52 @@ def tag_file(
             log.warning("No genre resolved for %s — flagging for review", path.name)
             review_items.append({"path": str(path), "reason": "no_genre"})
     else:
-        genre_str = merge_genres(folder_genre, existing_genres + mb_with_parents)
+        # Do not prepend folder_genre if the file already has valid existing genres (prevents feedback loop)
+        effective_folder_genre = folder_genre if not existing_genres else None
+        genre_str = merge_genres(effective_folder_genre, existing_genres + mb_with_parents)
         if not genre_str:
             log.warning("No genre resolved for %s — flagging for review", path.name)
             review_items.append({"path": str(path), "reason": "no_genre"})
 
     if genre_str:
-        remapped_genre = remap_genre_value(genre_str)
-        if remapped_genre:
-            genre_str = remapped_genre
+        if remap_genres:
+            remapped_genre = remap_genre_value(genre_str)
+            if remapped_genre:
+                genre_str = remapped_genre
 
         # Only write if the merged result differs from what is already stored
         if genre_str != existing.get("genre"):
             new_tags["genre"] = genre_str
 
-    # --- AlbumArtist / ISRC --------------------------------------------------
-    if (ctx.is_compilation or ctx.is_soundtrack) and not existing.get("albumartist"):
-        if mb_meta.get("albumartist"):
-            new_tags["albumartist"] = mb_meta["albumartist"]
+    # --- AlbumArtist / Compilation / MBIDs / ISRC ----------------------------
+    if ctx.is_compilation or ctx.is_soundtrack:
+        target_aa = mb_meta.get("albumartist") or "Various Artists"
+        comp_flag = "1"
+    else:
+        target_aa = (
+            mb_meta.get("albumartist")
+            or folder_info.get("artist")
+            or new_tags.get("artist")
+            or effective_existing.get("artist")
+            or parsed.get("artist")
+        )
+        comp_flag = "0"
+
+    validated_aa = validate_albumartist(
+        target_aa,
+        artist=new_tags.get("artist") or effective_existing.get("artist") or parsed.get("artist"),
+        track=new_tags.get("track") or effective_existing.get("track") or parsed.get("track"),
+    )
+
+    if (overwrite or not effective_existing.get("albumartist")) and validated_aa:
+        new_tags["albumartist"] = validated_aa
+
+    if overwrite or not effective_existing.get("compilation"):
+        new_tags["compilation"] = comp_flag
+
+    for mbid_field in ("mb_trackid", "mb_albumid", "mb_artistid", "mb_albumartistid", "mb_releasegroupid"):
+        if (overwrite or not effective_existing.get(mbid_field)) and mb_meta.get(mbid_field):
+            new_tags[mbid_field] = mb_meta[mbid_field]
 
     if not existing.get("isrc") and mb_meta.get("isrc"):
         new_tags["isrc"] = mb_meta["isrc"]
@@ -656,7 +703,7 @@ def _backfill_compilation_albumartist(
     *,
     dry_run: bool = True,
 ) -> None:
-    """Fill missing albumartist tags for compilation folders."""
+    """Fill missing albumartist and compilation tags for compilation folders."""
     ctx = get_folder_context(folder)
     target = _pick_preferred_value([
         albumartist
@@ -677,13 +724,70 @@ def _backfill_compilation_albumartist(
 
     for path, tags in file_tags:
         current = (tags.get("albumartist") or "").strip()
-        if current:
+        current_comp = tags.get("compilation")
+        updates: dict[str, str | None] = {}
+        if not current or current.lower() in _VA_ALIASES:
+            if current != target:
+                updates["albumartist"] = target
+        if current_comp != "1":
+            updates["compilation"] = "1"
+
+        if not updates:
             continue
+
         if dry_run:
-            log.info("  [DRY-RUN] Would set albumartist = %s in %s", target, path.name)
+            log.info("  [DRY-RUN] Would set %s in %s", updates, path.name)
         else:
-            write_tags(path, {"albumartist": target}, dry_run=False)
-            log.info("  Set albumartist = %s in %s", target, path.name)
+            write_tags(path, updates, dry_run=False)
+            log.info("  Set %s in %s", updates, path.name)
+
+
+def _normalise_albumartist_consistency(
+    folder: Path,
+    file_tags: list[tuple[Path, dict[str, str | None]]],
+    *,
+    is_compilation: bool = False,
+    dry_run: bool = True,
+) -> None:
+    """Ensure all tracks in an album folder share the consistent majority albumartist."""
+    if is_compilation:
+        _backfill_compilation_albumartist(folder, file_tags, dry_run=dry_run)
+        return
+
+    # Collect valid albumartists
+    raw_aa_values = [
+        val for _, tags in file_tags
+        if (val := validate_albumartist(tags.get("albumartist"), tags.get("artist"), tags.get("track")))
+    ]
+    target_aa = _pick_preferred_value(raw_aa_values)
+
+    if not target_aa:
+        folder_info = parse_folder_name(_metadata_source_folder(folder / "track.mp3").name)
+        target_aa = folder_info.get("artist") or _pick_preferred_value([
+            v for _, tags in file_tags if (v := (tags.get("artist") or "").strip())
+        ])
+
+    target_aa = validate_albumartist(target_aa)
+    if not target_aa:
+        return
+
+    for path, tags in file_tags:
+        current = (tags.get("albumartist") or "").strip()
+        current_valid = validate_albumartist(current, tags.get("artist"), tags.get("track"))
+        updates: dict[str, str | None] = {}
+        if not current_valid or _normalise_whitespace(current_valid).lower() != _normalise_whitespace(target_aa).lower():
+            updates["albumartist"] = target_aa
+        if tags.get("compilation") != "0":
+            updates["compilation"] = "0"
+
+        if not updates:
+            continue
+
+        if dry_run:
+            log.info("  [DRY-RUN] Would fix album tags in %s: %s", path.name, updates)
+        else:
+            write_tags(path, updates, dry_run=False)
+            log.info("  Fixed album tags in %s: %s", path.name, updates)
 
 
 def _consistency_pass_folder(
@@ -827,6 +931,15 @@ def _consistency_pass_folder(
             else:
                 if _normalise_whitespace(current).lower() == _normalise_whitespace(majority).lower():
                     continue
+                if field == "artist":
+                    curr_norm = _normalise_whitespace(current).lower()
+                    maj_norm = _normalise_whitespace(majority).lower()
+                    if maj_norm in curr_norm:
+                        collab_indicators = ("feat", "ft.", "featuring", "with", "&", "and", "vs", "pres.")
+                        if any(ind in curr_norm for ind in collab_indicators):
+                            log.debug("  Preserving collaboration credit for %s: %r (majority: %r)",
+                                      path.name, current, majority)
+                            continue
             
             if dry_run:
                 log.info("  [DRY-RUN] Would fix %s: %r → %r in %s",
@@ -836,12 +949,12 @@ def _consistency_pass_folder(
                 log.info("  Fixed %s: %r → %r in %s",
                          field, current, majority, path.name)
 
-    if is_compilation:
-        _backfill_compilation_albumartist(
-            folder,
-            file_tags,
-            dry_run=dry_run,
-        )
+    _normalise_albumartist_consistency(
+        folder,
+        file_tags,
+        is_compilation=is_compilation,
+        dry_run=dry_run,
+    )
 
 
 def _consistency_pass(
@@ -939,6 +1052,8 @@ def main() -> None:
                         help="Skip MusicBrainz/AcoustID lookup entirely")
     parser.add_argument("--no-consistency", action="store_true",
                         help="Skip album-level tag consistency pass")
+    parser.add_argument("--remap-genres", action="store_true", default=False,
+                        help="Apply lossy GENRE_REMAP_RULES to written genre tags (default: False)")
     parser.add_argument("--log", type=str, default="review.log",
                         help="Log file path (default: review.log)")
     args = parser.parse_args()
@@ -964,6 +1079,7 @@ def main() -> None:
             overwrite=args.overwrite,
             fix_suspicious=args.fix_suspicious,
             fix_track_mismatch=args.fix_track_mismatch,
+            remap_genres=args.remap_genres,
             no_bpm=args.no_bpm,
             no_mb=args.no_mb,
             no_consistency=args.no_consistency,

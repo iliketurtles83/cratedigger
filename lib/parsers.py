@@ -88,17 +88,65 @@ _COMPACT_DISC_TRACK_PREFIX = re.compile(
     r"^(?P<compact>\d{3,4})(?:[\s._-]+)(?P<title>.+)$"
 )
 
+def validate_albumartist(
+    albumartist: str | None,
+    artist: str | None = None,
+    track: str | None = None,
+) -> str | None:
+    """Validate albumartist tag and return clean value, or None if bogus.
+
+    Rejects:
+    - Empty, whitespace, or blacklisted placeholder values (e.g. 'artist', '-', 'none')
+    - URLs or domain names (e.g. 'http://...', 'www...', '.com', '.net')
+    - Purely digit strings (e.g. '01', '02', '7') that leak track numbers,
+      UNLESS the artist name is identical (e.g. genuine numeric bands like '666', '3', '213').
+    """
+    if not albumartist:
+        return None
+    val = albumartist.strip()
+    if not val:
+        return None
+
+    low = val.lower()
+    junk_tokens = {
+        "artist", "unknown", "unknown artist", "album artist", "no artist",
+        "-", "--", "...", "?", "none", "n/a",
+    }
+    if low in junk_tokens:
+        return None
+
+    # URLs and web domains
+    if low.startswith(("http://", "https://", "www.")) or ".com" in low or ".net" in low or ".org" in low:
+        return None
+
+    # Purely digit strings: check if artist is a genuine numeric band name
+    if val.isdigit():
+        clean_art = (artist or "").strip()
+        if clean_art == val:
+            return val
+        return None
+
+    return val
+
+
 def sanitise_name(value: str) -> str:
-    """Remove ripper annotations and illegal filename/folder characters."""
+    """Remove ripper annotations, illegal filename/folder characters, and clean formatting."""
+    # Unescape backslashes before quotes (e.g. B-52\'s → B-52's)
+    value = re.sub(r'\\([\'"])', r'\1', value)
     # Strip ripper damage/incomplete markers
     value = _RIPPER_ANNOTATIONS.sub("", value)
     # Replace forward slash with dash (slash is path-separator on Linux/macOS)
     value = value.replace("/", "-")
     # Remove remaining illegal characters
     value = _ILLEGAL_CHARS.sub("", value)
+    # Strip leading dots (prevents hidden directory/file creation on Linux/Android)
+    value = value.lstrip(".")
+    # Strip leading/trailing underscores from tokens (e.g. _Heroes_ → Heroes)
+    value = re.sub(r'(?:^|\s)_(.+?)_(?:\s|$)', r' \1 ', value)
     # Collapse multiple spaces
     value = re.sub(r" {2,}", " ", value)
     return value.strip()
+
 
 _sanitise = sanitise_name  # kept for internal callers
 

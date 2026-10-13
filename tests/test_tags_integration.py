@@ -47,7 +47,7 @@ class TagIOIntegrationTests(unittest.TestCase):
         self.assertEqual(result["disc"], "2/3")
         self.assertEqual(result["isrc"], "USABC1234567")
 
-    def test_write_tags_mp3_writes_real_id3_frames_and_uses_v23_save(self) -> None:
+    def test_write_tags_mp3_writes_real_id3_frames_and_uses_v24_save(self) -> None:
         audio = _FakeAudio()
 
         with patch("lib.tags.MutagenFile", return_value=audio):
@@ -74,7 +74,7 @@ class TagIOIntegrationTests(unittest.TestCase):
         self.assertEqual(audio.tags["TBPM"].text, ["100"])
         self.assertEqual(audio.tags["TRCK"].text, ["4/9"])
         self.assertEqual(audio.tags["TPOS"].text, ["2"])
-        self.assertEqual(audio.save_kwargs, {"v2_version": 3})
+        self.assertEqual(audio.save_kwargs, {"v2_version": 4})
 
     def test_read_tags_m4a_uses_tuple_atoms_and_preserves_totals(self) -> None:
         audio = _FakeAudio(

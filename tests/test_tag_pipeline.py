@@ -146,6 +146,45 @@ class TagPipelineIdempotenceTests(unittest.TestCase):
 
         self.assertEqual(second_review, [])
 
+    def test_featured_artist_preserved_during_consistency_pass(self) -> None:
+        # Give track 1 a featured artist tag
+        self.tag_store[self.paths[0]]["artist"] = "Artist feat. Guest Star"
+        self.tag_store[self.paths[1]]["artist"] = "Artist"
+        self.tag_store[self.paths[2]]["artist"] = "Artist"
+
+        _TAGGER.walk_folder(
+            self.music_root / "rock",
+            dry_run=False,
+            overwrite=False,
+            fix_suspicious=False,
+            fix_track_mismatch=False,
+            no_bpm=True,
+            no_mb=True,
+            no_consistency=False,
+        )
+
+        # Featured artist credit should be preserved, not overwritten by majority "Artist"
+        self.assertEqual(self.tag_store[self.paths[0]]["artist"], "Artist feat. Guest Star")
+
+    def test_folder_genre_not_prepended_when_existing_genre_present(self) -> None:
+        # File has existing genre "Alternative Rock"
+        self.tag_store[self.paths[0]]["genre"] = "Alternative Rock"
+
+        # Walk folder in "rock" directory (where folder_genre is "Rock")
+        _TAGGER.tag_file(
+            self.paths[0],
+            dry_run=False,
+            overwrite=False,
+            fix_suspicious=False,
+            fix_track_mismatch=False,
+            no_bpm=True,
+            no_mb=True,
+            review_items=[],
+        )
+
+        # Genre should NOT have "Rock / " prepended
+        self.assertEqual(self.tag_store[self.paths[0]]["genre"], "Alternative Rock")
+
 
 if __name__ == "__main__":
     unittest.main()

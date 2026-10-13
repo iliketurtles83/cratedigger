@@ -154,6 +154,17 @@ def _iter_audio_files(folder: Path) -> Iterator[Path]:
             yield child
 
 
+_COLLAB_RE = re.compile(
+    r"\s+(?:&|\+|feat\.?|ft\.?|featuring|vs\.?|with|w/|and\s+his\s+orchestra|and\s+her\s+orchestra|and\s+the\b).*$",
+    re.IGNORECASE,
+)
+
+
+def _extract_primary_artist(artist: str) -> str:
+    cleaned = _COLLAB_RE.sub("", artist).strip()
+    return cleaned if cleaned else artist
+
+
 def infer_compilation_folder(
     folder: Path,
     *,
@@ -206,11 +217,12 @@ def infer_compilation_folder(
         if (albumartist := _normalise_tag_value(tags.get("albumartist")))
     }
 
-    if len(album_values) > 1 or len(year_values) > 1:
-        # For artist_flat folders, different albums/years means genuinely mixed
-        # content — not a single compilation.  For "album" folders (name has
-        # " - "), inconsistent tags are likely sloppy metadata, not different
-        # albums, so we continue checking artist distribution.
+    albumartist_match = bool(albumartist_values & _COMPILATION_ALBUMARTISTS)
+    if not albumartist_match and (len(album_values) > 1 or (not album_values and len(year_values) > 1)):
+        # For artist_flat folders without VA albumartist, multiple different albums
+        # (or untagged albums with different years) means genuinely mixed content —
+        # not a single compilation. For "album" folders (name has " - "), inconsistent
+        # tags are likely sloppy metadata, so we continue checking artist distribution.
         if ctx.folder_kind != "album":
             return CompilationResult(is_compilation=False, score=0.0, reason="mixed_albums")
 
@@ -219,15 +231,16 @@ def infer_compilation_folder(
     # (e.g. albumartist="Sergio Mendes Featuring X" on a single-artist album,
     # or one rogue track tagged albumartist="Various Artists") never trigger
     # compilation logic on a genuine artist album.
-    artist_counts = Counter(artist_values)
-    if len(artist_counts) < config.COMPILATION_ARTIST_THRESHOLD:
+    primary_artists = [_extract_primary_artist(a) for a in artist_values]
+    primary_counts = Counter(primary_artists)
+    if len(primary_counts) < config.COMPILATION_ARTIST_THRESHOLD:
         return CompilationResult(is_compilation=False, score=0.0, reason="low_tag_coverage")
 
     # --- Weighted scoring (components sum to 1.0 max) ---
     threshold = config.COMPILATION_ARTIST_THRESHOLD
 
     # 0.4: artist diversity relative to threshold
-    distinct_artist_score = min(len(artist_counts) / threshold, 1.0) * 0.4
+    distinct_artist_score = min(len(primary_counts) / threshold, 1.0) * 0.4
 
     # 0.5: albumartist tag is a known VA/compilation value, or is a single
     #      albumartist that differs from all per-track artists.
@@ -235,12 +248,14 @@ def infer_compilation_folder(
     single_albumartist_mismatch = (
         not albumartist_match
         and len(albumartist_values) == 1
-        and next(iter(albumartist_values)) not in set(artist_values)
+        and next(iter(albumartist_values)) not in set(primary_artists)
     )
     albumartist_score = 0.5 if (albumartist_match or single_albumartist_mismatch) else 0.0
 
     # 0.3: no single dominant artist (tracks spread evenly)
-    dominant_share = artist_counts.most_common(1)[0][1] / len(artist_values)
+    dominant_share = primary_counts.most_common(1)[0][1] / len(primary_artists)
+    if dominant_share >= 0.70:
+        return CompilationResult(is_compilation=False, score=0.0, reason="dominant_artist")
     distribution_score = 0.3 if dominant_share <= 0.5 else 0.0
 
     compilation_score = distinct_artist_score + albumartist_score + distribution_score
