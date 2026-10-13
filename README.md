@@ -10,14 +10,17 @@ Personal music collection management pipeline. Tags audio files with genre and m
 
 | Script | Purpose |
 |---|---|
-| `01_tag.py` | Fill missing or bad tags using AcoustID fingerprinting + MusicBrainz. Uses folder context (genre root, compilation/soundtrack flags, BPM eligibility) to decide which fields to write and how to merge genres. |
+| `intake.py` | Modern intake pipeline: imports new files in `INCOMING_FOLDER` via beets using `config/beets.yaml`, matching MusicBrainz releases, writing tags, and sorting into the Tier 1 artist-root contract. (Legacy flow available via `--legacy-move`). |
+| `scripts/audit_repair.py` | Audit library tags against backup (`/media/jack/monodong/audio2`) to purge junk folksonomy tags, restore unflattened subgenres, and protect collaboration credits. |
+| `01_tag.py` | Standalone tagger using AcoustID + MusicBrainz. Uses folder context as fallback only when existing tags are absent; guest/featured credits protected. |
 | `02_rename.py` | Normalise audio filenames using tags as source of truth. Uses folder structure (disc subfolders, sibling scan) to decide whether to apply a disc-track prefix. |
 | `03_folders.py` | Rename folders to canonical `Artist - Album (Year)/` format. Classifies each folder (album, artist, compilation, subgenre, etc.) to determine the right naming pattern and what to flag for review. |
-| `04_move.py` | Route incoming music to genre-appropriate staging folders; restructure existing folders using the artist threshold rule; promote reviewed albums to the library. Uses tags for genre routing and folder classification to determine destination. |
+| `04_move.py` | Legacy staging router and promotion utility. |
 | `05_review.py` | Interactive resolution of files and folders flagged during earlier pipeline steps. |
-| `06_analyze.py` | Phase 5: audio feature extraction (librosa + pyloudnorm) into a pickled pandas DataFrame. |
+| `06_analyze.py` | Audio feature extraction (librosa + pyloudnorm) into a pickled pandas DataFrame. *(Outside standard ingestion scope)*. |
 
-Run in order: `01 → 02 → 03 → 04`. Or use `intake.py` to orchestrate `01 → 02 → 04` for new arrivals.
+Run new arrivals through `intake.py --dry-run`. Run tag hygiene/audits with `scripts/audit_repair.py`.
+
 
 ---
 
@@ -214,12 +217,22 @@ python3 02_rename.py --no-dry-run --folder jazz
 python3 03_folders.py --no-dry-run --folder jazz
 ```
 
-**Process new music dropped in the incoming folder:**
+**Process new music dropped in the incoming folder (Modern Beets Flow):**
 ```bash
-python3 01_tag.py --no-dry-run --folder incoming
-python3 02_rename.py --no-dry-run --folder incoming
-python3 04_move.py --intake --no-dry-run
-# Review staged albums, then:
+# Preview beets matching and destination path without writing
+python3 intake.py --dry-run
+
+# Run live intake (imports, matches MusicBrainz releases, writes canonical tags)
+python3 intake.py --no-dry-run
+
+# Or run beets import directly
+.venv/bin/python -m beets -c config/beets.yaml import /media/jack/buffer/audio/incoming
+```
+
+**Legacy intake staging flow:**
+```bash
+python3 intake.py --legacy-move --no-dry-run
+# Review staged albums, then promote:
 python3 04_move.py --promote --no-dry-run
 ```
 

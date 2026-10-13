@@ -4,23 +4,33 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 
 ## Key Commands
 
-- Run tests: `python -m unittest discover -s tests` (real audio tests: `CRATEDIGGER_RUN_REAL_AUDIO_TESTS=1 python -m unittest discover -s tests`)
-- Dry-run all pipeline: `python intake.py --dry-run`
-- Process folder: `python 01_tag.py --dry-run --folder jazz`
+- Run tests: `.venv/bin/python -m unittest discover -s tests` (real audio tests: `CRATEDIGGER_RUN_REAL_AUDIO_TESTS=1 .venv/bin/python -m unittest discover -s tests`)
+- Dry-run intake pipeline: `python intake.py --dry-run`
+- Beets import trial: `.venv/bin/python -m beets -c config/beets.yaml import --pretend /path/to/album`
+- Audit & repair tags: `python scripts/audit_repair.py --dry-run --folder NAME [--fix]`
+- Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
 - Review flagged items: `python 05_review.py`
+- Recommender evaluation & export: `python 07_recommend.py --evaluate` (export: `python 07_recommend.py --export`)
 
-## Pipeline Flow
+## Architecture & Pipeline Flow
 
-1. **01_tag.py** - Fingerprint → MusicBrainz → write tags
-2. **02_rename.py** - Normalize filenames using tags
-3. **03_folders.py** - Normalize folder names, classify folder types
-4. **04_move.py** - Intake routing, restructuring, promotion
+Cratedigger adopts **beets** for release-level identity, AcoustID/MB metadata matching, and canonical physical file organization, while retaining cratedigger for intake preparation, tag hygiene/audit, and custom genre taxonomy:
+
+1. **intake.py** - New arrivals in `incoming/` are imported via beets (`--beets`, default) using `config/beets.yaml`, writing canonical MBIDs and organizing into the Tier 1 artist-root contract. (Legacy `01→02→04` staging flow preserved via `--legacy-move`).
+2. **scripts/audit_repair.py** - Scans library against backup (`/media/jack/monodong/audio2`) to purge junk folksonomy tags, restore unflattened genres, and protect collaboration credits.
+3. **01_tag.py** - Standalone/pre-tagger. Folder genre is only a fallback when existing genres are absent (prevents feedback loops). Genre remapping is opt-in (`--remap-genres`). Guest/collaboration credits are protected during consistency passes.
+4. **02_rename.py / 03_folders.py** - File/folder normalizers according to cratedigger rules.
+5. **04_move.py** - Legacy staging router and promotion utility.
+6. **05_review.py** - Review triage for flagged items.
+7. **06_analyze.py** - Audio feature extraction (librosa/pyloudnorm/Discogs-EffNet) keyed by `audio_hash` into `features.pkl`.
+8. **07_recommend.py** - Recommender lab, holdout evaluator (20% holdout on `0faves`), and feature exporter (`features_export.json.gz`).
 
 ## Architecture Notes
 
-- Folder naming contract: artist-root with letter bucketing (A-Z, # for symbols)
+- Folder naming contract: Tier 1 artist-root with letter bucketing (`A-Z`, `#` for symbols)
 - Special folders: `0compilations`, `0various`, `0mixes`, `0singles`, `0random`, `#`
-- Letter bucketing: articles stripped for bucketing only (`The Cure` → `C/`)
+- Letter bucketing: articles stripped for bucketing only (`The Cure` → `C/The Cure/`)
+- Beets config: `config/beets.yaml` (enforces path templates, inline bucketing, AcoustID/MusicBrainz). Beets DB located at `/home/jack/.config/beets/library.db`. Always invoke beets with `-c config/beets.yaml`.
 - Artist-folder threshold: configurable (default 3 albums)
 - Folder context is read-only; scripts import from `lib/context.py`
 - Tags are written via `lib/tags.py` (format-agnostic wrapper)
@@ -28,6 +38,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 ## Configuration
 
 - Main config: `config.py` (never committed)
+- Beets config: `config/beets.yaml`
 - API keys: `.env` (never committed)
 - Genre mapping: `FOLDER_TO_GENRE` dict
 - Special folder genre policy: `SPECIAL_FOLDER_GENRE_POLICY`
@@ -35,13 +46,18 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - BPM disabled for: `NO_BPM_FOLDERS`
 - Skip folders: `SKIP_FOLDERS`
 
-## Important Constraints
+## Important Constraints & Player Contract
 
-- Always test with `--dry-run` first
+- Always test with `--dry-run` or `--pretend` first
 - Scripts are idempotent but may produce review flags
-- Use `intake.py` for new arrivals (orchestrates 01→02→04)
-- `05_review.py` handles flagged items from earlier steps
-- All scripts support `--folder NAME` to process one top-level folder
 - Folder classification logic in `lib/context.py`
 - Genre hierarchy: slash-separated (e.g., "Rock / Alt-Rock")
 - All audio operations respect dry-run mode
+- Never re-encode audio during cleanup (changes `audio_hash`, invalidating feature store and client cache)
+- Audio hash identity: features and client tracks are keyed by `audio_hash`, not path or track_id
+- Player refresh: after batch moves or tag updates, trigger `python -m music.maintenance refresh` (or run `./scripts/player_refresh.sh`). Exit code 75 means a refresh is already running
+- Preserve ratings: never wipe `POPM`, `TXXX:FMPS_Rating`, `TXXX:FMPS_Playcount`, `FMPS_RATING`, or `RATING`. Beets config must not use `scrub`
+- Tag standard: follow MusicBrainz Picard mappings and write ID3v2.4. `albumartist` must be written on all album tracks to bind featured/guest credits (`feat.`) without splitting albums
+- Compilations vs Lists: real compilations receive `albumartist = Various Artists` and `compilation = 1`. Curated lists (Pitchfork 500, etc.) are converted to `.m3u8` playlists via `scripts/convert_lists.py`
+- Ogg, Opus, and WMA (1%): hashed whole. Never move and retag an Ogg/Opus/WMA file in the same pass if phone track identity needs to be preserved
+- Cover art: embed front cover (APIC type 3) or place `cover.jpg` / `folder.jpg` in the album directory

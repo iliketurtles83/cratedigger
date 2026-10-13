@@ -20,13 +20,13 @@ All operations are **safe by default** (dry-run first), **idempotent** (safe to 
 - Artist, title, track number, disc number, album, year
 - Genre (multi-value, slash-separated)
 - BPM, ISRC (deduplication anchor)
-- AlbumArtist (compilation/soundtrack signal)
+- AlbumArtist (release-level artist credit, binds collaboration/guest tracks to album)
 
 **Context** answers: *How should this file be treated?*
 - Folder classification (album, artist, artist_mixed, artist_flat, subgenre, special, disc, unknown)
 - Genre scope (which FOLDER_TO_GENRE applies)
 - BPM eligibility (skip for spoken word, meditation, mixes)
-- AlbumArtist eligibility (only write in compilation/soundtrack context)
+- AlbumArtist consistency (ensures all tracks on a release share identical albumartist)
 - Naming pattern (disc prefix decision, folder name template)
 
 These are **independent concerns**. Each script needs both, but for different reasons.
@@ -148,7 +148,9 @@ cratedigger/
       ↓
 05_review.py    review.json → interactive resolution
       ↓
-06_analyze.py   tagged audio → extract features → store externally (future)
+06_analyze.py   tagged audio → extract features (keyed by audio_hash) → features.pkl
+      ↓
+07_recommend.py features.pkl → evaluate & tune weights → export features_export.json.gz
 
 intake.py       INCOMING_FOLDER → orchestrate 01→02→04
 ```
@@ -163,7 +165,8 @@ intake.py       INCOMING_FOLDER → orchestrate 01→02→04
 | `04_move.py` | Genre (from tags) | Folder classification | Moved/staged files, folder changes |
 | `05_review.py` | review.json | User input | Resolved metadata, moved/renamed files |
 | `intake.py` | INCOMING_FOLDER | — | Orchestrates 01→02→04 |
-| `06_analyze.py` | Tagged audio | — | Feature vectors (external storage) |
+| `06_analyze.py` | Tagged audio | — | Feature vectors (audio_hash key, external storage) |
+| `07_recommend.py` | features.pkl | config / taste signals | Evaluated weights, features_export.json.gz |
 
 ### Why Each Script Exists
 
@@ -173,6 +176,7 @@ intake.py       INCOMING_FOLDER → orchestrate 01→02→04
 - **04_move.py**: Genre and folder classification determine routing. Staging gates the final move into the library.
 - **05_review.py**: Flagged cases are ambiguous by definition; only a human can resolve them reliably.
 - **06_analyze.py**: Separated from tagging so audio features can be recomputed with better models without touching tags.
+- **07_recommend.py**: Lab tool for tuning hybrid component weights, evaluating holdout ranking on 0faves, and generating client-ready offline feature exports for the mobile player app.
 
 ---
 
@@ -307,7 +311,10 @@ All mappings centralized in `lib/tags.py`; no format-specific logic in pipeline 
 ### Critical Tags
 
 - **Genre**: slash-separated (e.g., `Rock / Alt-Rock / Shoegaze`). Main genre first. Never flattened.
-- **AlbumArtist**: written only in compilation/soundtrack context. Never written for regular artist albums.
+- **AlbumArtist**: release-level artist credit. Populated on all album releases (regular artist albums and compilations). Guarantees that tracks with featured artists ('X feat. Y') do not split albums in music players.
+- **Compilation**: binary flag (`1` for compilations/soundtracks, `0` for regular artist albums).
+- **MusicBrainz IDs**: `mb_trackid`, `mb_albumid`, `mb_artistid`, `mb_albumartistid`, `mb_releasegroupid`.
+- **Ratings**: preserved in file metadata (`POPM`, `TXXX:FMPS_Rating`, `FMPS_RATING`, `RATING`).
 - **ISRC**: international standard recording code. Deduplication anchor. Written if MB provides it.
 - **BPM**: integer. Detected via librosa. Not supported in M4A (ID3 limitation).
 - **Track**: preserved in `x/total` format (e.g., `3/12`) for playlist ordering.

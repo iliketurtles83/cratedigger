@@ -161,22 +161,19 @@ Extract audio features for a personal recommender model. Runs independently of `
 - ✅ Storage schema is finalized with migration guidance (`FEATURE_SCHEMA_VERSION` + auto-reanalyze on mismatch).
 - ✅ Analysis can be rerun independently of tagging without mutating tags (no `write_tags` in `06_analyze.py`).
 
-### Phase 6: Recommender Model
+### Phase 6: Feature Export & Recommender Model — **COMPLETE**
 
-Build a content-based + collaborative filtering hybrid model using:
-- Multi-genre tags (not flattened)
-- Audio features from Phase 5
-- Artist co-occurrence graph
-- User preference signals (0faves, 0random_good, etc.)
-- Positive examples: liked files, frequently played
-- Negative examples: skipped, in 0random_bad (if added)
-
-**Storage:** sqlite or DuckDB. **Interface:** CLI or TUI for "play something like this."
+Build a content-based feature export and offline similarity model consumed by the mobile music player app (offline dot product) and home sync server (`GET /library/features?model=<version>`):
+- ✅ **Audio hash identity** — `lib/audiohash.py` (`a1:hex`) hashes head/tail audio bitstreams, ignoring tags. Moves and renames never orphan features.
+- ✅ **Deep music embeddings** — Discogs-EffNet ONNX model extracts 400-dim style/genre activations, providing semantic musical representation far beyond heuristic proxies.
+- ✅ **Baked hybrid vector** — standardizes and scales components ($w_{\text{emb}} \cdot \hat{e} + w_{\text{tempo}} \cdot \hat{t} + w_{\text{harm}} \cdot \hat{h} + w_{\text{scalar}} \cdot \hat{s}$) into an L2-normalized unit vector so phone dot product computes exact weighted similarity offline.
+- ✅ **Offline evaluation harness** — `07_recommend.py` provides 20% holdout recall/ranking benchmarks on `0faves`.
+- ✅ **Feature export** — `export_features()` serializes tracks, unit vectors, and readable filter scalars to compact `features_export.json.gz`.
 
 **Phase 6 Exit Criteria**
-- Baseline model quality is measurable via offline evaluation metrics.
-- Feature pipeline is reproducible from tagged files + analysis store.
-- CLI/TUI interface supports deterministic query inputs and explainable outputs.
+- ✅ Baseline model quality is measurable via offline evaluation metrics (Recall@5/10/20, MRR).
+- ✅ Feature pipeline is reproducible and keyed by tag-invariant `audio_hash`.
+- ✅ Feature export satisfies phone client schema and payload budget (~5-15 MB across library).
 
 ### Phase 7: ISRC Deduplication (deferred)
 
