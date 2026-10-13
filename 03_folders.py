@@ -30,7 +30,7 @@ from lib.logger import setup_logger
 from lib.parsers import parse_folder_name, sanitise_name
 from lib.tags import read_tags
 
-log: logging.Logger = None  # type: ignore[assignment]
+log: logging.Logger = logging.getLogger("03_folders")
 
 
 # Album folder without year — requires space-dash-space to avoid splitting

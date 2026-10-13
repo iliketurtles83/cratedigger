@@ -722,19 +722,29 @@ def _backfill_compilation_albumartist(
 ) -> None:
     """Fill missing albumartist and compilation tags for compilation folders."""
     ctx = get_folder_context(folder)
-    target = _pick_preferred_value([
-        albumartist
+    track_artists = {
+        (tags.get("artist") or "").strip().lower()
         for _, tags in file_tags
-        if (albumartist := (tags.get("albumartist") or "").strip())
-    ])
+        if (tags.get("artist") or "").strip()
+    }
+    is_multi_artist = len(track_artists) > 1
 
-    # Normalise common abbreviations to the canonical form
-    _VA_ALIASES = frozenset({"va", "various"})
-    if target and target.lower() in _VA_ALIASES:
-        target = "Various Artists"
+    _VA_ALIASES = frozenset({"va", "v.a.", "v. a.", "various", "various artists"})
 
-    if not target and not ctx.is_soundtrack:
+    if is_multi_artist and not ctx.is_soundtrack:
         target = "Various Artists"
+    else:
+        raw_target = _pick_preferred_value([
+            albumartist
+            for _, tags in file_tags
+            if (albumartist := (tags.get("albumartist") or "").strip())
+        ])
+        if raw_target and raw_target.lower() in _VA_ALIASES:
+            target = "Various Artists"
+        elif not raw_target and not ctx.is_soundtrack:
+            target = "Various Artists"
+        else:
+            target = validate_albumartist(raw_target)
 
     if not target:
         return
@@ -743,11 +753,19 @@ def _backfill_compilation_albumartist(
         current = (tags.get("albumartist") or "").strip()
         current_comp = tags.get("compilation")
         updates: dict[str, str | None] = {}
-        if not current or current.lower() in _VA_ALIASES:
-            if current != target:
-                updates["albumartist"] = target
-        if current_comp != "1":
-            updates["compilation"] = "1"
+
+        if target == "Various Artists":
+            if current != "Various Artists":
+                updates["albumartist"] = "Various Artists"
+            if current_comp != "1":
+                updates["compilation"] = "1"
+        else:
+            if not current or current.lower() in _VA_ALIASES:
+                if current != target:
+                    updates["albumartist"] = target
+            target_comp = "1" if target == "Various Artists" else current_comp
+            if target_comp and current_comp != target_comp:
+                updates["compilation"] = target_comp
 
         if not updates:
             continue
@@ -821,7 +839,8 @@ def _consistency_pass_folder(
     artist root folders are skipped — they can legitimately differ.
     """
     kind = classify_folder(folder)
-    if kind not in ("album", "disc"):
+    ctx = get_folder_context(folder)
+    if kind not in ("album", "disc") and not (ctx.is_compilation and kind == "artist_flat"):
         return
 
     audio_files = sorted(
