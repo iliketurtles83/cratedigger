@@ -59,6 +59,8 @@ class FeedbackStandardsTests(unittest.TestCase):
         self.assertEqual(validate_albumartist("Radiohead"), "Radiohead")
         self.assertEqual(validate_albumartist("Various Artists"), "Various Artists")
         self.assertEqual(validate_albumartist("Blink-182"), "Blink-182")
+        self.assertEqual(validate_albumartist("Apocalyptica feat. Sandra Nasić"), "Apocalyptica")
+        self.assertEqual(validate_albumartist("Gorillaz ft. Del the Funky Homosapien"), "Gorillaz")
 
     def test_sanitise_name_leading_dots_underscores_escapes(self):
         # Leading dots (hidden folders/files on Linux/Android)

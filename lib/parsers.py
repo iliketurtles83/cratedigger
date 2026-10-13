@@ -137,6 +137,9 @@ def validate_albumartist(
             return val
         return None
 
+    # Strip featured artists from albumartist (albumartist is the release's main artist, never a featured credit)
+    val = re.split(r"\s+(?:feat\.?|ft\.?|featuring)\s+", val, flags=re.IGNORECASE)[0].strip()
+
     return val
 
 
