@@ -7,3 +7,7 @@ __pycache__/
 *.pkl
 .venv/
 .aider*
+models/*.onnx
+features_export.json.gz
+*.gz
+0faves_clusters.*

@@ -60,10 +60,12 @@ import numpy as np
 import pandas as pd
 
 import config
+from lib.audiohash import audio_hash
+from lib.embeddings import extract_embedding
 from lib.logger import setup_logger
 from lib.tags import read_tags
 
-FEATURE_SCHEMA_VERSION = 6  # bpm sourced from tags; added artist/album/track tag columns
+FEATURE_SCHEMA_VERSION = 8  # added audio_hash (a1:hex tag-invariant key) and Discogs-EffNet embedding
 
 log: logging.Logger = logging.getLogger("06_analyze")
 
@@ -98,13 +100,15 @@ def _load_pyloudnorm():
 # ---------------------------------------------------------------------------
 
 FEATURE_COLUMNS: list[str] = [
-    "path", "mtime", "size",
+    "audio_hash", "path", "mtime", "size",
     "artist_tag", "album_tag", "track_tag", "year_tag", "genre_tag",
-    "duration_ms", "bpm", "key", "mode",
+    "rating_tag", "rating",
+    "duration_ms", "bpm_tag", "bpm", "key", "mode",
     "energy", "loudness_lufs",
     "spectral_centroid", "zero_crossing_rate",
     "danceability",
     "speechiness", "acousticness", "instrumentalness", "liveness", "valence",
+    "embedding",
     "schema_version", "analyzed_at", "error",
 ]
 
@@ -263,6 +267,11 @@ def extract_features(path: Path) -> dict:
     base["analyzed_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
+        base["audio_hash"] = audio_hash(str(path))
+    except Exception as exc:
+        log.debug("audio_hash failed for %s: %s", path.name, exc)
+
+    try:
         tags = read_tags(path)
         if tags:
             if tags.get("artist"):
@@ -278,9 +287,18 @@ def extract_features(path: Path) -> dict:
             if tags.get("bpm"):
                 try:
                     bpm_tag = float(tags["bpm"])
-                    base["bpm"] = round(bpm_tag, 2) if bpm_tag > 0 else None
+                    if bpm_tag > 0:
+                        base["bpm_tag"] = round(bpm_tag, 2)
+                        base["bpm"] = round(bpm_tag, 2)
                 except (TypeError, ValueError):
-                    base["bpm"] = None
+                    base["bpm_tag"] = None
+            if tags.get("rating"):
+                try:
+                    r_val = float(tags["rating"])
+                    base["rating_tag"] = round(r_val, 2)
+                    base["rating"] = round(r_val, 2)
+                except (TypeError, ValueError):
+                    base["rating_tag"] = None
     except Exception as exc:
         log.debug("tag read failed for %s: %s", path.name, exc)
 
@@ -289,11 +307,14 @@ def extract_features(path: Path) -> dict:
         base["error"] = "librosa_not_installed"
         return base
 
+    # Load audio at standard analysis rate (22,050 Hz) for 3x faster decoding
+    # and lower memory usage while fully preserving musical pitch/tonality.
+    ANALYSIS_SR = 22050
     try:
         with warnings.catch_warnings(), _suppress_c_stderr():
             warnings.filterwarnings("ignore", category=UserWarning)
             warnings.filterwarnings("ignore", category=FutureWarning)
-            y, sr = librosa.load(str(path), sr=None, mono=True)
+            y, sr = librosa.load(str(path), sr=ANALYSIS_SR, mono=True)
     except Exception as exc:
         base["error"] = f"load_failed: {exc}"
         return base
@@ -306,8 +327,23 @@ def extract_features(path: Path) -> dict:
         duration_s = float(librosa.get_duration(y=y, sr=sr))
         base["duration_ms"] = int(round(duration_s * 1000))
 
+        if duration_s > 1200:  # Skip continuous mixes/podcasts longer than 20 minutes
+            base["error"] = "duration_exceeds_20min"
+            return base
+
         onset_env = librosa.onset.onset_strength(y=y, sr=sr)
         bpm = base.get("bpm")
+
+        # Fallback to estimated tempo if tag was not present
+        if bpm is None or bpm <= 0:
+            try:
+                detected_tempo = librosa.feature.tempo(onset_envelope=onset_env, sr=sr)
+                bpm_val = float(detected_tempo[0] if hasattr(detected_tempo, "__len__") else detected_tempo)
+                if bpm_val > 0:
+                    base["bpm"] = round(bpm_val, 2)
+                    bpm = base["bpm"]
+            except Exception as exc:
+                log.debug("tempo detection fallback failed for %s: %s", path.name, exc)
 
         beat_strength = float(np.mean(onset_env) / (np.max(onset_env) + 1e-9))
         base["danceability"] = _danceability_proxy(bpm, beat_strength)
@@ -321,11 +357,21 @@ def extract_features(path: Path) -> dict:
         zcr = librosa.feature.zero_crossing_rate(y=y)
         base["zero_crossing_rate"] = round(float(np.mean(zcr)), 6)
 
-        # Harmonic component improves key estimation for drum-heavy material.
+        # For harmonic separation & key estimation, analyze a central window
+        # (up to 90 seconds) to avoid massive memory/compute while retaining
+        # full musical key and harmonic profile.
+        if duration_s > 90.0:
+            start_s = max(0.0, (duration_s / 2.0) - 45.0)
+            end_s = start_s + 90.0
+            y_harm_window = y[int(start_s * sr) : int(end_s * sr)]
+        else:
+            y_harm_window = y
+
         try:
-            y_harm, _ = librosa.effects.hpss(y)
+            y_harm, _ = librosa.effects.hpss(y_harm_window, kernel_size=15)
         except Exception:
-            y_harm = y
+            y_harm = y_harm_window
+
         chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr)
         chroma_mean = chroma.mean(axis=1)
         key, mode = _estimate_key(chroma_mean)
@@ -348,7 +394,7 @@ def extract_features(path: Path) -> dict:
             log.debug("speechiness proxy failed for %s: %s", path.name, exc)
 
         try:
-            base["acousticness"] = _acousticness_proxy(y, y_harm, sr, librosa)
+            base["acousticness"] = _acousticness_proxy(y_harm_window, y_harm, sr, librosa)
         except Exception as exc:
             log.debug("acousticness proxy failed for %s: %s", path.name, exc)
 
@@ -368,6 +414,11 @@ def extract_features(path: Path) -> dict:
             )
         except Exception as exc:
             log.debug("valence proxy failed for %s: %s", path.name, exc)
+
+        try:
+            base["embedding"] = extract_embedding(path, audio=y, sr=sr)
+        except Exception as exc:
+            log.debug("embedding extraction failed for %s: %s", path.name, exc)
 
     except Exception as exc:
         base["error"] = f"feature_failed: {exc}"
@@ -404,7 +455,7 @@ def _iter_audio_files(root: Path) -> list[Path]:
         if root.suffix.lower() in config.AUDIO_EXTENSIONS:
             return [root]
         return []
-    skip = {s.lower() for s in getattr(config, "SKIP_FOLDERS", set())}
+    skip = {s.lower() for s in getattr(config, "SKIP_FOLDERS", set())} | {"0mixes"}
     out: list[Path] = []
     for p in root.rglob("*"):
         if not p.is_file():
@@ -427,10 +478,18 @@ def _load_existing(output_path: Path) -> pd.DataFrame:
         for col in FEATURE_COLUMNS:
             if col not in df.columns:
                 df[col] = None
+        if "error" in df.columns:
+            df["error"] = df["error"].where(df["error"].notna(), None)
         return df[FEATURE_COLUMNS]
     except Exception as exc:
         log.warning("Could not load existing feature store %s: %s", output_path, exc)
         return pd.DataFrame(columns=FEATURE_COLUMNS)
+
+
+def _has_error(val) -> bool:
+    if val is None or pd.isna(val):
+        return False
+    return bool(val)
 
 
 def _needs_analysis(row, path: Path) -> bool:
@@ -440,15 +499,26 @@ def _needs_analysis(row, path: Path) -> bool:
         stat = path.stat()
     except OSError:
         return False
-    if row.get("error"):
+    if _has_error(row.get("error")):
         return True
     if row.get("schema_version") != FEATURE_SCHEMA_VERSION:
+        return True
+    if not row.get("audio_hash"):
         return True
     if row.get("mtime") != stat.st_mtime:
         return True
     if row.get("size") != stat.st_size:
         return True
     return False
+
+
+def _save_dataframe(rows: dict[str, dict], output_path: Path) -> pd.DataFrame:
+    df = pd.DataFrame(list(rows.values()), columns=FEATURE_COLUMNS)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(f".{output_path.name}.tmp")
+    df.to_pickle(tmp_path)
+    tmp_path.replace(output_path)
+    return df
 
 
 def analyze_folder(
@@ -470,31 +540,76 @@ def analyze_folder(
 
     existing = pd.DataFrame(columns=FEATURE_COLUMNS) if force else _load_existing(output_path)
     existing_by_path: dict[str, dict] = {}
+    existing_by_hash: dict[str, dict] = {}
     if not existing.empty:
         for _, row in existing.iterrows():
-            existing_by_path[str(row["path"])] = row.to_dict()
-
-    # Prune rows whose audio file no longer exists. Without this, renames
-    # and deletes accumulate dead rows forever in the pickle.
-    pruned = 0
-    for path_str in list(existing_by_path.keys()):
-        if not Path(path_str).exists():
-            del existing_by_path[path_str]
-            pruned += 1
-    if pruned:
-        log.info("Pruned %d row(s) for files no longer on disk", pruned)
+            d = row.to_dict()
+            existing_by_path[str(row["path"])] = d
+            if d.get("audio_hash"):
+                existing_by_hash[d["audio_hash"]] = d
 
     rows: dict[str, dict] = dict(existing_by_path)
 
     # Separate skip determination from extraction so parallelism is clean.
     to_analyze: list[Path] = []
     skipped = 0
+    claimed_paths: set[str] = set()
+
     for path in audio_files:
         current = existing_by_path.get(str(path))
         if not force and current is not None and not _needs_analysis(current, path):
             skipped += 1
+            claimed_paths.add(str(path))
         else:
-            to_analyze.append(path)
+            # Check if this file is a renamed/moved file whose audio_hash already exists
+            ah = None
+            if not force:
+                try:
+                    ah = audio_hash(str(path))
+                except Exception:
+                    ah = None
+
+            if (
+                not force
+                and ah
+                and ah in existing_by_hash
+                and existing_by_hash[ah].get("schema_version") == FEATURE_SCHEMA_VERSION
+                and not _has_error(existing_by_hash[ah].get("error"))
+            ):
+                matched_row = dict(existing_by_hash[ah])
+                stat = path.stat()
+                matched_row["path"] = str(path)
+                matched_row["mtime"] = stat.st_mtime
+                matched_row["size"] = stat.st_size
+                try:
+                    tags = read_tags(path)
+                    if tags:
+                        for field, tag_key in [
+                            ("artist_tag", "artist"),
+                            ("album_tag", "album"),
+                            ("track_tag", "track"),
+                            ("year_tag", "year"),
+                            ("genre_tag", "genre"),
+                        ]:
+                            if tags.get(tag_key):
+                                matched_row[field] = tags[tag_key]
+                except Exception:
+                    pass
+                rows[str(path)] = matched_row
+                claimed_paths.add(str(path))
+                skipped += 1
+                log.info("Recognized moved/renamed file by audio_hash: %s", path.name)
+            else:
+                to_analyze.append(path)
+
+    # Prune rows whose audio file no longer exists and wasn't claimed
+    pruned = 0
+    for path_str in list(rows.keys()):
+        if not Path(path_str).exists() and path_str not in claimed_paths:
+            del rows[path_str]
+            pruned += 1
+    if pruned:
+        log.info("Pruned %d row(s) for files no longer on disk", pruned)
 
     if dry_run:
         log.info(
@@ -529,38 +644,46 @@ def analyze_folder(
         drain_thread = threading.Thread(target=_drain_start_queue, daemon=True)
         drain_thread.start()
 
-        with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(start_q,)) as executor:
-            futures = {
-                executor.submit(_worker_extract, path): path
-                for path in to_analyze
-            }
-            done = 0
-            for future in as_completed(futures):
-                path = futures[future]
-                done += 1
-                try:
-                    features = future.result()
-                except Exception as exc:
-                    log.warning("[%d/%d] Worker error for %s: %s", done, len(to_analyze), path.name, exc)
-                    stat = path.stat()
-                    features = {col: None for col in FEATURE_COLUMNS}
-                    features["path"] = str(path)
-                    features["mtime"] = stat.st_mtime
-                    features["size"] = stat.st_size
-                    features["schema_version"] = FEATURE_SCHEMA_VERSION
-                    features["analyzed_at"] = datetime.now(timezone.utc).isoformat()
-                    features["error"] = f"worker_error: {exc}"
-                    failed += 1
-                else:
-                    if features.get("error"):
+        try:
+            with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(start_q,)) as executor:
+                futures = {
+                    executor.submit(_worker_extract, path): path
+                    for path in to_analyze
+                }
+                done = 0
+                for future in as_completed(futures):
+                    path = futures[future]
+                    done += 1
+                    try:
+                        features = future.result()
+                    except Exception as exc:
+                        if type(exc).__name__ in ("BrokenProcessPool", "BrokenExecutor"):
+                            log.error("Process pool broke (%s) at [%d/%d]; halting batch to protect store integrity", exc, done, len(to_analyze))
+                            break
+                        log.warning("[%d/%d] Worker error for %s: %s", done, len(to_analyze), path.name, exc)
+                        stat = path.stat()
+                        features = {col: None for col in FEATURE_COLUMNS}
+                        features["path"] = str(path)
+                        features["mtime"] = stat.st_mtime
+                        features["size"] = stat.st_size
+                        features["schema_version"] = FEATURE_SCHEMA_VERSION
+                        features["analyzed_at"] = datetime.now(timezone.utc).isoformat()
+                        features["error"] = f"worker_error: {exc}"
                         failed += 1
-                        log.warning("[%d/%d] %s -> %s", done, len(to_analyze), path.name, features["error"])
+                        rows[str(path)] = features
                     else:
-                        log.info("[%d/%d] Done  %s", done, len(to_analyze), path.name)
-                rows[str(path)] = features
-
-        start_q.put(None)  # sentinel: stop drain thread
-        drain_thread.join(timeout=2.0)
+                        if features.get("error"):
+                            failed += 1
+                            log.warning("[%d/%d] %s -> %s", done, len(to_analyze), path.name, features["error"])
+                        else:
+                            log.info("[%d/%d] Done  %s", done, len(to_analyze), path.name)
+                        rows[str(path)] = features
+                    if done % 50 == 0:
+                        _save_dataframe(rows, output_path)
+                        log.info("Checkpoint: saved %d rows to %s", len(rows), output_path)
+        finally:
+            start_q.put(None)  # sentinel: stop drain thread
+            drain_thread.join(timeout=2.0)
     else:
         for idx, path in enumerate(to_analyze, start=1):
             log.info("[%d/%d] Analyzing %s", idx, len(to_analyze), path.name)
@@ -569,13 +692,13 @@ def analyze_folder(
                 failed += 1
                 log.warning("  -> %s", features["error"])
             rows[str(path)] = features
+            if idx % 50 == 0:
+                _save_dataframe(rows, output_path)
+                log.info("Checkpoint: saved %d rows to %s", len(rows), output_path)
 
     log.info("Analyzed %d, skipped %d (incremental), failed %d", len(to_analyze), skipped, failed)
 
-    df = pd.DataFrame(list(rows.values()), columns=FEATURE_COLUMNS)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_pickle(output_path)
+    df = _save_dataframe(rows, output_path)
     log.info("Wrote %d rows to %s", len(df), output_path)
 
     return df

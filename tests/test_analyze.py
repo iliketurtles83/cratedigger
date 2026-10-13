@@ -29,12 +29,14 @@ def _write_sine_wav(path: Path, freq: float = 440.0, duration_s: float = 2.0, sr
 class TestAnalyzeSchema(unittest.TestCase):
     def test_feature_columns_complete(self):
         expected = {
-            "path", "mtime", "size",
+            "audio_hash", "path", "mtime", "size",
             "artist_tag", "album_tag", "track_tag", "year_tag", "genre_tag",
-            "duration_ms", "bpm", "key", "mode",
+            "rating_tag", "rating",
+            "duration_ms", "bpm_tag", "bpm", "key", "mode",
             "energy", "loudness_lufs", "spectral_centroid",
             "zero_crossing_rate", "danceability",
             "speechiness", "acousticness", "instrumentalness", "liveness", "valence",
+            "embedding",
             "schema_version", "analyzed_at", "error",
         }
         self.assertEqual(set(analyze.FEATURE_COLUMNS), expected)

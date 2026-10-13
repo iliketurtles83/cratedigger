@@ -62,6 +62,7 @@ SUBGENRE_BUCKETS = {
 SUSPICIOUS_TAG_VALUES = {
     "unknown artist", "unknown", "track", "untitled",
     "artist", "album artist", "no artist", "various artists",
+    "-", "--", "...", "?", "none", "n/a",
 }
 
 # Artists with this many or more albums get their own artist subfolder.
@@ -125,6 +126,16 @@ AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
 # ── Phase 5: audio analysis ──────────────────────────────────────────────────
 # Pickled pandas DataFrame written by 06_analyze.py.
 FEATURES_STORE_PATH = Path("features.pkl")
+
+# ── Phase 6: recommender & feature export ────────────────────────────────────
+RECOMMENDER_EXPORT_PATH = Path("features_export.json.gz")
+RECOMMENDER_MODEL_VERSION = "cratedigger-v1.0-discogs-effnet-hybrid"
+RECOMMENDER_WEIGHTS = {
+    "embedding": 0.70,
+    "tempo": 0.15,
+    "harmonic": 0.10,
+    "scalars": 0.05,
+}
 
 MB_RATE_LIMIT_SECONDS = 1.1
 ACOUSTID_MIN_SCORE    = 0.8
