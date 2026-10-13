@@ -43,6 +43,10 @@ def main() -> None:
                         help="Overwrite existing artist/title tags from MB")
     parser.add_argument("--fix-suspicious", action="store_true",
                         help="Replace suspicious placeholder values only")
+    parser.add_argument("--legacy-move", action="store_true",
+                        help="Use legacy 04_move.py --intake staging routing instead of beets")
+    parser.add_argument("--pre-tag", action="store_true",
+                        help="Run 01_tag.py on incoming folder before beets import")
     parser.add_argument("--log", type=str, default="review.log",
                         help="Log file path (default: review.log)")
     args = parser.parse_args()
@@ -74,31 +78,57 @@ def main() -> None:
     if not dry_run:
         common_args.append("--no-dry-run")
 
-    # Step 1: Tag
-    tag_args = common_args[:]
-    if args.overwrite:
-        tag_args.append("--overwrite")
-    if args.fix_suspicious:
-        tag_args.append("--fix-suspicious")
-    rc = run_step("01_tag.py", tag_args)
-    if rc != 0:
-        log.error("Tagging failed — stopping pipeline")
-        return
+    if args.legacy_move:
+        # Legacy pipeline flow: 01_tag -> 02_rename -> 04_move --intake
+        tag_args = common_args[:]
+        if args.overwrite:
+            tag_args.append("--overwrite")
+        if args.fix_suspicious:
+            tag_args.append("--fix-suspicious")
+        rc = run_step("01_tag.py", tag_args)
+        if rc != 0:
+            log.error("Tagging failed — stopping pipeline")
+            return
 
-    # Step 2: Rename files in incoming folder
-    rc = run_step("02_rename.py", common_args)
-    if rc != 0:
-        log.error("Renaming failed — stopping pipeline")
-        return
+        rc = run_step("02_rename.py", common_args)
+        if rc != 0:
+            log.error("Renaming failed — stopping pipeline")
+            return
 
-    # Step 3: Intake routing to staging folders
-    move_args = ["--intake", "--log", args.log]
-    if not dry_run:
-        move_args.append("--no-dry-run")
-    rc = run_step("04_move.py", move_args)
-    if rc != 0:
-        log.error("Moving failed — stopping pipeline")
-        return
+        move_args = ["--intake", "--log", args.log]
+        if not dry_run:
+            move_args.append("--no-dry-run")
+        rc = run_step("04_move.py", move_args)
+        if rc != 0:
+            log.error("Moving failed — stopping pipeline")
+            return
+    else:
+        # Modern beets intake pipeline
+        if args.pre_tag:
+            tag_args = common_args[:]
+            if args.overwrite:
+                tag_args.append("--overwrite")
+            if args.fix_suspicious:
+                tag_args.append("--fix-suspicious")
+            rc = run_step("01_tag.py", tag_args)
+            if rc != 0:
+                log.error("Pre-tagging failed — stopping pipeline")
+                return
+
+        beets_cfg = Path("config/beets.yaml")
+        if not beets_cfg.exists():
+            log.error("Beets config not found at %s. Run with --legacy-move or create config/beets.yaml", beets_cfg)
+            return
+
+        beet_cmd = [sys.executable, "-m", "beets", "-c", str(beets_cfg), "import"]
+        if dry_run:
+            beet_cmd.append("--pretend")
+        beet_cmd.append(str(intake_folder))
+        log.info("Running beets intake: %s", " ".join(beet_cmd))
+        result = subprocess.run(beet_cmd)
+        if result.returncode != 0:
+            log.error("Beets import failed with code %d", result.returncode)
+            return
 
     mode = "DRY-RUN" if dry_run else "LIVE"
     log.info("Intake complete (%s) — processed %d files", mode, len(audio_files))

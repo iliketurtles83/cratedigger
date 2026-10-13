@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 
 import config
-from lib.context import classify_folder
+from lib.context import classify_folder, infer_compilation_folder
 from lib.genres import normalise_genre, parent_genre
 from lib.logger import setup_logger
 from lib.preferences import remap_genre, resolve_artist_folder_threshold
@@ -75,8 +75,9 @@ def _artist_letter_bucket(artist: str) -> str:
 
 
 def _first_audio_file(folder: Path) -> Path | None:
+    exts = config.AUDIO_EXTENSIONS | {".wma"}
     for path in sorted(folder.rglob("*")):
-        if path.is_file() and path.suffix.lower() in config.AUDIO_EXTENSIONS:
+        if path.is_file() and path.suffix.lower() in exts:
             return path
     return None
 
@@ -718,19 +719,35 @@ def _migrate_album_to_artist_root(
     Reads artist from tags (albumartist preferred over artist), falls back to
     parsing the folder name before " - ".
     """
+    folder_artist: str | None = None
     artist: str | None = None
+    if " - " in folder.name:
+        cand = folder.name.split(" - ")[0].strip()
+        if cand and cand.lower() not in {"various artists", "various", "va"}:
+            folder_artist = cand
+
     sample = _first_audio_file(folder)
     if sample is not None:
         tags = read_tags(sample)
         if tags:
-            artist = (
-                (tags.get("albumartist") or "").strip()
-                or (tags.get("artist") or "").strip()
-                or None
-            )
+            albumartist = (tags.get("albumartist") or "").strip()
+            if albumartist and albumartist.lower() in {"various artists", "various", "va"}:
+                dest_comp = config.MUSIC_ROOT / "0compilations" / folder.name
+                if dest_comp.exists():
+                    log.warning("Target exists in 0compilations, skipping: %s → %s", folder, dest_comp)
+                    review_items.append({"path": str(folder), "reason": "move_conflict", "target": str(dest_comp)})
+                else:
+                    _move_path(folder, dest_comp, dry_run=dry_run, review_items=review_items)
+                return
+            elif albumartist:
+                artist = albumartist
+            elif folder_artist:
+                artist = folder_artist
+            else:
+                artist = (tags.get("artist") or "").strip() or None
 
-    if not artist and " - " in folder.name:
-        artist = folder.name.split(" - ")[0].strip() or None
+    if not artist and folder_artist:
+        artist = folder_artist
 
     if not artist:
         log.warning("Cannot determine artist for %s — flagging", folder.name)
@@ -756,9 +773,125 @@ def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
     """Walk one genre folder and migrate its contents to artist-root layout."""
     review_items: list[dict] = []
     for child in sorted(genre_dir.iterdir()):
+        if child.is_file():
+            if child.suffix.lower() in config.AUDIO_EXTENSIONS:
+                tags = read_tags(child)
+                artist = (tags.get("artist") or "").strip() if tags else None
+                if not artist and " - " in child.name:
+                    cand = child.name.split(" - ")[0].strip()
+                    if not re.match(r"^\d+(?:-\d+)?$", cand):
+                        artist = cand or None
+                if artist:
+                    bucket = _artist_letter_bucket(artist)
+                    dest_single = config.MUSIC_ROOT / bucket / artist / "0singles" / child.name
+                else:
+                    dest_single = config.MUSIC_ROOT / "0singles" / child.name
+
+                if dest_single.exists():
+                    log.warning("Target single exists, skipping: %s → %s", child, dest_single)
+                    review_items.append({
+                        "path": str(child),
+                        "reason": "move_conflict",
+                        "target": str(dest_single),
+                    })
+                else:
+                    _move_path(child, dest_single, dry_run=dry_run, review_items=review_items)
+            continue
+
         if not child.is_dir():
             continue
+
+        # Check for compilation releases first (routes to 0compilations/)
+        is_comp = False
+        prefix = child.name.split(" - ")[0].strip().lower() if " - " in child.name else ""
+        if prefix in {"various artists", "various", "va", "erinevad esitajad"}:
+            is_comp = True
+        else:
+            subdirs = [s for s in child.iterdir() if s.is_dir()]
+            if subdirs:
+                # Multi-directory release: only route to 0compilations if >= 75% of subdirs are compilations AND not a solo artist folder
+                comp_count = sum(1 for s in subdirs if infer_compilation_folder(s))
+                if comp_count > 0 and comp_count >= len(subdirs) * 0.75:
+                    comp_keywords = ("compilation", "collection", "various", "sampler", "top 10", "top 100", "radio latina", "ever!", "classics")
+                    sample = _first_audio_file(child)
+                    sample_tags = read_tags(sample) if sample else {}
+                    sample_aa = (sample_tags.get("albumartist") or "").strip().lower() if sample_tags else ""
+                    if sample_aa in {"various artists", "various", "va"} or any(kw in child.name.lower() for kw in comp_keywords):
+                        is_comp = True
+            else:
+                if infer_compilation_folder(child):
+                    is_comp = True
+
+        if is_comp:
+            dest = config.MUSIC_ROOT / "0compilations" / child.name
+            if dest.exists():
+                log.warning("Target exists in 0compilations, skipping: %s → %s", child, dest)
+                review_items.append({
+                    "path": str(child),
+                    "reason": "move_conflict",
+                    "target": str(dest),
+                })
+            else:
+                _move_path(child, dest, dry_run=dry_run, review_items=review_items)
+            continue
+
+        # Check for genre-level singles (genre/0singles/)
+        if child.name.lower() == "0singles":
+            for s in sorted(child.iterdir()):
+                if not s.is_file() or s.suffix.lower() not in config.AUDIO_EXTENSIONS:
+                    continue
+                tags = read_tags(s)
+                artist = (tags.get("artist") or "").strip() if tags else None
+                if not artist and " - " in s.name:
+                    cand = s.name.split(" - ")[0].strip()
+                    if not re.match(r"^\d+(?:-\d+)?$", cand):
+                        artist = cand or None
+                if artist:
+                    bucket = _artist_letter_bucket(artist)
+                    dest_single = config.MUSIC_ROOT / bucket / artist / "0singles" / s.name
+                else:
+                    dest_single = config.MUSIC_ROOT / "0singles" / s.name
+
+                if dest_single.exists():
+                    log.warning("Target single exists, skipping: %s → %s", s, dest_single)
+                    review_items.append({
+                        "path": str(s),
+                        "reason": "move_conflict",
+                        "target": str(dest_single),
+                    })
+                else:
+                    _move_path(s, dest_single, dry_run=dry_run, review_items=review_items)
+            _remove_if_empty(child, dry_run=dry_run)
+            continue
+
+        # Check for legacy genre-level compilations (genre/0compilations/ or genre/0various/)
+        if child.name.lower() in {"0compilations", "0various"}:
+            for sub in sorted(child.iterdir()):
+                if not sub.is_dir():
+                    continue
+                dest_comp = config.MUSIC_ROOT / "0compilations" / sub.name
+                if dest_comp.exists():
+                    log.warning("Target exists in 0compilations, skipping: %s → %s", sub, dest_comp)
+                    review_items.append({
+                        "path": str(sub),
+                        "reason": "move_conflict",
+                        "target": str(dest_comp),
+                    })
+                else:
+                    _move_path(sub, dest_comp, dry_run=dry_run, review_items=review_items)
+            _remove_if_empty(child, dry_run=dry_run)
+            continue
+
         kind = classify_folder(child)
+
+        # If unknown, check whether it contains audio files and can be treated as an artist
+        if kind == "unknown":
+            audio_files = [f for f in child.rglob("*") if f.is_file() and f.suffix.lower() in config.AUDIO_EXTENSIONS]
+            if not audio_files:
+                if not dry_run and not any(child.iterdir()):
+                    _remove_if_empty(child, dry_run=False)
+                continue
+            kind = "artist"
 
         if kind == "album":
             # genre/Artist - Album (Year)/ → bucket/Artist/Artist - Album (Year)/
@@ -796,8 +929,9 @@ def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
                 "path": str(child),
                 "reason": "unexpected_disc_at_genre_root",
             })
-        # local_special and unknown at genre root are left in place
+        # local_special left in place
 
+    _remove_if_empty(genre_dir, dry_run=dry_run)
     return review_items
 
 

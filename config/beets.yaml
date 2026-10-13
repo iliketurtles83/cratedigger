@@ -1,0 +1,55 @@
+# cratedigger / beets integration config
+# Configured for Tier 1 Artist-Root + Letter Bucketing contract
+
+directory: /media/jack/buffer/audio
+library: /home/jack/.config/beets/library.db
+
+plugins:
+  - musicbrainz   # MusicBrainz metadata source
+  - chroma        # AcoustID audio fingerprinting
+  - fromfilename  # Fallback when tags are empty
+  - inline        # Custom bucketing and multi-disc formatting logic
+  - info          # Command-line inspection
+
+import:
+  autotag: yes    # Enable MusicBrainz / AcoustID metadata matching
+  copy: no
+  move: no        # Default to safe in-place indexing / metadata enrichment
+  write: yes      # Write canonical tags + MBIDs to audio files
+  incremental: yes
+  quiet: no       # Allow interactive resolution in terminal; scripts pass -q
+  quiet_fallback: asis
+  timid: no       # Only prompt when match confidence is ambiguous
+  duplicate_action: ask
+
+# Path templates enforcing cratedigger Tier 1 contract
+paths:
+  albumtype:soundtrack: soundtrack/$album ($year)/%if{$multidisc,$disc-}$track - $artist - $title
+  comp: 0compilations/$album ($year)/%if{$multidisc,$disc-}$track - $artist - $title
+  albumartist:"Various Artists": 0compilations/$album ($year)/%if{$multidisc,$disc-}$track - $artist - $title
+  albumartist:"VA": 0compilations/$album ($year)/%if{$multidisc,$disc-}$track - $artist - $title
+  singleton: $bucket/$artist/0singles/$artist - $title
+  default: $bucket/$albumartist/$albumartist - $album ($year)/%if{$multidisc,$disc-}$track - $artist - $title
+
+item_fields:
+  multidisc: 1 if disctotal and disctotal > 1 else 0
+  bucket: |
+    import re
+    val = albumartist or artist or 'Unknown'
+    stripped = re.sub(r'^(The|A|An)\s+', '', val, flags=re.IGNORECASE).strip()
+    first = stripped[:1].upper() if stripped else '#'
+    return first if first.isalpha() else '#'
+
+# Chroma / AcoustID settings
+chroma:
+  auto: yes
+
+# MusicBrainz API rate limiting (respecting MB terms)
+musicbrainz:
+  ratelimit: 1.0
+
+# Matching distance thresholds
+match:
+  strong_rec_thresh: 0.15 # Confident matches applied automatically in quiet mode
+  medium_rec_thresh: 0.25
+
