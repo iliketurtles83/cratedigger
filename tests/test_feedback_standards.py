@@ -136,5 +136,90 @@ class FeedbackStandardsTests(unittest.TestCase):
         self.assertEqual(written_calls[0][1]["compilation"], "0")
 
 
+    def test_validate_albumartist_normalises_va_aliases(self):
+        self.assertEqual(validate_albumartist("VA"), "Various Artists")
+        self.assertEqual(validate_albumartist("V.A."), "Various Artists")
+        self.assertEqual(validate_albumartist("v. a."), "Various Artists")
+        self.assertEqual(validate_albumartist("various"), "Various Artists")
+        self.assertEqual(validate_albumartist("Various Artists"), "Various Artists")
+
+    def test_validate_year(self):
+        from lib.parsers import validate_year
+        # Valid 4-digit years
+        self.assertEqual(validate_year("1998"), "1998")
+        self.assertEqual(validate_year("2021"), "2021")
+        self.assertEqual(validate_year("2011-05-12"), "2011")
+        self.assertEqual(validate_year(1975), "1975")
+
+        # 2-digit years expansion
+        self.assertEqual(validate_year("98"), "1998")
+        self.assertEqual(validate_year("99"), "1999")
+        self.assertEqual(validate_year("04"), "2004")
+        self.assertEqual(validate_year("20"), "1920")
+        self.assertEqual(validate_year("15"), "2015")
+
+        # 1-digit, 3-digit, future, or garbage years rejected
+        self.assertIsNone(validate_year("8"))
+        self.assertIsNone(validate_year("198"))
+        self.assertIsNone(validate_year("2097"))
+        self.assertIsNone(validate_year("3010"))
+        self.assertIsNone(validate_year("1800"))
+        self.assertIsNone(validate_year("unknown"))
+        self.assertIsNone(validate_year(""))
+        self.assertIsNone(validate_year(None))
+
+    def test_artist_comparison_key(self):
+        from lib.parsers import artist_comparison_key
+        self.assertEqual(artist_comparison_key("The Prodigy"), "prodigy")
+        self.assertEqual(artist_comparison_key("Prodigy"), "prodigy")
+        self.assertEqual(artist_comparison_key("Simon & Garfunkel"), "simon and garfunkel")
+        self.assertEqual(artist_comparison_key("Simon and Garfunkel"), "simon and garfunkel")
+        self.assertEqual(artist_comparison_key("R.E.M."), "rem")
+        self.assertEqual(artist_comparison_key("REM"), "rem")
+        self.assertEqual(artist_comparison_key("The Arcade Fire"), "arcade fire")
+        self.assertEqual(artist_comparison_key("Arcade Fire"), "arcade fire")
+
+    def test_title_case_clean(self):
+        from lib.parsers import title_case_clean
+        self.assertEqual(title_case_clean("the passenger"), "The Passenger")
+        self.assertEqual(title_case_clean("rage against the machine"), "Rage Against the Machine")
+        self.assertEqual(title_case_clean("ABBA feat. cher"), "ABBA feat. Cher")
+        self.assertEqual(title_case_clean("sympathy for the devil"), "Sympathy for the Devil")
+        self.assertEqual(title_case_clean("AC/DC"), "AC/DC")
+        self.assertEqual(title_case_clean("Simon & Garfunkel"), "Simon & Garfunkel")
+        self.assertEqual(title_case_clean("Tom Petty And The Heartbreakers"), "Tom Petty and the Heartbreakers")
+        self.assertEqual(title_case_clean("Wu-Tang Clan"), "Wu-Tang Clan")
+        self.assertEqual(title_case_clean("Paul McCartney"), "Paul McCartney")
+
+    def test_parse_filename_sanitises_tokens(self):
+        from lib.parsers import parse_filename
+        p1 = Path("01 - _Heroes_.mp3")
+        parsed1 = parse_filename(p1)
+        self.assertEqual(parsed1["title"], "Heroes")
+
+        p2 = Path(r"01 - B-52\'s - Rock Lobster.mp3")
+        parsed2 = parse_filename(p2)
+        self.assertEqual(parsed2["artist"], "B-52's")
+        self.assertEqual(parsed2["title"], "Rock Lobster")
+
+    def test_artists_tag_roundtrip(self):
+        audio = _FakeAudio()
+        with patch("lib.tags.MutagenFile", return_value=audio):
+            written = write_tags(
+                Path("test.mp3"),
+                {
+                    "title": "Clint Eastwood",
+                    "artist": "Gorillaz feat. Del the Funky Homosapien",
+                    "artists": "Gorillaz / Del the Funky Homosapien",
+                },
+                dry_run=False,
+            )
+        self.assertEqual(written["artists"], "Gorillaz / Del the Funky Homosapien")
+
+        with patch("lib.tags.MutagenFile", return_value=audio):
+            tags = read_tags(Path("test.mp3"))
+        self.assertEqual(tags["artists"], "Gorillaz / Del the Funky Homosapien")
+
+
 if __name__ == "__main__":
     unittest.main()

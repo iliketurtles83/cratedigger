@@ -9,11 +9,11 @@ from pathlib import Path
 _PATTERNS = [
     # 1-01 - Artist Name - Song Title.ext  (disc-track with artist)
     re.compile(
-        r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s*-\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
+        r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s*-\s*(?P<artist>.+?)\s+-\s+(?P<title>.+)$"
     ),
     # Artist Name - 1-01 - Song Title.ext  (artist then disc-track)
     re.compile(
-        r"^(?P<artist>.+?)\s*-\s*(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s*-\s*(?P<title>.+)$"
+        r"^(?P<artist>.+?)\s+-\s+(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s*-\s*(?P<title>.+)$"
     ),
     # 1-01-Song Title.ext  (disc-track, no artist, ripper format)
     re.compile(
@@ -23,13 +23,13 @@ _PATTERNS = [
     re.compile(
         r"^(?P<disc>\d{1,2})-(?P<track>\d{2,3})\s+(?P<title>.+)$"
     ),
-    # 01 - Artist Name - Song Title.ext
+    # 01 - Artist Name - Song Title.ext  (spaced dash between artist and title)
     re.compile(
-        r"^(?P<track>\d{1,3})\s*-\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
+        r"^(?P<track>\d{1,3})\s*-\s*(?P<artist>.+?)\s+-\s+(?P<title>.+)$"
     ),
     # Artist Name - 01 - Song Title.ext
     re.compile(
-        r"^(?P<artist>.+?)\s*-\s*(?P<track>\d{1,3})\s*-\s*(?P<title>.+)$"
+        r"^(?P<artist>.+?)\s+-\s+(?P<track>\d{1,3})\s*-\s*(?P<title>.+)$"
     ),
     # 01 - Song Title.ext  (track with dash and spaces, no artist)
     re.compile(
@@ -41,15 +41,19 @@ _PATTERNS = [
     ),
     # 13. Artist Name - Song Title.ext  (dot-prefixed track with artist)
     re.compile(
-        r"^(?P<track>\d{1,3})\.\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
+        r"^(?P<track>\d{1,3})\.\s*(?P<artist>.+?)\s+-\s+(?P<title>.+)$"
     ),
     # 06 Artist Name - Song Title.ext  (space-separated track with artist and title)
     re.compile(
-        r"^(?P<track>\d{1,3})\s+(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
+        r"^(?P<track>\d{1,3})\s+(?P<artist>.+?)\s+-\s+(?P<title>.+)$"
     ),
     # Artist Name - Song Title.ext
     re.compile(
-        r"^(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
+        r"^(?P<artist>.+?)\s+-\s+(?P<title>.+)$"
+    ),
+    # Looser fallbacks (dashes without spaces between artist and title)
+    re.compile(
+        r"^(?P<track>\d{1,3})\s*-\s*(?P<artist>.+?)\s*-\s*(?P<title>.+)$"
     ),
     # 08.Song Title.ext  (dot-separated track, no artist)
     re.compile(
@@ -100,6 +104,9 @@ def validate_albumartist(
     - URLs or domain names (e.g. 'http://...', 'www...', '.com', '.net')
     - Purely digit strings (e.g. '01', '02', '7') that leak track numbers,
       UNLESS the artist name is identical (e.g. genuine numeric bands like '666', '3', '213').
+
+    Normalises:
+    - 'VA', 'V.A.', 'Various', 'Various Artists' variants to 'Various Artists'.
     """
     if not albumartist:
         return None
@@ -108,6 +115,10 @@ def validate_albumartist(
         return None
 
     low = val.lower()
+    _VA_ALIASES = frozenset({"va", "v.a.", "v. a.", "various", "various artists"})
+    if low in _VA_ALIASES:
+        return "Various Artists"
+
     junk_tokens = {
         "artist", "unknown", "unknown artist", "album artist", "no artist",
         "-", "--", "...", "?", "none", "n/a",
@@ -127,6 +138,93 @@ def validate_albumartist(
         return None
 
     return val
+
+
+def validate_year(year: str | int | None) -> str | None:
+    """Validate and canonicalise release year tag.
+
+    - Accepts 4-digit years in range 1880..2026 (or ISO dates like '1998-05-12').
+    - Expands 2-digit years ('98' → '1998', '04' → '2004').
+    - Rejects 1-digit ('8'), 3-digit ('198'), future (>2026), and bogus years, returning None.
+    """
+    if year is None:
+        return None
+    val = str(year).strip()
+    if not val:
+        return None
+
+    # Match 4-digit year (standalone or prefix of ISO date YYYY-MM-DD)
+    m4 = re.match(r"^(\d{4})(?:-\d{1,2})?(?:-\d{1,2})?$", val)
+    if m4:
+        y = int(m4.group(1))
+        if 1880 <= y <= 2026:
+            return str(y)
+        return None
+
+    # Match 2-digit year
+    m2 = re.match(r"^(\d{2})$", val)
+    if m2:
+        y = int(m2.group(1))
+        if y >= 20:   # 1920..1999
+            return str(1900 + y)
+        elif y <= 26: # 2000..2026
+            return str(2000 + y)
+        return None
+
+    return None
+
+
+def artist_comparison_key(name: str | None) -> str:
+    """Fold artist name for grouping and duplicate detection.
+
+    Folds leading articles ('The', 'A', 'An'), normalises '&' to 'and',
+    strips punctuation, collapses whitespace, and lowercases.
+    """
+    if not name:
+        return ""
+    s = re.sub(r"^(the|a|an)\s+", "", name.strip(), flags=re.IGNORECASE)
+    s = s.replace("&", "and")
+    s = re.sub(r"[.\'\"`\-_]", "", s)
+    return " ".join(s.split()).lower()
+
+
+def title_case_clean(text: str | None) -> str | None:
+    """Apply standard title-casing to titles/names without an MB match.
+
+    Preserves short lowercase words ('and', 'of', 'the', etc.) unless
+    at the start or end, respects 'feat.' / 'ft.', and keeps all-caps acronyms.
+    """
+    if not text:
+        return None
+    words = text.strip().split()
+    if not words:
+        return None
+
+    short_words = {
+        "a", "an", "the", "and", "but", "or", "for", "nor", "on", "at",
+        "to", "from", "by", "of", "in", "with",
+    }
+    result = []
+    for i, word in enumerate(words):
+        # Keep acronyms / Roman numerals like REM, TOOL, ABBA, II, AC/DC
+        if word.isupper() and len(word) > 1:
+            result.append(word)
+            continue
+        # Preserve feat. / ft. / vs.
+        if word.lower() in {"feat.", "ft.", "vs.", "aka"}:
+            result.append(word.lower())
+            continue
+        # Lowercase short words unless first or last word
+        if i > 0 and i < len(words) - 1 and word.lower() in short_words:
+            result.append(word.lower())
+        else:
+            if "-" in word:
+                result.append("-".join(p if any(c.isupper() for c in p[1:]) and not p.isupper() else p.capitalize() for p in word.split("-")))
+            elif any(c.isupper() for c in word[1:]) and not word.isupper():
+                result.append(word)
+            else:
+                result.append(word.capitalize())
+    return " ".join(result)
 
 
 def sanitise_name(value: str) -> str:
@@ -230,14 +328,17 @@ def parse_filename(path: Path) -> dict[str, str | None]:
         m = pat.match(stem)
         if m:
             groups = m.groupdict()
+            art = groups.get("artist", "").strip() or None
+            tit = groups.get("title", "").strip() or None
             return {
-                "artist": groups.get("artist", "").strip() or None,
-                "title":  groups.get("title",  "").strip() or None,
+                "artist": sanitise_name(art) if art else None,
+                "title":  sanitise_name(tit) if tit else None,
                 "track":  _clean_track(groups.get("track")),
                 "disc":   _clean_disc(groups.get("disc")),
             }
     # Fallback — treat the whole stem as title
-    return {"artist": None, "title": stem.strip() or None, "track": None, "disc": None}
+    clean_stem = sanitise_name(stem.strip()) if stem.strip() else None
+    return {"artist": None, "title": clean_stem, "track": None, "disc": None}
 
 
 def parse_folder_name(name: str) -> dict[str, str | None]:

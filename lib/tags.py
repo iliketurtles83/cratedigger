@@ -235,7 +235,7 @@ def read_tags(path: Path) -> dict[str, str | None] | None:
     """
     result: dict[str, str | None] = {
         k: None for k in (
-            "title", "artist", "albumartist", "album", "year",
+            "title", "artist", "artists", "albumartist", "album", "year",
             "genre", "bpm", "track", "disc", "isrc",
             "compilation", "mb_trackid", "mb_albumid", "mb_artistid",
             "mb_albumartistid", "mb_releasegroupid", "rating", "playcount",
@@ -285,6 +285,13 @@ def read_tags(path: Path) -> dict[str, str | None] | None:
             if frame is not None:
                 result[field] = _first(frame.text)
 
+        # Multi-value artists in TXXX:ARTISTS
+        txxx_artists = tags.get("TXXX:ARTISTS") or tags.get("TXXX:artists")
+        if txxx_artists is not None and hasattr(txxx_artists, "text"):
+            parts = [str(t).strip() for t in txxx_artists.text if str(t).strip()]
+            if parts:
+                result["artists"] = " / ".join(parts)
+
         # Rating: TXXX:FMPS_Rating or POPM
         fmps_r = tags.get("TXXX:FMPS_Rating") or tags.get("TXXX:FMPS_RATING")
         if fmps_r is not None:
@@ -313,6 +320,11 @@ def read_tags(path: Path) -> dict[str, str | None] | None:
             elif field == "compilation":
                 value = _normalise_compilation(value)
             result[field] = value
+
+        if "artists" in tags:
+            parts = [str(t).strip() for t in tags["artists"] if str(t).strip()]
+            if parts:
+                result["artists"] = " / ".join(parts)
 
         r_val = _first(tags.get("fmps_rating") or tags.get("rating"))
         if r_val is not None:
@@ -350,6 +362,18 @@ def read_tags(path: Path) -> dict[str, str | None] | None:
                 else:
                     result[field] = str(first).strip() or None
 
+        atom_artists = tags.get("----:com.apple.iTunes:ARTISTS")
+        if atom_artists is not None:
+            parts = []
+            for p in atom_artists:
+                if isinstance(p, bytes):
+                    parts.append(p.decode("utf-8", errors="ignore").strip())
+                else:
+                    parts.append(str(p).strip())
+            cleaned = [p for p in parts if p]
+            if cleaned:
+                result["artists"] = " / ".join(cleaned)
+
     elif suffix == ".wma":
         tags = audio.tags or {}
         for field, key in _ASF_MAP.items():
@@ -363,6 +387,12 @@ def read_tags(path: Path) -> dict[str, str | None] | None:
                 elif field == "compilation":
                     value = _normalise_compilation(value)
                 result[field] = str(value) if value is not None else None
+
+        asf_artists = tags.get("WM/ARTISTS")
+        if asf_artists is not None:
+            parts = [str(t).strip() for t in asf_artists if str(t).strip()]
+            if parts:
+                result["artists"] = " / ".join(parts)
 
     return result
 
@@ -410,6 +440,9 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
                     desc = _MB_ID3_TXXX[field]
                     id3.delall(f"TXXX:{desc}")
                     written[field] = ""
+                elif field == "artists":
+                    id3.delall("TXXX:ARTISTS")
+                    written[field] = ""
                 continue
 
             prepared = _prepare_written_value(field, val)
@@ -423,6 +456,11 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
             elif field == "compilation":
                 id3["TCMP"] = TCMP(encoding=3, text=[prepared])
                 written[field] = prepared
+            elif field == "artists":
+                vals = [v.strip() for v in re.split(r"\s*[/;]\s*", str(prepared)) if v.strip()]
+                if vals:
+                    id3["TXXX:ARTISTS"] = TXXX(encoding=3, desc="ARTISTS", text=vals)
+                    written[field] = " / ".join(vals)
             elif field == "mb_trackid":
                 id3["UFID:http://musicbrainz.org"] = UFID(
                     owner="http://musicbrainz.org",
@@ -456,6 +494,10 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
                     if key in audio.tags:
                         del audio.tags[key]
                         written[field] = ""
+                elif field == "artists":
+                    if "artists" in audio.tags:
+                        del audio.tags["artists"]
+                    written[field] = ""
                 continue
 
             prepared = _prepare_written_value(field, val)
@@ -465,6 +507,11 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
             if field in _VORBIS_MAP:
                 audio.tags[_VORBIS_MAP[field]] = [prepared]
                 written[field] = prepared
+            elif field == "artists":
+                vals = [v.strip() for v in re.split(r"\s*[/;]\s*", str(prepared)) if v.strip()]
+                if vals:
+                    audio.tags["artists"] = vals
+                    written[field] = " / ".join(vals)
             elif field == "rating":
                 audio.tags["FMPS_RATING"] = [prepared]
                 audio.tags["RATING"] = [prepared]
@@ -487,6 +534,11 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
                     if "cpil" in audio.tags:
                         del audio.tags["cpil"]
                         written[field] = ""
+                elif field == "artists":
+                    atom = "----:com.apple.iTunes:ARTISTS"
+                    if atom in audio.tags:
+                        del audio.tags[atom]
+                    written[field] = ""
                 continue
 
             prepared = _prepare_written_value(field, val)
@@ -496,6 +548,12 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
             if field == "compilation":
                 audio.tags["cpil"] = True if prepared == "1" else False
                 written[field] = prepared
+            elif field == "artists":
+                vals = [v.strip() for v in re.split(r"\s*[/;]\s*", str(prepared)) if v.strip()]
+                if vals:
+                    atom = "----:com.apple.iTunes:ARTISTS"
+                    audio.tags[atom] = [MP4FreeForm(v.encode("utf-8")) for v in vals]
+                    written[field] = " / ".join(vals)
             elif field in ("track", "disc"):
                 pair = _text_to_m4a_pair(prepared)
                 if pair is None:

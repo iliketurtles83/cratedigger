@@ -21,6 +21,16 @@ import:
   quiet_fallback: asis
   timid: no       # Only prompt when match confidence is ambiguous
   duplicate_action: ask
+  ignored_extensions:
+    - vdjstems
+    - asx
+    - mpg
+    - mpeg
+  ignore:
+    - '.*'
+    - '*~'
+    - '*.vdjstems'
+    - '0videos'
 
 # Path templates enforcing cratedigger Tier 1 contract
 paths:
@@ -38,7 +48,7 @@ item_fields:
     val = albumartist or artist or 'Unknown'
     stripped = re.sub(r'^(The|A|An)\s+', '', val, flags=re.IGNORECASE).strip()
     first = stripped[:1].upper() if stripped else '#'
-    return first if first.isalpha() else '#'
+    return first if ('A' <= first <= 'Z') else '#'
 
 # Chroma / AcoustID settings
 chroma:

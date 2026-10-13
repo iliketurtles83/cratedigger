@@ -86,7 +86,7 @@ class RealAudioSmokeTests(unittest.TestCase):
         self.assertEqual(
             set(tags.keys()),
             {
-                "title", "artist", "albumartist", "album", "year", "genre", "bpm", "track", "disc", "isrc",
+                "title", "artist", "artists", "albumartist", "album", "year", "genre", "bpm", "track", "disc", "isrc",
                 "compilation", "rating", "playcount",
                 "mb_trackid", "mb_albumid", "mb_artistid", "mb_albumartistid", "mb_releasegroupid",
             },

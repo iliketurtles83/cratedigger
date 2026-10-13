@@ -30,6 +30,7 @@ from lib.parsers import (
     parse_filename,
     parse_folder_name,
     validate_albumartist,
+    validate_year,
 )
 from lib.preferences import remap_genre_value, resolve_preference_labels, write_preference_labels
 from lib.tags import read_tags, write_tags
@@ -245,6 +246,20 @@ def tag_file(
         if not valid_aa:
             log.warning("Bogus albumartist %r detected in %s — clearing", existing_aa, path.name)
             effective_existing["albumartist"] = None
+        elif valid_aa != existing_aa:
+            effective_existing["albumartist"] = valid_aa
+            new_tags["albumartist"] = valid_aa
+
+    # Validate existing year: clear or canonicalise if impossible
+    existing_year = effective_existing.get("year")
+    if existing_year:
+        valid_year = validate_year(existing_year)
+        if not valid_year:
+            log.warning("Impossible year %r detected in %s — clearing", existing_year, path.name)
+            effective_existing["year"] = None
+        elif valid_year != existing_year:
+            effective_existing["year"] = valid_year
+            new_tags["year"] = valid_year
 
     if fix_suspicious:
         for field in ("artist", "title", "album", "year", "track"):
@@ -380,7 +395,7 @@ def tag_file(
             new_tags["album"] = folder_info["album"]
     if overwrite or not effective_existing.get("year"):
         if folder_info.get("year"):
-            new_tags["year"] = folder_info["year"]
+            new_tags["year"] = validate_year(folder_info["year"])
 
     # --- Fill missing fields from MB ----------------------------------------
     if overwrite or not effective_existing.get("title"):
@@ -394,7 +409,7 @@ def tag_file(
             new_tags["album"] = mb_meta["album"]
     if overwrite or not effective_existing.get("year"):
         if mb_meta.get("year") and not new_tags.get("year"):
-            new_tags["year"] = mb_meta["year"]
+            new_tags["year"] = validate_year(mb_meta["year"])
     # Track: filename preferred over MB (MB track is release-specific)
     if overwrite or not effective_existing.get("track"):
         if parsed.get("track"):
@@ -536,6 +551,8 @@ def tag_file(
         artist=new_tags.get("artist") or effective_existing.get("artist") or parsed.get("artist"),
         track=new_tags.get("track") or effective_existing.get("track") or parsed.get("track"),
     )
+    if validated_aa == "Various Artists":
+        comp_flag = "1"
 
     if (overwrite or not effective_existing.get("albumartist")) and validated_aa:
         new_tags["albumartist"] = validated_aa
@@ -777,8 +794,9 @@ def _normalise_albumartist_consistency(
         updates: dict[str, str | None] = {}
         if not current_valid or _normalise_whitespace(current_valid).lower() != _normalise_whitespace(target_aa).lower():
             updates["albumartist"] = target_aa
-        if tags.get("compilation") != "0":
-            updates["compilation"] = "0"
+        target_comp = "1" if target_aa == "Various Artists" else "0"
+        if tags.get("compilation") != target_comp:
+            updates["compilation"] = target_comp
 
         if not updates:
             continue
