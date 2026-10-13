@@ -192,7 +192,22 @@ Post-tagging pass to detect and resolve files with identical ISRC tags (physical
 - Merge proposal scoring is deterministic and reviewable.
 - Ambiguous merges are routed to review with enough context to decide quickly.
 
+### Phase 8: Fixes found by using music-player (2026-10-13)
 
+Found while browsing the library in music-player; details and counts are in music-player's `docs/cratedigger-feedback.md`, section 9.
+
+1. **Cover art under other names → `cover.jpg`.** The same rename process as `02_rename.py`, applied to images. music-player (like most players) only finds embedded art, `cover.jpg` or `folder.jpg`; e.g. *More Songs About Buildings and Food* has its cover as `0413. Talking Heads - More Songs About Buildings And Food.jpg` and shows no art. Per album folder:
+   - already has `cover.jpg` or `folder.jpg`, or embedded front-cover art in every track → leave it;
+   - exactly one image (`.jpg`/`.jpeg`/`.png`) → rename it to `cover.jpg` (`cover.png` for a PNG);
+   - several images → pick by name (`front`, `cover`, `folder`, the album's name) and then by size; if it's still ambiguous, flag it for review rather than guess;
+   - never overwrite, and never touch images in disc subfolders or `0random/`-style special folders without the same rules.
+   Renaming an image doesn't change any track's audio hash, so it's free for the player (no new track IDs, no re-downloads).
+2. **Placeholder tags are empty tags.** CD-ripper defaults (`Album Title`: 137 tracks, artist `New Artist`: 83; also `Album`, `Unknown`, `Untitled`, `title`, `Unknown Album`; 542 titles like `Track 01` / `Audio Track …`; artist `Unknown Artist`, `Artist`) should be treated as missing in `01_tag.py`: look the release up, or leave the field empty. Never keep a placeholder, since players group by it.
+3. **The Pitchfork 500 is a list, not a release.** 412 of its 500 tracks have no album artist, so every artist on it gets a "The Pitchfork 500" album in the player. Tag each song with its real release and turn the folder into a playlist (feedback section 1).
+
+**Phase 8 Exit Criteria**
+- A dry run lists every cover rename and every ambiguous folder; a live run leaves no album folder with a lone, differently named image.
+- No track in the library keeps a placeholder album, artist or title.
 
 ---
 
