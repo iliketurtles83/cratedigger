@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import config
 from scripts.reconcile_artists import (
+    _analyse_collision,
     apply_merge_plan,
     build_merge_plans,
     choose_canonical_spelling,
@@ -212,6 +213,123 @@ class ReconcileArtistsTests(unittest.TestCase):
         self.assertEqual(plan.confidence, "confirmed")
         self.assertEqual(len(plan.collisions), 1)
         self.assertFalse(plan.eligible)
+
+    def test_collision_analysis_accepts_matching_title_duration(self) -> None:
+        source = self.root / "R" / "Ramones" / "Ramones - Album"
+        destination = self.root / "R" / "The Ramones" / "The Ramones - Album"
+        source_track = self._track(
+            "R/Ramones/Ramones - Album/01 - Ramones - Song.mp3"
+        )
+        destination_track = self._track(
+            "R/The Ramones/The Ramones - Album/01 - Ramones - Song.mp3"
+        )
+
+        def tags(path: Path) -> dict[str, str]:
+            return {
+                "title": "Song",
+                "mb_trackid": "recording-id" if path == destination_track else "",
+                "mb_albumid": "release-id",
+                "mb_releasegroupid": "release-group-id",
+            }
+
+        with patch(
+            "scripts.reconcile_artists.read_tags",
+            side_effect=tags,
+        ), patch(
+            "scripts.reconcile_artists.audio_hash",
+            side_effect=lambda path: f"hash-{Path(path).parent.parent.name}",
+        ), patch(
+            "scripts.reconcile_artists._audio_duration",
+            return_value=180.0,
+        ):
+            analysis = _analyse_collision(source, destination)
+
+        self.assertTrue(analysis.resolvable)
+        self.assertEqual(analysis.matching_tracks, 1)
+        self.assertEqual(analysis.alternate_audio, 1)
+
+    def test_collision_analysis_blocks_conflicting_release_ids(self) -> None:
+        source = self.root / "R" / "Ramones" / "Ramones - Album"
+        destination = self.root / "R" / "The Ramones" / "The Ramones - Album"
+        source_track = self._track("R/Ramones/Ramones - Album/01.mp3")
+        self._track("R/The Ramones/The Ramones - Album/01.mp3")
+
+        with patch(
+            "scripts.reconcile_artists.read_tags",
+            side_effect=lambda path: {
+                "title": "Song",
+                "mb_albumid": "source-release"
+                if path == source_track
+                else "destination-release",
+            },
+        ), patch(
+            "scripts.reconcile_artists.audio_hash",
+            return_value="hash",
+        ), patch(
+            "scripts.reconcile_artists._audio_duration",
+            return_value=180.0,
+        ):
+            analysis = _analyse_collision(source, destination)
+
+        self.assertFalse(analysis.resolvable)
+        self.assertIn("conflicting MusicBrainz release IDs", analysis.reason)
+
+    def test_resolves_album_collision_and_preserves_alternate_audio(self) -> None:
+        source_track = self._track(
+            "R/Ramones/Ramones - Album/01 - Ramones - Song.mp3"
+        )
+        destination_track = self._track(
+            "R/The Ramones/The Ramones - Album/01 - Ramones - Song.mp3"
+        )
+        source_track.write_bytes(b"source audio")
+        destination_track.write_bytes(b"destination audio")
+
+        def tags(path: Path) -> dict[str, str]:
+            return {
+                "title": "Song",
+                "albumartist": path.parents[1].name,
+                "mb_albumartistid": "mb-ramones",
+                "mb_albumid": "release-id",
+                "mb_releasegroupid": "release-group-id",
+            }
+
+        with patch(
+            "scripts.reconcile_artists.read_tags",
+            side_effect=tags,
+        ), patch(
+            "scripts.reconcile_artists.audio_hash",
+            side_effect=lambda path: f"a1:{Path(path).read_bytes().hex()}",
+        ), patch(
+            "scripts.reconcile_artists._audio_duration",
+            return_value=180.0,
+        ), patch(
+            "scripts.reconcile_artists.write_tags",
+        ), patch(
+            "scripts.reconcile_artists.update_downstream_paths"
+        ) as update_paths:
+            plan = build_merge_plans(
+                self.root,
+                self.database,
+                analyze_collisions=True,
+            )[0]
+            updated, path_map = apply_merge_plan(
+                plan,
+                database=self.database,
+                dry_run=False,
+                resolve_collisions=True,
+            )
+
+        alternates = [
+            path
+            for path in destination_track.parent.iterdir()
+            if "[alternate-" in path.name
+        ]
+        self.assertEqual(len(alternates), 1)
+        self.assertEqual(alternates[0].read_bytes(), b"source audio")
+        self.assertEqual(path_map[source_track], alternates[0])
+        self.assertEqual(updated, 0)
+        self.assertFalse((self.root / "R" / "Ramones").exists())
+        update_paths.assert_called_once()
 
     def test_applies_confirmed_collision_free_merge(self) -> None:
         old_track = self._track("C/CAN/CAN - Other/01.mp3")

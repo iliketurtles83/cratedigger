@@ -262,6 +262,18 @@ python3 scripts/reconcile_artists.py --online-release-evidence --fix
 # Apply exactly the cache-backed, collision-free set (no live API fetches)
 python3 scripts/reconcile_artists.py \
   --online-release-evidence --fix --no-dry-run
+
+# Compare colliding albums without changing files
+python3 scripts/reconcile_artists.py \
+  --online-release-evidence --collision-report
+
+# Preview collision resolution; differing encodes are retained as alternates
+python3 scripts/reconcile_artists.py \
+  --online-release-evidence --collision-report --resolve-collisions --fix
+
+# Apply only the reviewed, cache-backed collision resolutions
+python3 scripts/reconcile_artists.py \
+  --online-release-evidence --resolve-collisions --fix --no-dry-run
 ```
 
 Artist reconciliation is filesystem-first because the beets database may not
@@ -270,9 +282,14 @@ MusicBrainz album-artist ID in every source folder, complete matching
 track-artist ID coverage, or an exact match for every unproven album in the
 known artist's MusicBrainz release-group catalog. Catalog evidence is fetched
 only during dry-runs and cached; live mode never discovers new candidates.
-Partial, missing, or conflicting evidence and any destination collision remain
-report-only. Only `albumartist` is normalized; per-track artist credits are
-preserved.
+Partial, missing, or conflicting artist evidence remains report-only.
+Destination collisions also remain report-only unless `--resolve-collisions`
+is explicitly selected. Collision resolution requires compatible release IDs
+and at least one matching recording ID or title/duration pair. Identical audio
+is consolidated, complementary tracks are combined, and differing encodes are
+retained with deterministic `[alternate-<hash>]` filename suffixes. Conflicting
+release evidence is never merged. Only `albumartist` is normalized; per-track
+artist credits are preserved.
 
 **Legacy intake staging flow:**
 ```bash

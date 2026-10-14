@@ -61,9 +61,22 @@ def update_downstream_paths(
             with features_path.open("rb") as handle:
                 dataframe = pickle.load(handle)
             updates = {str(old): str(new) for old, new in path_map.items()}
+            original_paths = dataframe["path"].copy()
+            existing_paths = set(original_paths)
             mask = dataframe["path"].isin(updates)
             if mask.any():
                 dataframe.loc[mask, "path"] = dataframe.loc[mask, "path"].map(updates)
+                consolidated = original_paths.isin(
+                    old
+                    for old, new in updates.items()
+                    if new in existing_paths
+                )
+                if consolidated.any():
+                    dataframe = dataframe.loc[~consolidated].copy()
+                    logger.info(
+                        "Removed %d superseded track row(s) from features.pkl",
+                        consolidated.sum(),
+                    )
                 with features_path.open("wb") as handle:
                     pickle.dump(dataframe, handle)
                 logger.info("Updated %d track path(s) in features.pkl", mask.sum())
@@ -81,16 +94,26 @@ def update_downstream_paths(
                 new_relative = str(new_path.relative_to(music_root)).encode("utf-8")
                 old_absolute = str(old_path).encode("utf-8")
                 new_absolute = str(new_path).encode("utf-8")
-                cursor = connection.execute(
-                    "UPDATE items SET path = ? WHERE path = ?",
-                    (new_relative, old_relative),
-                )
-                updated_items += cursor.rowcount
-                cursor = connection.execute(
-                    "UPDATE items SET path = ? WHERE path = ?",
-                    (new_absolute, old_absolute),
-                )
-                updated_items += cursor.rowcount
+                for old_value, new_value in (
+                    (old_relative, new_relative),
+                    (old_absolute, new_absolute),
+                ):
+                    destination_exists = connection.execute(
+                        "SELECT 1 FROM items WHERE path = ? LIMIT 1",
+                        (new_value,),
+                    ).fetchone()
+                    statement = (
+                        "DELETE FROM items WHERE path = ?"
+                        if destination_exists
+                        else "UPDATE items SET path = ? WHERE path = ?"
+                    )
+                    parameters = (
+                        (old_value,)
+                        if destination_exists
+                        else (new_value, old_value)
+                    )
+                    cursor = connection.execute(statement, parameters)
+                    updated_items += cursor.rowcount
         if updated_items:
             logger.info("Updated %d item path(s) in beets library.db", updated_items)
     except (OSError, sqlite3.Error, ValueError) as exc:

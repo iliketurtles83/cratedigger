@@ -10,10 +10,13 @@ from tags and the beets database, and classifies each group:
 - no_id: no folder has MusicBrainz identity evidence
 - conflict: multiple MusicBrainz identities occur in the group
 
-Only confirmed, collision-free groups are eligible for automatic repair.
-Dry-run is always the default; both ``--fix`` and ``--no-dry-run`` are required
-to write tags or move folders. Online evidence is fetched only during dry-runs
-and cached so a reviewed live run cannot acquire new candidates.
+Only confirmed, collision-free groups are eligible for automatic repair by
+default. ``--resolve-collisions`` additionally permits album collisions with
+compatible release evidence and matching tracks; differing audio is retained
+as a deterministically named alternate. Dry-run is always the default; both
+``--fix`` and ``--no-dry-run`` are required to write tags or move folders.
+Online evidence is fetched only during dry-runs and cached so a reviewed live
+run cannot acquire new candidates.
 
 Usage:
     python scripts/reconcile_artists.py
@@ -25,6 +28,7 @@ import argparse
 from collections import Counter, defaultdict
 from contextlib import closing
 from dataclasses import dataclass, field
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -34,11 +38,14 @@ import sys
 import re
 import unicodedata
 
+from mutagen import File as MutagenFile
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import config
+from lib.audiohash import audio_hash
 from lib.context import artist_letter_bucket
 from lib.mb import artist_release_groups
 from lib.parsers import artist_comparison_key, sanitise_name, title_case_clean
@@ -71,10 +78,46 @@ class ArtistMergePlan:
     confidence: str
     reason: str
     collisions: list[tuple[Path, Path]] = field(default_factory=list)
+    collision_analyses: list["CollisionAnalysis"] = field(default_factory=list)
 
     @property
     def eligible(self) -> bool:
         return self.confidence == "confirmed" and not self.collisions
+
+    def is_eligible(self, *, resolve_collisions: bool = False) -> bool:
+        if self.eligible:
+            return True
+        return (
+            resolve_collisions
+            and self.confidence == "confirmed"
+            and bool(self.collisions)
+            and len(self.collision_analyses) == len(self.collisions)
+            and all(analysis.resolvable for analysis in self.collision_analyses)
+        )
+
+
+@dataclass
+class AudioEvidence:
+    path: Path
+    title: str
+    recording_id: str
+    album_id: str
+    release_group_id: str
+    audio_hash: str
+    duration: float | None
+
+
+@dataclass
+class CollisionAnalysis:
+    source: Path
+    destination: Path
+    resolvable: bool
+    reason: str
+    source_tracks: int = 0
+    destination_tracks: int = 0
+    matching_tracks: int = 0
+    identical_audio: int = 0
+    alternate_audio: int = 0
 
 
 def get_beets_db_path() -> Path:
@@ -288,11 +331,132 @@ def _find_collisions(
     return collisions
 
 
+def _audio_duration(path: Path) -> float | None:
+    try:
+        audio = MutagenFile(path)
+    except Exception as exc:
+        log.warning("Could not inspect audio metadata for %s: %s", path, exc)
+        return None
+    info = getattr(audio, "info", None)
+    duration = getattr(info, "length", None)
+    return float(duration) if duration is not None else None
+
+
+def _collect_audio_evidence(folder: Path) -> list[AudioEvidence]:
+    evidence: list[AudioEvidence] = []
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in config.AUDIO_EXTENSIONS:
+            continue
+        tags = read_tags(path) or {}
+        try:
+            digest = audio_hash(str(path))
+        except OSError as exc:
+            log.warning("Could not hash %s: %s", path, exc)
+            digest = ""
+        evidence.append(
+            AudioEvidence(
+                path=path,
+                title=_normalise_release_title(tags.get("title") or ""),
+                recording_id=(tags.get("mb_trackid") or "").strip(),
+                album_id=(tags.get("mb_albumid") or "").strip(),
+                release_group_id=(tags.get("mb_releasegroupid") or "").strip(),
+                audio_hash=digest,
+                duration=_audio_duration(path),
+            )
+        )
+    return evidence
+
+
+def _tracks_match(first: AudioEvidence, second: AudioEvidence) -> bool:
+    if first.recording_id and second.recording_id:
+        return first.recording_id == second.recording_id
+    if not first.title or first.title != second.title:
+        return False
+    if first.duration is None or second.duration is None:
+        return False
+    return abs(first.duration - second.duration) <= 2.0
+
+
+def _analyse_collision(source: Path, destination: Path) -> CollisionAnalysis:
+    if not source.is_dir() or not destination.is_dir():
+        return CollisionAnalysis(
+            source,
+            destination,
+            False,
+            "only colliding album directories can be resolved automatically",
+        )
+
+    source_tracks = _collect_audio_evidence(source)
+    destination_tracks = _collect_audio_evidence(destination)
+    if not source_tracks or not destination_tracks:
+        return CollisionAnalysis(
+            source,
+            destination,
+            False,
+            "both colliding directories must contain audio",
+            len(source_tracks),
+            len(destination_tracks),
+        )
+
+    for field_name, label in (
+        ("album_id", "release IDs"),
+        ("release_group_id", "release-group IDs"),
+    ):
+        ids = {
+            getattr(track, field_name)
+            for track in source_tracks + destination_tracks
+            if getattr(track, field_name)
+        }
+        if len(ids) > 1:
+            return CollisionAnalysis(
+                source,
+                destination,
+                False,
+                f"conflicting MusicBrainz {label}",
+                len(source_tracks),
+                len(destination_tracks),
+            )
+
+    matches: list[tuple[AudioEvidence, AudioEvidence]] = []
+    for source_track in source_tracks:
+        for destination_track in destination_tracks:
+            if _tracks_match(source_track, destination_track):
+                matches.append((source_track, destination_track))
+                break
+    if not matches:
+        return CollisionAnalysis(
+            source,
+            destination,
+            False,
+            "no matching recording ID or title/duration pair",
+            len(source_tracks),
+            len(destination_tracks),
+        )
+
+    identical = sum(
+        bool(first.audio_hash) and first.audio_hash == second.audio_hash
+        for first, second in matches
+    )
+    alternates = len(matches) - identical
+    return CollisionAnalysis(
+        source,
+        destination,
+        True,
+        "same release identity with matching tracks; distinct audio is preserved",
+        len(source_tracks),
+        len(destination_tracks),
+        len(matches),
+        identical,
+        alternates,
+    )
+
+
 def build_merge_plans(
     root: Path,
     database: Path,
     *,
     release_catalogs: dict[str, set[str]] | None = None,
+    analyze_collisions: bool = False,
 ) -> list[ArtistMergePlan]:
     """Build evidence-backed merge plans for every duplicate folder group."""
     plans: list[ArtistMergePlan] = []
@@ -317,6 +481,7 @@ def build_merge_plans(
             / artist_letter_bucket(canonical)
             / sanitise_name(canonical)
         )
+        collisions = _find_collisions(folders, target, canonical)
         plans.append(
             ArtistMergePlan(
                 key=key,
@@ -325,7 +490,12 @@ def build_merge_plans(
                 folders=folders,
                 confidence=confidence,
                 reason=reason,
-                collisions=_find_collisions(folders, target, canonical),
+                collisions=collisions,
+                collision_analyses=(
+                    [_analyse_collision(source, destination) for source, destination in collisions]
+                    if analyze_collisions
+                    else []
+                ),
             )
         )
     return plans
@@ -453,25 +623,110 @@ def _update_beets_artist_names(
         log.warning("Could not update beets artist names: %s", exc)
 
 
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _unique_alternate_path(path: Path, digest: str) -> Path:
+    suffix = digest.split(":", 1)[-1][:8]
+    candidate = path.with_name(f"{path.stem} [alternate-{suffix}]{path.suffix}")
+    number = 2
+    while candidate.exists():
+        candidate = path.with_name(
+            f"{path.stem} [alternate-{suffix}-{number}]{path.suffix}"
+        )
+        number += 1
+    return candidate
+
+
+def _matching_audio_path(source: AudioEvidence, destination: Path) -> AudioEvidence | None:
+    for candidate in _collect_audio_evidence(destination):
+        if _tracks_match(source, candidate):
+            return candidate
+    return None
+
+
+def _merge_collision_directory(
+    source: Path,
+    destination: Path,
+    path_map: dict[Path, Path],
+) -> None:
+    for source_path in sorted(path for path in source.rglob("*") if path.is_file()):
+        relative = source_path.relative_to(source)
+        destination_path = destination / relative
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if source_path.suffix.lower() in config.AUDIO_EXTENSIONS:
+            source_evidence = _collect_audio_evidence(source_path.parent)
+            current = next(
+                item for item in source_evidence if item.path == source_path
+            )
+            matching = _matching_audio_path(current, destination)
+            if matching and current.audio_hash and current.audio_hash == matching.audio_hash:
+                path_map[source_path] = matching.path
+                source_path.unlink()
+                continue
+            if matching:
+                destination_path = _unique_alternate_path(
+                    destination_path,
+                    current.audio_hash or _file_digest(source_path),
+                )
+            elif destination_path.exists():
+                destination_path = _unique_alternate_path(
+                    destination_path,
+                    current.audio_hash or _file_digest(source_path),
+                )
+            path_map[source_path] = destination_path
+        elif destination_path.exists():
+            source_digest = _file_digest(source_path)
+            if source_digest == _file_digest(destination_path):
+                source_path.unlink()
+                continue
+            destination_path = _unique_alternate_path(destination_path, source_digest)
+
+        shutil.move(str(source_path), str(destination_path))
+
+    for directory in sorted(
+        (path for path in source.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        directory.rmdir()
+    source.rmdir()
+
+
 def apply_merge_plan(
     plan: ArtistMergePlan,
     *,
     database: Path,
     dry_run: bool,
+    resolve_collisions: bool = False,
 ) -> tuple[int, dict[Path, Path]]:
     """Apply one prevalidated artist-folder merge and return tag/path counts."""
-    if not plan.eligible:
+    if not plan.is_eligible(resolve_collisions=resolve_collisions):
         raise ValueError(f"Plan {plan.key!r} is not eligible for automatic repair")
     if dry_run:
         return 0, {}
 
     plan.target.mkdir(parents=True, exist_ok=True)
     path_map: dict[Path, Path] = {}
+    collision_sources = {
+        analysis.source: analysis
+        for analysis in plan.collision_analyses
+        if analysis.resolvable
+    }
     for folder in plan.folders:
         if folder.path == plan.target:
             continue
         for source in sorted(folder.path.iterdir()):
             destination = plan.target / _destination_name(source, plan.canonical)
+            if source in collision_sources:
+                _merge_collision_directory(source, destination, path_map)
+                continue
             if source.is_dir():
                 record_folder_move(
                     source,
@@ -522,6 +777,8 @@ def reconcile_artists(
     fix: bool = False,
     min_tracks: int = 1,
     online_release_evidence: bool = False,
+    collision_report: bool = False,
+    resolve_collisions: bool = False,
 ) -> list[ArtistMergePlan]:
     """Audit duplicate artist folders and optionally apply confirmed merges."""
     database = get_beets_db_path()
@@ -543,6 +800,7 @@ def reconcile_artists(
         config.MUSIC_ROOT,
         database,
         release_catalogs=release_catalogs,
+        analyze_collisions=collision_report or resolve_collisions,
     )
     counts = Counter(plan.confidence for plan in plans)
     log.info(
@@ -574,9 +832,30 @@ def reconcile_artists(
             plan.reason,
         )
         if plan.collisions:
+            analyses = {
+                (analysis.source, analysis.destination): analysis
+                for analysis in plan.collision_analyses
+            }
             for source, destination in plan.collisions:
-                log.warning("  Collision: %s -> %s", source, destination)
-        if not fix or not plan.eligible:
+                analysis = analyses.get((source, destination))
+                if analysis is None:
+                    log.warning("  Collision: %s -> %s", source, destination)
+                    continue
+                status = "RESOLVABLE" if analysis.resolvable else "BLOCKED"
+                log.warning(
+                    "  Collision [%s]: %s -> %s; %s "
+                    "(%d/%d tracks, %d matches, %d identical, %d alternates)",
+                    status,
+                    source,
+                    destination,
+                    analysis.reason,
+                    analysis.source_tracks,
+                    analysis.destination_tracks,
+                    analysis.matching_tracks,
+                    analysis.identical_audio,
+                    analysis.alternate_audio,
+                )
+        if not fix or not plan.is_eligible(resolve_collisions=resolve_collisions):
             continue
         if dry_run:
             log.info("  [DRY-RUN] Would merge into %s", plan.target)
@@ -585,6 +864,7 @@ def reconcile_artists(
             plan,
             database=database,
             dry_run=False,
+            resolve_collisions=resolve_collisions,
         )
         applied += 1
         log.info(
@@ -622,14 +902,28 @@ def main() -> None:
         action="store_true",
         help="Use cached MB artist catalogs; dry-runs fetch missing catalogs",
     )
+    parser.add_argument(
+        "--collision-report",
+        action="store_true",
+        help="Compare colliding album folders using IDs, titles, durations, and hashes",
+    )
+    parser.add_argument(
+        "--resolve-collisions",
+        action="store_true",
+        help="Merge confirmed, resolvable album collisions while preserving alternates",
+    )
     args = parser.parse_args()
     if args.no_dry_run and not args.fix:
         parser.error("--no-dry-run requires --fix")
+    if args.resolve_collisions and not args.fix:
+        parser.error("--resolve-collisions requires --fix")
     reconcile_artists(
         dry_run=not args.no_dry_run,
         fix=args.fix,
         min_tracks=args.min_tracks,
         online_release_evidence=args.online_release_evidence,
+        collision_report=args.collision_report,
+        resolve_collisions=args.resolve_collisions,
     )
 
 
