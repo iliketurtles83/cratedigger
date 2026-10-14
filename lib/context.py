@@ -68,6 +68,32 @@ def is_disc_subfolder(name: str) -> bool:
     return bool(_DISC_PATTERN.match(name))
 
 
+def is_letter_bucket(name: str) -> bool:
+    """True when *name* is a Tier 1 artist-root bucket (``A``-``Z`` or ``#``)."""
+    symbol = getattr(config, "SYMBOL_BUCKET", "#")
+    buckets = getattr(config, "LETTER_BUCKETS", set("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    return name == symbol or (len(name) == 1 and name.upper() in buckets)
+
+
+def artist_letter_bucket(artist: str) -> str:
+    """Return the Tier 1 letter bucket for an artist name.
+
+    Articles in ARTICLE_STRIP are stripped for bucketing only (the folder name
+    itself is never changed).  Artists starting with a non-alpha character go
+    to SYMBOL_BUCKET.
+    """
+    stripped = artist
+    for article in getattr(config, "ARTICLE_STRIP", ["The", "A", "An"]):
+        if stripped.lower().startswith(article.lower() + " "):
+            stripped = stripped[len(article) + 1:]
+            break
+    first = stripped.strip()[:1].upper() if stripped.strip() else ""
+    if not first or not first.isalpha():
+        return getattr(config, "SYMBOL_BUCKET", "#")
+    buckets = getattr(config, "LETTER_BUCKETS", set("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    return first if first in buckets else getattr(config, "SYMBOL_BUCKET", "#")
+
+
 def classify_folder(folder: Path) -> str:
     """Classify folder shape for move/rename logic.
 
@@ -94,9 +120,7 @@ def classify_folder(folder: Path) -> str:
     has_separator = " - " in name
 
     # Artist-root: single A-Z letter bucket or symbol bucket (#)
-    _letter_buckets = getattr(config, "LETTER_BUCKETS", set())
-    _symbol_bucket  = getattr(config, "SYMBOL_BUCKET", "#")
-    if name == _symbol_bucket or (len(name) == 1 and name.upper() in _letter_buckets):
+    if is_letter_bucket(name):
         return "letter_bucket"
 
     if is_disc_subfolder(name):

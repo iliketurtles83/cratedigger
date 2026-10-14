@@ -7,10 +7,14 @@ Renames album folders to canonical format:
 In two-level setups:
     ``Artist Name/Artist Name - Album Title (Year)/``
 
+An artist root holding loose files (artist_flat) is nested under itself as a
+canonical album folder and re-bucketed by artist, so normalisation never
+leaves an album-shaped folder at artist depth.
+
 Never renames: SPECIAL_FOLDERS, SKIP_FOLDERS, subgenre buckets, disc
 subfolders, or genre root folders themselves.
 
-Does NOT move files. All file movement (singles, intake staging, etc.)
+Does NOT move individual files. File movement (singles, intake staging, etc.)
 is handled exclusively by 04_move.py.
 
 Usage:
@@ -27,7 +31,14 @@ import sqlite3
 from pathlib import Path
 
 import config
-from lib.context import classify_folder, infer_best_of_folder, infer_compilation_folder, is_disc_subfolder
+from lib.context import (
+    artist_letter_bucket,
+    classify_folder,
+    infer_best_of_folder,
+    infer_compilation_folder,
+    is_disc_subfolder,
+    is_letter_bucket,
+)
 from lib.logger import setup_logger
 from lib.parsers import parse_folder_name, sanitise_name, validate_albumartist
 from lib.tags import read_tags
@@ -611,6 +622,62 @@ def _move_loose_to_singles(
             log.info("Moved to 0singles: %s", f.name)
 
 
+def _relocate_folder(folder: Path, destination: Path) -> None:
+    """Rename *folder* to *destination*, creating intermediate directories.
+
+    Handles the nesting case where *destination* lives inside *folder* (an
+    artist root gaining its first album folder) by staging through a sibling
+    temporary directory, since a directory cannot be renamed into itself.
+    """
+    if destination.is_relative_to(folder):
+        staged = folder.parent / f".{folder.name}.cratedigger-tmp"
+        suffix = 0
+        while staged.exists():
+            suffix += 1
+            staged = folder.parent / f".{folder.name}.cratedigger-tmp{suffix}"
+        folder.rename(staged)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            staged.rename(destination)
+        except OSError:
+            staged.rename(folder)
+            raise
+        return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    folder.rename(destination)
+
+
+def _artist_flat_target(
+    folder: Path,
+    proposed_name: str,
+    *,
+    artist: str | None,
+) -> Path:
+    """Resolve the canonical destination for a normalised artist_flat folder.
+
+    An artist_flat folder sitting directly under a letter bucket is an *artist*
+    root, not an album: renaming it in place would leave an album-shaped folder
+    at artist depth, bucketed by the album title instead of the artist (e.g.
+    ``R/Easy Star All-Stars - Radiodread (2006)``).  Such folders are nested
+    under their artist and re-bucketed instead.
+
+    Anywhere else (inside an artist folder, a genre root, or a special folder)
+    the folder already sits at album depth and is renamed in place.
+    """
+    if not is_letter_bucket(folder.parent.name) or folder.parent.parent != config.MUSIC_ROOT:
+        return folder.parent / proposed_name
+
+    if not artist:
+        # Compilations have no album artist to bucket by; keep them at the
+        # current depth rather than inventing an artist folder.
+        return folder.parent / proposed_name
+
+    artist_dir = sanitise_name(artist)
+    bucket = artist_letter_bucket(artist_dir)
+    return config.MUSIC_ROOT / bucket / artist_dir / proposed_name
+
+
 def _handle_artist_flat(
     folder: Path,
     *,
@@ -689,9 +756,12 @@ def _handle_artist_flat(
         proposed_name = _build_compilation_folder_name(album, year)
     else:
         proposed_name = _build_folder_name(artist, album, year)
-    proposed_path = folder.parent / proposed_name
 
-    if proposed_name == folder.name:
+    proposed_path = _artist_flat_target(
+        folder, proposed_name, artist=None if is_comp else artist
+    )
+
+    if proposed_path == folder:
         log.debug("artist_flat already canonical: %s", folder)
         return
 
@@ -706,7 +776,7 @@ def _handle_artist_flat(
         return
 
     if dry_run:
-        log.info("[DRY-RUN] Would rename: %s → %s", folder.name, proposed_name)
+        log.info("[DRY-RUN] Would rename: %s → %s", folder, proposed_path)
         review_items.append({
             "path": str(folder),
             "reason": "artist_flat_rename_proposal",
@@ -715,8 +785,8 @@ def _handle_artist_flat(
     else:
         if file_renamed_map is not None:
             _record_folder_rename(folder, proposed_path, file_renamed_map)
-        folder.rename(proposed_path)
-        log.info("Renamed: %s → %s", folder.name, proposed_name)
+        _relocate_folder(folder, proposed_path)
+        log.info("Renamed: %s → %s", folder, proposed_path)
 
 
 def _normalise_artist_folder(

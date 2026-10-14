@@ -8,6 +8,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Dry-run intake pipeline: `python intake.py --dry-run`
 - Beets import trial: `.venv/bin/python -m beets -c config/beets.yaml import --pretend /path/to/album`
 - Audit & repair tags: `python scripts/audit_repair.py --dry-run --folder NAME [--fix]`
+- Repair folder-parse damage: `python scripts/repair_folder_parse.py --tags --structure --dry-run`
 - Normalize cover art: `python scripts/normalize_covers.py --dry-run [--folder NAME]`
 - Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
@@ -21,7 +22,7 @@ Cratedigger adopts **beets** for release-level identity, AcoustID/MB metadata ma
 1. **intake.py** - New arrivals in `incoming/` are imported via beets (`--beets`, default) using `config/beets.yaml`, writing canonical MBIDs and organizing into the Tier 1 artist-root contract. (Legacy `01→02→04` staging flow preserved via `--legacy-move`).
 2. **scripts/audit_repair.py** - Scans library against backup (`/media/jack/monodong/audio2`) to purge junk folksonomy tags, restore unflattened genres, and protect collaboration credits.
 3. **01_tag.py** - Standalone/pre-tagger. Folder genre is only a fallback when existing genres are absent (prevents feedback loops). Genre remapping is opt-in (`--remap-genres`). Guest/collaboration credits are protected during consistency passes.
-4. **02_rename.py / 03_folders.py** - File/folder normalizers according to cratedigger rules.
+4. **02_rename.py / 03_folders.py** - File/folder normalizers according to cratedigger rules. `02_rename.py` refuses to write placeholder tags (`New Artist`, `Track 01`) into filenames and flags them instead. `03_folders.py` nests and re-buckets artist roots that hold loose files.
 5. **04_move.py** - Legacy staging router and promotion utility.
 6. **05_review.py** - Review triage for flagged items.
 7. **06_analyze.py** - Audio feature extraction (librosa/pyloudnorm/Discogs-EffNet) keyed by `audio_hash` into `features.pkl`.

@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 
 import config
-from lib.context import classify_folder, infer_compilation_folder
+from lib.context import artist_letter_bucket, classify_folder, infer_compilation_folder
 from lib.genres import normalise_genre, parent_genre
 from lib.logger import setup_logger
 from lib.preferences import remap_genre, resolve_artist_folder_threshold
@@ -58,20 +58,10 @@ def resolve_target_folder(genre_tag: str) -> Path | None:
 def _artist_letter_bucket(artist: str) -> str:
     """Return the Tier 1 letter bucket for an artist name.
 
-    Articles in ARTICLE_STRIP are stripped for bucketing only (the folder name
-    itself is never changed).  Artists starting with a non-alpha character go
-    to SYMBOL_BUCKET.
+    Thin wrapper over :func:`lib.context.artist_letter_bucket`, which is the
+    single source of truth for path-derived bucketing.
     """
-    stripped = artist
-    for article in getattr(config, "ARTICLE_STRIP", ["The", "A", "An"]):
-        if stripped.lower().startswith(article.lower() + " "):
-            stripped = stripped[len(article) + 1:]
-            break
-    first = stripped.strip()[:1].upper() if stripped.strip() else ""
-    if not first or not first.isalpha():
-        return getattr(config, "SYMBOL_BUCKET", "#")
-    buckets = getattr(config, "LETTER_BUCKETS", set("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
-    return first if first in buckets else getattr(config, "SYMBOL_BUCKET", "#")
+    return artist_letter_bucket(artist)
 
 
 def _first_audio_file(folder: Path) -> Path | None:
