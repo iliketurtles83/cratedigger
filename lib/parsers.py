@@ -92,6 +92,71 @@ _COMPACT_DISC_TRACK_PREFIX = re.compile(
     r"^(?P<compact>\d{3,4})(?:[\s._-]+)(?P<title>.+)$"
 )
 
+# Ripper placeholder patterns for title, album, and artist
+_PLACEHOLDER_TITLE_RE = re.compile(
+    r"^(?:audio\s+)?track(?:\s*[-_.]?\s*\d+)?$"
+    r"|^unknown(?:\s*(?:track|title|\d+))?$"
+    r"|^untitled(?:\s*(?:track|\d+))?$",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_ALBUM_RE = re.compile(
+    r"^unknown(?:\s*album)?$"
+    r"|^untitled(?:\s*album)?$"
+    r"|^album(?:\s+title)?$"
+    r"|^title$",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_ARTIST_RE = re.compile(
+    r"^(?:new|unknown|no)\s*artist$"
+    r"|^artist$",
+    re.IGNORECASE,
+)
+
+
+def is_suspicious_tag(value: str | None, field: str | None = None) -> bool:
+    """Determine if a tag value is a suspicious placeholder or junk.
+
+    Checks known blacklist values (e.g. 'Album Title', 'New Artist', '-')
+    and pattern-based ripper defaults (e.g. 'Track 01', 'Audio Track 1').
+    """
+    if not value:
+        return False
+    val = value.strip().lower()
+    if not val:
+        return False
+
+    # Exception: Various Artists and aliases are canonical for albumartist
+    if field == "albumartist" and val in {"various artists", "va", "v.a.", "v. a.", "various"}:
+        return False
+
+    try:
+        import config
+        suspicious_set = getattr(config, "SUSPICIOUS_TAG_VALUES", set())
+    except ImportError:
+        suspicious_set = {
+            "unknown artist", "unknown", "track", "untitled",
+            "artist", "album artist", "no artist", "various artists",
+            "album title", "album", "unknown album", "title", "new artist",
+            "-", "--", "...", "?", "none", "n/a",
+        }
+
+    if val in suspicious_set:
+        return True
+
+    if field == "title":
+        return bool(_PLACEHOLDER_TITLE_RE.match(val))
+    elif field == "album":
+        return bool(_PLACEHOLDER_ALBUM_RE.match(val))
+    elif field in ("artist", "albumartist"):
+        return bool(_PLACEHOLDER_ARTIST_RE.match(val))
+
+    return bool(
+        _PLACEHOLDER_TITLE_RE.match(val)
+        or _PLACEHOLDER_ALBUM_RE.match(val)
+        or _PLACEHOLDER_ARTIST_RE.match(val)
+    )
+
+
 def validate_albumartist(
     albumartist: str | None,
     artist: str | None = None,
@@ -100,7 +165,7 @@ def validate_albumartist(
     """Validate albumartist tag and return clean value, or None if bogus.
 
     Rejects:
-    - Empty, whitespace, or blacklisted placeholder values (e.g. 'artist', '-', 'none')
+    - Empty, whitespace, or blacklisted placeholder values (e.g. 'artist', 'new artist', '-', 'none')
     - URLs or domain names (e.g. 'http://...', 'www...', '.com', '.net')
     - Purely digit strings (e.g. '01', '02', '7') that leak track numbers,
       UNLESS the artist name is identical (e.g. genuine numeric bands like '666', '3', '213').
@@ -119,8 +184,12 @@ def validate_albumartist(
     if low in _VA_ALIASES:
         return "Various Artists"
 
+    if is_suspicious_tag(val, field="albumartist"):
+        return None
+
     junk_tokens = {
         "artist", "unknown", "unknown artist", "album artist", "no artist",
+        "new artist", "album title", "album", "unknown album", "title",
         "-", "--", "...", "?", "none", "n/a",
     }
     if low in junk_tokens:
@@ -344,15 +413,57 @@ def parse_filename(path: Path) -> dict[str, str | None]:
     return {"artist": None, "title": clean_stem, "track": None, "disc": None}
 
 
+_FOLDER_YEAR_ALBUM = re.compile(
+    r"^(?P<year>\d{4})\s*-\s*(?P<album>.+)$"
+)
+_FOLDER_ALBUM_YEAR = re.compile(
+    r"^(?P<album>.+?)\s*\((?P<year>\d{4})\)$"
+)
+_FOLDER_ARTIST_ALBUM = re.compile(
+    r"^(?P<artist>.+?)\s+-\s+(?P<album>.+)$"
+)
+
+
 def parse_folder_name(name: str) -> dict[str, str | None]:
-    """Parse ``Artist - Album (Year)`` into ``{artist, album, year}``."""
-    m = _FOLDER_PATTERN.match(name.strip())
+    """Parse folder name into ``{artist, album, year}``.
+
+    Supports:
+    - ``Artist - Album (Year)``
+    - ``Year - Album`` (e.g. ``2010 - Spiral Shadow``)
+    - ``Album (Year)`` (e.g. ``Spiral Shadow (2010)``)
+    - ``Artist - Album`` (e.g. ``Kylesa - Spiral Shadow``)
+    """
+    s = name.strip()
+    m = _FOLDER_PATTERN.match(s)
     if m:
         return {
             "artist": m.group("artist").strip(),
             "album":  m.group("album").strip(),
             "year":   m.group("year"),
         }
+    m = _FOLDER_YEAR_ALBUM.match(s)
+    if m:
+        return {
+            "artist": None,
+            "album":  m.group("album").strip(),
+            "year":   m.group("year"),
+        }
+    m = _FOLDER_ALBUM_YEAR.match(s)
+    if m:
+        return {
+            "artist": None,
+            "album":  m.group("album").strip(),
+            "year":   m.group("year"),
+        }
+    m = _FOLDER_ARTIST_ALBUM.match(s)
+    if m:
+        art = m.group("artist").strip()
+        if not (art.isdigit() and len(art) == 4):
+            return {
+                "artist": art,
+                "album":  m.group("album").strip(),
+                "year":   None,
+            }
     return {"artist": None, "album": None, "year": None}
 
 

@@ -3,11 +3,13 @@ import unittest
 
 from lib.parsers import (
     build_filename,
+    is_suspicious_tag,
     parse_compact_disc_track_candidate,
     parse_filename,
     parse_folder_name,
     sanitise_name,
     split_compact_disc_track,
+    validate_albumartist,
 )
 
 
@@ -101,6 +103,60 @@ class ParserTests(unittest.TestCase):
                 "track": None,
                 "title": None,
             },
+        )
+
+
+    def test_is_suspicious_tag(self) -> None:
+        # Ripper placeholder defaults
+        self.assertTrue(is_suspicious_tag("Album Title", field="album"))
+        self.assertTrue(is_suspicious_tag("album", field="album"))
+        self.assertTrue(is_suspicious_tag("Unknown Album", field="album"))
+        self.assertTrue(is_suspicious_tag("New Artist", field="artist"))
+        self.assertTrue(is_suspicious_tag("Unknown Artist", field="artist"))
+        self.assertTrue(is_suspicious_tag("Track 01", field="title"))
+        self.assertTrue(is_suspicious_tag("Audio Track 05", field="title"))
+        self.assertTrue(is_suspicious_tag("Unknown Track", field="title"))
+        self.assertTrue(is_suspicious_tag("Untitled 1", field="title"))
+
+        # Legitimate titles / artists
+        self.assertFalse(is_suspicious_tag("Fast Car", field="title"))
+        self.assertFalse(is_suspicious_tag("Track and Field", field="title"))
+        self.assertFalse(is_suspicious_tag("Unknown Legend", field="title"))
+        self.assertFalse(is_suspicious_tag("Neil Young", field="artist"))
+
+        # Albumartist Various Artists exception
+        self.assertFalse(is_suspicious_tag("Various Artists", field="albumartist"))
+        self.assertTrue(is_suspicious_tag("Various Artists", field="artist"))
+
+    def test_validate_albumartist_rejects_ripper_placeholders(self) -> None:
+        self.assertIsNone(validate_albumartist("New Artist"))
+        self.assertIsNone(validate_albumartist("Album Title"))
+        self.assertIsNone(validate_albumartist("Unknown Album"))
+        self.assertIsNone(validate_albumartist("01", artist="Kylesa"))
+        self.assertEqual(validate_albumartist("666", artist="666"), "666")
+        self.assertEqual(validate_albumartist("VA"), "Various Artists")
+        self.assertEqual(validate_albumartist("Various Artists"), "Various Artists")
+
+    def test_parse_folder_name_variations(self) -> None:
+        # Standard: Artist - Album (Year)
+        self.assertEqual(
+            parse_folder_name("Leonard Cohen - Songs From a Room (1969)"),
+            {"artist": "Leonard Cohen", "album": "Songs From a Room", "year": "1969"},
+        )
+        # Year - Album (Beets / cratedigger Section 7 layout)
+        self.assertEqual(
+            parse_folder_name("2010 - Spiral Shadow"),
+            {"artist": None, "album": "Spiral Shadow", "year": "2010"},
+        )
+        # Album (Year)
+        self.assertEqual(
+            parse_folder_name("Spiral Shadow (2010)"),
+            {"artist": None, "album": "Spiral Shadow", "year": "2010"},
+        )
+        # Artist - Album (no year)
+        self.assertEqual(
+            parse_folder_name("Kylesa - Spiral Shadow"),
+            {"artist": "Kylesa", "album": "Spiral Shadow", "year": None},
         )
 
 

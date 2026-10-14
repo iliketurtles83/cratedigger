@@ -27,6 +27,13 @@ TOP_LEVEL_SPECIAL = {
     "#",
 }
 
+# Curated ranking lists (converted to playlists, never tagged as Various Artists)
+CURATED_LIST_FOLDERS = {
+    "The Pitchfork 500",
+    "The Rolling Stone Magazines 500 Greatest Songs Of All Time",
+    "Classic Rock Music - Compilation Mix - Playlist",
+}
+
 LETTER_BUCKETS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 # SKIP_FOLDERS includes letter buckets, the symbol bucket, and top-level special folders.
@@ -62,6 +69,7 @@ SUBGENRE_BUCKETS = {
 SUSPICIOUS_TAG_VALUES = {
     "unknown artist", "unknown", "track", "untitled",
     "artist", "album artist", "no artist", "various artists",
+    "album title", "album", "unknown album", "title", "new artist",
     "-", "--", "...", "?", "none", "n/a",
 }
 
