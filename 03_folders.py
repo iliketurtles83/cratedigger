@@ -20,14 +20,16 @@ Usage:
 import argparse
 import json
 import logging
+import pickle
 import re
 import shutil
+import sqlite3
 from pathlib import Path
 
 import config
 from lib.context import classify_folder, infer_best_of_folder, infer_compilation_folder, is_disc_subfolder
 from lib.logger import setup_logger
-from lib.parsers import parse_folder_name, sanitise_name
+from lib.parsers import parse_folder_name, sanitise_name, validate_albumartist
 from lib.tags import read_tags
 
 log: logging.Logger = logging.getLogger("03_folders")
@@ -79,11 +81,11 @@ def _fix_the(name: str) -> str:
 
 
 def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
-    """Collect consistent artist/album/year values from tags in *folder*.
+    """Collect consistent artist/albumartist/album/year values from tags in *folder*.
 
     Returns:
       {
-        "values": {"artist": str|None, "album": str|None, "year": str|None},
+        "values": {"artist": str|None, "albumartist": str|None, "album": str|None, "year": str|None},
         "mixed_fields": [field, ...],
         "tag_dicts": [tag_dict, ...],
       }
@@ -91,6 +93,7 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
     # Maps lowercase key → first-seen original value, for case-insensitive dedup.
     field_values: dict[str, dict[str, str]] = {
         "artist": {},
+        "albumartist": {},
         "album": {},
         "year": {},
     }
@@ -105,12 +108,15 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
         tag_dicts.append(tags)
 
         artist = (tags.get("artist") or "").strip()
+        albumartist = validate_albumartist(tags.get("albumartist"), artist=artist)
         album = (tags.get("album") or "").strip()
         year_raw = (tags.get("year") or "").strip()
         year = _normalise_year_for_comparison(year_raw)
 
         if artist and artist.lower() not in field_values["artist"]:
             field_values["artist"][artist.lower()] = artist
+        if albumartist and albumartist.lower() not in field_values["albumartist"]:
+            field_values["albumartist"][albumartist.lower()] = albumartist
         if album and album.lower() not in field_values["album"]:
             field_values["album"][album.lower()] = album
         if year and year not in field_values["year"]:
@@ -130,6 +136,148 @@ def _collect_consistent_tag_fields(folder: Path) -> dict[str, object]:
         "mixed_fields": mixed_fields,
         "tag_dicts": tag_dicts,
     }
+
+
+def _resolve_album_artist(
+    parent_artist: str | None,
+    tag_values: dict[str, str | None],
+    parsed_artist: str | None,
+) -> str | None:
+    """Determine canonical artist name for an album folder.
+
+    Priority:
+    1. parent_artist (anchors artist when album is inside an artist directory)
+    2. albumartist tag (if valid and not Various Artists)
+    3. Base artist stripped of guest features ('feat.', 'ft.', 'featuring', 'vs.', 'with')
+    4. parsed_artist fallback
+    """
+    if parent_artist:
+        return _fix_the(parent_artist.strip())
+
+    clean_aa = tag_values.get("albumartist")
+    if clean_aa and clean_aa.lower() not in {"various artists", "va", "v.a."}:
+        return _fix_the(clean_aa.strip())
+
+    tag_artist = tag_values.get("artist")
+    base_tag_artist = None
+    if tag_artist:
+        base_tag_artist = re.split(
+            r"\s+(?:feat\.?|ft\.?|featuring|vs\.?|with)\s+",
+            tag_artist,
+            flags=re.IGNORECASE
+        )[0].strip()
+
+    if parsed_artist:
+        parsed_clean = parsed_artist.strip()
+        if base_tag_artist and parsed_clean.lower() == base_tag_artist.lower():
+            return _fix_the(base_tag_artist)
+        if not tag_artist:
+            return _fix_the(parsed_clean)
+
+    if base_tag_artist:
+        return _fix_the(base_tag_artist)
+
+    if parsed_artist:
+        return _fix_the(parsed_artist.strip())
+
+    return None
+
+
+def _record_folder_rename(
+    old_folder: Path,
+    new_path: Path,
+    file_renamed_map: dict[Path, Path],
+) -> None:
+    """Record file path transformations before renaming a folder on disk."""
+    if not old_folder.exists():
+        return
+    current_to_orig = {v: k for k, v in file_renamed_map.items()}
+
+    for f in old_folder.rglob("*"):
+        if f.is_file() and f.suffix.lower() in config.AUDIO_EXTENSIONS:
+            try:
+                rel = f.relative_to(old_folder)
+                new_f = new_path / rel
+                orig = current_to_orig.get(f, f)
+                file_renamed_map[orig] = new_f
+            except ValueError:
+                pass
+
+
+def _update_downstream(file_renamed_map: dict[Path, Path]) -> None:
+    """Keep playlists, features.pkl, and beets DB in sync when folders are renamed."""
+    if not file_renamed_map:
+        return
+
+    # 1. Update Playlists
+    playlists_dir = config.MUSIC_ROOT / "Playlists"
+    if playlists_dir.exists():
+        updated_playlists = 0
+        for pl in playlists_dir.glob("*.m3u8"):
+            try:
+                content = pl.read_text(encoding="utf-8")
+                modified = False
+                for old_f, new_f in file_renamed_map.items():
+                    try:
+                        old_rel = str(old_f.relative_to(config.MUSIC_ROOT))
+                        new_rel = str(new_f.relative_to(config.MUSIC_ROOT))
+                        if f"../{old_rel}" in content:
+                            content = content.replace(f"../{old_rel}", f"../{new_rel}")
+                            modified = True
+                        elif old_rel in content:
+                            content = content.replace(old_rel, new_rel)
+                            modified = True
+                    except ValueError:
+                        pass
+                if modified:
+                    pl.write_text(content, encoding="utf-8")
+                    updated_playlists += 1
+            except Exception as exc:
+                log.warning("Could not update playlist %s: %s", pl.name, exc)
+        if updated_playlists:
+            log.info("Updated %d playlist(s) with renamed folder paths", updated_playlists)
+
+    # 2. Update features.pkl
+    features_path = Path("features.pkl")
+    if features_path.exists():
+        try:
+            with open(features_path, "rb") as f:
+                df = pickle.load(f)
+            path_updates = {str(old): str(new) for old, new in file_renamed_map.items()}
+            mask = df["path"].isin(path_updates)
+            if mask.any():
+                df.loc[mask, "path"] = df.loc[mask, "path"].map(path_updates)
+                with open(features_path, "wb") as f:
+                    pickle.dump(df, f)
+                log.info("Updated %d track path(s) in features.pkl", mask.sum())
+        except Exception as exc:
+            log.warning("Could not update features.pkl: %s", exc)
+
+    # 3. Update beets DB
+    db_path = Path.home() / ".config" / "beets" / "library.db"
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+            updated_beets = 0
+            for old_f, new_f in file_renamed_map.items():
+                try:
+                    old_rel = str(old_f.relative_to(config.MUSIC_ROOT)).encode("utf-8")
+                    new_rel = str(new_f.relative_to(config.MUSIC_ROOT)).encode("utf-8")
+                    old_abs = str(old_f).encode("utf-8")
+                    new_abs = str(new_f).encode("utf-8")
+                    c.execute("UPDATE items SET path = ? WHERE path = ?", (new_rel, old_rel))
+                    updated_beets += c.rowcount
+                    c.execute("UPDATE items SET path = ? WHERE path = ?", (new_abs, old_abs))
+                    updated_beets += c.rowcount
+                except Exception:
+                    pass
+            conn.commit()
+            conn.close()
+            if updated_beets:
+                log.info("Updated %d item path(s) in beets library.db", updated_beets)
+        except Exception as exc:
+            log.warning("Could not update beets DB: %s", exc)
 
 
 def _parse_album_name(name: str) -> dict[str, str | None] | None:
@@ -179,6 +327,8 @@ def _normalise_folder(
     *,
     dry_run: bool = True,
     review_items: list[dict],
+    parent_artist: str | None = None,
+    file_renamed_map: dict[Path, Path] | None = None,
 ) -> None:
     """Normalise a single album folder name."""
     name = folder.name
@@ -242,7 +392,7 @@ def _normalise_folder(
             if not value
         ]
     else:
-        artist = _fix_the((tag_values["artist"] or parsed["artist"] or "").strip())
+        artist = _resolve_album_artist(parent_artist, tag_values, parsed["artist"])
         missing_fields = [
             field
             for field, value in (("artist", artist), ("album", album), ("year", year))
@@ -282,6 +432,8 @@ def _normalise_folder(
     if dry_run:
         log.info("[DRY-RUN] Would rename: %s → %s", name, new_name)
     else:
+        if file_renamed_map is not None:
+            _record_folder_rename(folder, new_path, file_renamed_map)
         folder.rename(new_path)
         log.info("Renamed: %s → %s", name, new_name)
 
@@ -292,6 +444,7 @@ def _normalise_album_child(
     artist: str,
     dry_run: bool = True,
     review_items: list[dict],
+    file_renamed_map: dict[Path, Path] | None = None,
 ) -> None:
     """Normalise an album-only subfolder inside an artist folder.
 
@@ -378,7 +531,7 @@ def _normalise_album_child(
             if not value
         ]
     else:
-        effective_artist = _fix_the((tag_values["artist"] or artist or "").strip())
+        effective_artist = _resolve_album_artist(artist, tag_values, artist)
         missing_fields = [
             field
             for field, value in (
@@ -422,6 +575,8 @@ def _normalise_album_child(
     if dry_run:
         log.info("[DRY-RUN] Would rename: %s → %s", folder.name, new_name)
     else:
+        if file_renamed_map is not None:
+            _record_folder_rename(folder, new_path, file_renamed_map)
         folder.rename(new_path)
         log.info("Renamed: %s → %s", folder.name, new_name)
 
@@ -461,6 +616,7 @@ def _handle_artist_flat(
     *,
     dry_run: bool = True,
     review_items: list[dict],
+    file_renamed_map: dict[Path, Path] | None = None,
 ) -> None:
     """Propose canonical rename for artist_flat folders from tags only."""
     tag_summary = _collect_consistent_tag_fields(folder)
@@ -481,10 +637,14 @@ def _handle_artist_flat(
     _excluded = set()
     if is_comp:
         _excluded.add("artist")
+        _excluded.add("albumartist")
         _excluded.add("year")
     if is_best_of:
         _excluded.add("year")
         _excluded.add("album")
+    if tag_summary.get("values", {}).get("albumartist"):
+        # Single consistent albumartist tag anchors release; track artist variation (features) is normal
+        _excluded.add("artist")
     effective_mixed = [f for f in mixed_fields if f not in _excluded]
 
     if effective_mixed:
@@ -508,7 +668,7 @@ def _handle_artist_flat(
             if not value
         ]
     else:
-        artist = _fix_the((tag_values["artist"] or "").strip())
+        artist = _resolve_album_artist(None, tag_values, None)
         missing_fields = [
             field
             for field, value in (("artist", artist), ("album", album), ("year", year))
@@ -553,6 +713,8 @@ def _handle_artist_flat(
             "target": str(proposed_path),
         })
     else:
+        if file_renamed_map is not None:
+            _record_folder_rename(folder, proposed_path, file_renamed_map)
         folder.rename(proposed_path)
         log.info("Renamed: %s → %s", folder.name, proposed_name)
 
@@ -562,6 +724,7 @@ def _normalise_artist_folder(
     *,
     dry_run: bool = True,
     review_items: list[dict],
+    file_renamed_map: dict[Path, Path] | None = None,
 ) -> None:
     """Fix artist folder name (The-suffix) and process album children."""
     name = folder.name
@@ -582,6 +745,8 @@ def _normalise_artist_folder(
             log.info("[DRY-RUN] Would rename artist folder: %s → %s",
                      name, fixed)
         else:
+            if file_renamed_map is not None:
+                _record_folder_rename(folder, new_path, file_renamed_map)
             folder.rename(new_path)
             current = new_path
             log.info("Renamed artist folder: %s → %s", name, fixed)
@@ -596,15 +761,18 @@ def _normalise_artist_folder(
             continue
 
         if " - " in child.name:
-            # Standard album folder — normalise normally
+            # Standard album folder — normalise normally with parent_artist
             _normalise_folder(child, dry_run=dry_run,
-                              review_items=review_items)
+                              review_items=review_items,
+                              parent_artist=fixed,
+                              file_renamed_map=file_renamed_map)
         else:
             # Album-only name — prepend artist from parent folder
             effective_artist = fixed
             _normalise_album_child(child, artist=effective_artist,
                                    dry_run=dry_run,
-                                   review_items=review_items)
+                                   review_items=review_items,
+                                   file_renamed_map=file_renamed_map)
 
 
 def _process_level2(
@@ -612,6 +780,7 @@ def _process_level2(
     *,
     dry_run: bool = True,
     review_items: list[dict],
+    file_renamed_map: dict[Path, Path] | None = None,
 ) -> None:
     """Process children of a genre folder (or subgenre bucket)."""
     for child in sorted(genre_dir.iterdir()):
@@ -626,7 +795,8 @@ def _process_level2(
         if kind == "subgenre":
             # Process albums inside the bucket — don't rename bucket itself
             _process_level2(child, dry_run=dry_run,
-                            review_items=review_items)
+                            review_items=review_items,
+                            file_renamed_map=file_renamed_map)
             continue
 
         if kind == "local_special":
@@ -634,21 +804,25 @@ def _process_level2(
 
         if kind == "album":
             _normalise_folder(child, dry_run=dry_run,
-                              review_items=review_items)
+                              review_items=review_items,
+                              file_renamed_map=file_renamed_map)
 
         elif kind == "artist":
             _normalise_artist_folder(child, dry_run=dry_run,
-                                     review_items=review_items)
+                                     review_items=review_items,
+                                     file_renamed_map=file_renamed_map)
 
         elif kind == "artist_mixed":
             # Note: loose files in artist folders are NOT moved here.
             # File movement (singles, etc.) is handled by 04_move.py.
             _normalise_artist_folder(child, dry_run=dry_run,
-                                     review_items=review_items)
+                                     review_items=review_items,
+                                     file_renamed_map=file_renamed_map)
 
         elif kind == "artist_flat":
             _handle_artist_flat(child, dry_run=dry_run,
-                                review_items=review_items)
+                                review_items=review_items,
+                                file_renamed_map=file_renamed_map)
 
         else:  # unknown
             log.warning("Unknown folder pattern: %s — flagging for review",
@@ -659,10 +833,10 @@ def _process_level2(
             })
 
 
-def walk_folder(folder: Path, **kwargs) -> list[dict]:
+def walk_folder(folder: Path, file_renamed_map: dict[Path, Path] | None = None, **kwargs) -> list[dict]:
     """Process all subfolders under a genre *folder*."""
     review_items: list[dict] = []
-    _process_level2(folder, review_items=review_items, **kwargs)
+    _process_level2(folder, review_items=review_items, file_renamed_map=file_renamed_map, **kwargs)
     return review_items
 
 
@@ -712,10 +886,14 @@ def main() -> None:
         )
 
     all_review: list[dict] = []
+    file_renamed_map: dict[Path, Path] = {}
     for folder in folders:
         log.info("=== Folder: %s ===", folder.name)
-        items = walk_folder(folder, dry_run=dry_run)
+        items = walk_folder(folder, dry_run=dry_run, file_renamed_map=file_renamed_map)
         all_review.extend(items)
+
+    if not dry_run and file_renamed_map:
+        _update_downstream(file_renamed_map)
 
     if all_review:
         review_path = Path("review.json")

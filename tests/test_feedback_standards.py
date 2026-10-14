@@ -137,6 +137,57 @@ class FeedbackStandardsTests(unittest.TestCase):
         self.assertEqual(written_calls[0][1]["albumartist"], "Gorillaz")
         self.assertEqual(written_calls[0][1]["compilation"], "0")
 
+    def test_check_album_consistency_protects_featured_artists(self):
+        _consistency_pass_folder = tag_module._consistency_pass_folder
+        # Case 1: All tracks have albumartist = "Timbaland", but diverse track artists with features
+        folder1 = Path("/music/T/Timbaland/Timbaland - Shock Value (2007)")
+        p1 = folder1 / "01.mp3"
+        p2 = folder1 / "02.mp3"
+        p3 = folder1 / "03.mp3"
+        tag_cache1 = {
+            p1: {"artist": "Timbaland feat. OneRepublic", "albumartist": "Timbaland", "album": "Shock Value", "year": "2007"},
+            p2: {"artist": "Timbaland feat. Keri Hilson", "albumartist": "Timbaland", "album": "Shock Value", "year": "2007"},
+            p3: {"artist": "Timbaland feat. D.O.E.", "albumartist": "Timbaland", "album": "Shock Value", "year": "2007"},
+        }
+        review_items1 = []
+        written1 = []
+        with patch.object(tag_module, "classify_folder", return_value="album"), \
+             patch.object(tag_module, "get_folder_context") as mock_ctx, \
+             patch.object(tag_module, "infer_compilation_folder", return_value=False), \
+             patch.object(tag_module, "infer_best_of_folder", return_value=False), \
+             patch.object(Path, "iterdir", return_value=[p1, p2, p3]), \
+             patch.object(Path, "is_file", return_value=True), \
+             patch.object(tag_module, "write_tags", side_effect=lambda p, u, dry_run=False: written1.append((p, u))):
+            mock_ctx.return_value.is_compilation = False
+            _consistency_pass_folder(folder1, dry_run=False, review_items=review_items1, tag_cache=tag_cache1)
+        self.assertEqual(len(review_items1), 0)
+        artist_writes1 = [u for p, u in written1 if "artist" in u]
+        self.assertEqual(len(artist_writes1), 0)
+
+        # Case 2: Outlier track with guest artist when majority artist is Tool and albumartist is Tool
+        folder2 = Path("/music/T/Tool/Tool - Trax (2001)")
+        t1 = folder2 / "01.mp3"
+        t2 = folder2 / "02.mp3"
+        t3 = folder2 / "03.mp3"
+        tag_cache2 = {
+            t1: {"artist": "Tool", "albumartist": "Tool", "album": "Trax", "year": "2001"},
+            t2: {"artist": "Tool", "albumartist": "Tool", "album": "Trax", "year": "2001"},
+            t3: {"artist": "Tori Amos feat. Maynard James Keenan", "albumartist": "Tool", "album": "Trax", "year": "2001"},
+        }
+        review_items2 = []
+        written2 = []
+        with patch.object(tag_module, "classify_folder", return_value="album"), \
+             patch.object(tag_module, "get_folder_context") as mock_ctx, \
+             patch.object(tag_module, "infer_compilation_folder", return_value=False), \
+             patch.object(tag_module, "infer_best_of_folder", return_value=False), \
+             patch.object(Path, "iterdir", return_value=[t1, t2, t3]), \
+             patch.object(Path, "is_file", return_value=True), \
+             patch.object(tag_module, "write_tags", side_effect=lambda p, u, dry_run=False: written2.append((p, u))):
+            mock_ctx.return_value.is_compilation = False
+            _consistency_pass_folder(folder2, dry_run=False, review_items=review_items2, tag_cache=tag_cache2)
+        artist_writes2 = [u for p, u in written2 if "artist" in u]
+        self.assertEqual(len(artist_writes2), 0)
+
 
     def test_validate_albumartist_normalises_va_aliases(self):
         self.assertEqual(validate_albumartist("VA"), "Various Artists")

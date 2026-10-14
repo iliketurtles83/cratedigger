@@ -26,9 +26,11 @@ from lib.genres import has_meaningful_genres, merge_genres, normalise_genre, par
 from lib.logger import setup_logger
 from lib.mb import fingerprint_lookup, mb_genres, mb_recording_metadata, mb_recording_search
 from lib.parsers import (
+    is_suspicious_tag,
     parse_compact_disc_track_candidate,
     parse_filename,
     parse_folder_name,
+    sanitise_name,
     validate_albumartist,
     validate_year,
 )
@@ -80,8 +82,8 @@ def detect_bpm(path: Path) -> int | None:
 # Process a single file
 # ---------------------------------------------------------------------------
 
-def is_suspicious(value: str | None) -> bool:
-    return (value or "").strip().lower() in config.SUSPICIOUS_TAG_VALUES
+def is_suspicious(value: str | None, field: str | None = None) -> bool:
+    return is_suspicious_tag(value, field=field)
 
 
 _TRAILING_PAREN = re.compile(r'\(([^)]+)\)\s*$')
@@ -263,7 +265,7 @@ def tag_file(
 
     if fix_suspicious:
         for field in ("artist", "title", "album", "year", "track"):
-            if is_suspicious(existing.get(field)):
+            if is_suspicious(existing.get(field), field=field):
                 effective_existing[field] = None
         # Track mismatch with filename is also suspicious
         parsed_track = parsed.get("track")
@@ -290,8 +292,9 @@ def tag_file(
         overwrite or
         not existing.get("artist") or
         not existing.get("title") or
-        is_suspicious(existing.get("artist")) or
-        is_suspicious(existing.get("title"))
+        is_suspicious(existing.get("artist"), field="artist") or
+        is_suspicious(existing.get("title"), field="title") or
+        is_suspicious(existing.get("album"), field="album")
     )
 
     needs_mb_for_year = (
@@ -389,10 +392,25 @@ def tag_file(
 
     # --- Pre-fill album / year from folder name (local evidence, before external lookup) ---
     # Local folder context takes priority over MB; MB fills only what folder cannot provide.
-    folder_info = parse_folder_name(_metadata_source_folder(path).name)
+    folder_src = _metadata_source_folder(path)
+    folder_info = parse_folder_name(folder_src.name)
     if overwrite or not effective_existing.get("album"):
         if folder_info.get("album"):
             new_tags["album"] = folder_info["album"]
+        else:
+            clean_folder_name = sanitise_name(folder_src.name)
+            art = (effective_existing.get("artist") or new_tags.get("artist") or "").strip().lower()
+            if (
+                clean_folder_name
+                and not is_suspicious(clean_folder_name, field="album")
+                and not clean_folder_name.startswith("0")
+                and clean_folder_name not in {"#", "soundtrack"}
+                and len(clean_folder_name) > 1
+                and clean_folder_name.lower() != art
+            ):
+                ctx = get_folder_context(folder_src)
+                if not (ctx.is_special_folder or ctx.is_genre_folder):
+                    new_tags["album"] = clean_folder_name
     if overwrite or not effective_existing.get("year"):
         if folder_info.get("year"):
             new_tags["year"] = validate_year(folder_info["year"])
@@ -722,6 +740,13 @@ def _backfill_compilation_albumartist(
 ) -> None:
     """Fill missing albumartist and compilation tags for compilation folders."""
     ctx = get_folder_context(folder)
+    # Curated lists (The Pitchfork 500, Rolling Stone 500, etc.) are converted to playlists,
+    # and must never be tagged with albumartist = Various Artists.
+    curated_lists = getattr(config, "CURATED_LIST_FOLDERS", set())
+    if folder.name in curated_lists or folder.name.lower() in {c.lower() for c in curated_lists}:
+        log.info("Skipping Various Artists backfill for curated list folder: %s", folder.name)
+        return
+
     track_artists = {
         (tags.get("artist") or "").strip().lower()
         for _, tags in file_tags
@@ -941,6 +966,16 @@ def _consistency_pass_folder(
 
             majority = _pick_majority(non_empty)
             if majority is None:
+                if field == "artist":
+                    albumartists = {
+                        _normalise_whitespace(t.get("albumartist") or "").lower()
+                        for _, t in file_tags
+                        if t.get("albumartist")
+                    }
+                    if len(albumartists) == 1 and "" not in albumartists:
+                        log.debug("  Differing track artists under uniform albumartist %r — skipping artist consistency: %s",
+                                  next(iter(albumartists)), folder.name)
+                        continue
                 log.warning("  No clear majority for %s in %s (%s) — flagging",
                             field, folder.name,
                             ", ".join(sorted(normalised)))
@@ -971,12 +1006,22 @@ def _consistency_pass_folder(
                 if field == "artist":
                     curr_norm = _normalise_whitespace(current).lower()
                     maj_norm = _normalise_whitespace(majority).lower()
+                    albumartist_norm = _normalise_whitespace(tags.get("albumartist") or "").lower()
+                    if albumartist_norm == maj_norm:
+                        log.debug("  Preserving track artist for %s: %r (albumartist matches %r)",
+                                  path.name, current, majority)
+                        continue
                     if maj_norm in curr_norm:
                         collab_indicators = ("feat", "ft.", "featuring", "with", "&", "and", "vs", "pres.")
                         if any(ind in curr_norm for ind in collab_indicators):
                             log.debug("  Preserving collaboration credit for %s: %r (majority: %r)",
                                       path.name, current, majority)
                             continue
+                    collab_explicit = ("feat.", "feat ", "ft.", "ft ", "featuring ", " with ", " vs. ", " vs ")
+                    if any(c in f" {curr_norm} " for c in collab_explicit):
+                        log.debug("  Preserving collaboration credit for %s: %r (majority: %r)",
+                                  path.name, current, majority)
+                        continue
             
             if dry_run:
                 log.info("  [DRY-RUN] Would fix %s: %r → %r in %s",
