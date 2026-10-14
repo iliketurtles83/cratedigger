@@ -245,6 +245,24 @@ python3 04_move.py --relocate-compilations
 python3 04_move.py --relocate-compilations --no-dry-run
 ```
 
+**Audit duplicate artist folders:**
+```bash
+# Report confirmed, partial, ID-less, and conflicting identity groups
+python3 scripts/reconcile_artists.py
+
+# Preview only MusicBrainz-confirmed, collision-free merges
+python3 scripts/reconcile_artists.py --fix
+
+# Apply the confirmed subset
+python3 scripts/reconcile_artists.py --fix --no-dry-run
+```
+
+Artist reconciliation is filesystem-first because the beets database may not
+index the entire library. Automatic merges require the same single
+MusicBrainz album-artist ID in every source folder. Partial, missing, or
+conflicting identity evidence and any destination collision remain report-only.
+Only `albumartist` is normalized; per-track artist credits are preserved.
+
 **Legacy intake staging flow:**
 ```bash
 python3 intake.py --legacy-move --no-dry-run
