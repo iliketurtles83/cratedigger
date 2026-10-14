@@ -66,8 +66,10 @@ _PATTERNS = [
 ]
 
 # Folder pattern: Artist Name - Album Title (Year)
+# The separator requires surrounding whitespace so hyphenated names
+# ("A-ha", "AC-DC", "Wu-Tang Clan", "Blink-182") are not split mid-name.
 _FOLDER_PATTERN = re.compile(
-    r"^(?P<artist>.+?)\s*-\s*(?P<album>.+?)\s*\((?P<year>\d{4})\)$"
+    r"^(?P<artist>.+?)\s+-\s+(?P<album>.+?)\s*\((?P<year>\d{4})\)$"
 )
 
 # Characters illegal in filenames on Linux/macOS/Windows

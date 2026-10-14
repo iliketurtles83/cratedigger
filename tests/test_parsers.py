@@ -159,6 +159,40 @@ class ParserTests(unittest.TestCase):
             {"artist": "Kylesa", "album": "Spiral Shadow", "year": None},
         )
 
+    def test_parse_folder_name_preserves_hyphenated_artists(self) -> None:
+        """The separator is ' - ': hyphens inside names must never split them.
+
+        Regression: ``\\s*-\\s*`` truncated ``A-ha`` to ``A`` and ``AC-DC`` to
+        ``AC``, which 01_tag then wrote into the albumartist tag.
+        """
+        for folder, artist, album, year in (
+            ("A-ha - Hunting High and Low (1985)", "A-ha", "Hunting High and Low", "1985"),
+            ("AC-DC - Stiff Upper Lip (2000)", "AC-DC", "Stiff Upper Lip", "2000"),
+            ("Wu-Tang Clan - Enter the Wu-Tang (1993)", "Wu-Tang Clan", "Enter the Wu-Tang", "1993"),
+            ("Blink-182 - Enema of the State (1999)", "Blink-182", "Enema of the State", "1999"),
+            ("At the Drive-In - Relationship of Command (2000)",
+             "At the Drive-In", "Relationship of Command", "2000"),
+            ("Brainwave-Sync - Into the Deep (2008)", "Brainwave-Sync", "Into the Deep", "2008"),
+        ):
+            with self.subTest(folder=folder):
+                self.assertEqual(
+                    parse_folder_name(folder),
+                    {"artist": artist, "album": album, "year": year},
+                )
+
+    def test_parse_folder_name_hyphenated_without_year(self) -> None:
+        self.assertEqual(
+            parse_folder_name("A-ha - Hunting High and Low"),
+            {"artist": "A-ha", "album": "Hunting High and Low", "year": None},
+        )
+
+    def test_parse_folder_name_rejects_unspaced_separator(self) -> None:
+        """A bare hyphen is part of the name, not an artist/album separator."""
+        self.assertEqual(
+            parse_folder_name("AC-DC (2000)"),
+            {"artist": None, "album": "AC-DC", "year": "2000"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
