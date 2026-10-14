@@ -1,6 +1,7 @@
 """Filename and folder name pattern parsing."""
 
 import re
+import unicodedata
 from pathlib import Path
 
 
@@ -260,6 +261,18 @@ def artist_comparison_key(name: str | None) -> str:
     s = s.replace("&", "and")
     s = re.sub(r"[.\'\"`\-_]", "", s)
     return " ".join(s.split()).lower()
+
+
+def normalise_title(title: str | None) -> str:
+    """Fold a release/recording/track title for catalog comparison.
+
+    Applies NFKC normalisation, case folding, and punctuation stripping so
+    typographic variants ('’' vs "'", 'pt.1' vs 'Part 1' casing) compare equal.
+    """
+    if not title:
+        return ""
+    value = unicodedata.normalize("NFKC", title).casefold()
+    return " ".join(re.sub(r"[^\w]+", " ", value).split())
 
 
 def title_case_clean(text: str | None) -> str | None:

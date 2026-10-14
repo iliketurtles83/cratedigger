@@ -301,6 +301,40 @@ retained with deterministic `[alternate-<hash>]` filename suffixes. Conflicting
 release evidence is never merged. Only `albumartist` is normalized; per-track
 artist credits are preserved.
 
+**Repair misidentified tracks:**
+```bash
+# Report tracks whose title and album are both absent from the artist's catalogs
+python3 scripts/repair_track_identity.py
+
+# Fingerprint the uncached candidates during a dry-run and cache the evidence
+python3 scripts/repair_track_identity.py --online-fingerprints
+
+# Preview title corrections and relocations for selected artists
+python3 scripts/repair_track_identity.py --fix --relocate \
+  --artist "Kid606" --artist "Kiss"
+
+# Apply exactly the reviewed, cache-backed repairs
+python3 scripts/repair_track_identity.py --fix --relocate --no-dry-run \
+  --artist "Kid606" --artist "Kiss"
+
+# Bring filenames back in line with the repaired tags
+python3 02_rename.py --no-dry-run --folder "D/The Dust Brothers"
+```
+
+Identity repair complements artist reconciliation: unproven tracks are what
+hold a duplicate group at `partial`, so correcting or rehoming them usually
+promotes the group to `confirmed`. Identity evidence is pooled across every
+folder sharing an artist comparison key, because the duplicate spelling is
+typically the one missing MusicBrainz IDs. A title is only rewritten when the
+fingerprint confirms the expected artist *and* the corrected title occurs in
+that artist's cached recording catalog; MusicBrainz placeholders such as
+`[unknown]` are always refused. A foreign-credited album folder relocates as a
+unit when at least two of its tracks, and a dominant share of its audio, agree
+on one artist — so soundtracks move intact while guest credits keep their own
+`artist` tag under the new `albumartist`. Isolated strays move to the root
+singles holding pen instead. AcoustID lookups happen only during dry-runs and
+are cached by audio hash, so a reviewed live run never contacts the network.
+
 **Legacy intake staging flow:**
 ```bash
 python3 intake.py --legacy-move --no-dry-run

@@ -10,6 +10,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Audit & repair tags: `python scripts/audit_repair.py --dry-run --folder NAME [--fix]`
 - Repair folder-parse damage: `python scripts/repair_folder_parse.py --tags --structure --dry-run`
 - Audit duplicate artist folders: `python scripts/reconcile_artists.py` (recording evidence for compilation/loose tracks: `--online-recording-evidence --fix`; collision evidence: `--online-release-evidence --collision-report`; apply only reviewed cache-backed sets by adding `--no-dry-run`)
+- Repair misidentified tracks: `python scripts/repair_track_identity.py` (fingerprint uncached candidates in a dry-run with `--online-fingerprints`; apply reviewed cache-backed repairs with `--fix --relocate --no-dry-run [--artist NAME]`, then re-run `02_rename.py` on the touched folders)
 - Normalize cover art: `python scripts/normalize_covers.py --dry-run [--folder NAME]`
 - Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`

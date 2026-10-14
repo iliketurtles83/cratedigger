@@ -36,7 +36,6 @@ import shutil
 import sqlite3
 import sys
 import re
-import unicodedata
 
 from mutagen import File as MutagenFile
 
@@ -48,7 +47,12 @@ import config
 from lib.audiohash import audio_hash
 from lib.context import artist_letter_bucket
 from lib.mb import artist_recording_titles, artist_release_groups
-from lib.parsers import artist_comparison_key, sanitise_name, title_case_clean
+from lib.parsers import (
+    artist_comparison_key,
+    normalise_title,
+    sanitise_name,
+    title_case_clean,
+)
 from lib.path_updates import record_folder_move, update_downstream_paths
 from lib.tags import read_tags, write_tags
 
@@ -304,8 +308,7 @@ def _classify_identity(
 
 
 def _normalise_release_title(title: str) -> str:
-    value = unicodedata.normalize("NFKC", title).casefold()
-    return " ".join(re.sub(r"[^\w]+", " ", value).split())
+    return normalise_title(title)
 
 
 def _canonical_name(
