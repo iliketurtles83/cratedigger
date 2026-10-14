@@ -22,13 +22,15 @@ from pathlib import Path
 import config
 from lib.context import is_disc_subfolder
 from lib.logger import setup_logger
-from lib.parsers import build_filename, parse_filename
+from lib.parsers import build_filename, is_suspicious_tag, parse_filename
 from lib.tags import read_tags
 
 log: logging.Logger = logging.getLogger("02_rename")
 
 # Folder name pattern indicating disc number, e.g. "Album (disc 1)" or "[disc 2]"
 _DISC_IN_FOLDER_NAME = re.compile(r"[\(\[]\s*disc\s*\d+\s*[\)\]]", re.IGNORECASE)
+
+_VARIOUS_ARTISTS_ALIASES = {"various artists", "various", "va", "v.a.", "v. a."}
 
 
 def _parse_disc_value(disc_str: str | None) -> tuple[int | None, int | None]:
@@ -142,6 +144,24 @@ def rename_file(
     if not title:
         log.warning("No title for %s — flagging for review", path)
         review_items.append({"path": str(path), "reason": "no_title"})
+        return
+
+    # Never bake ripper placeholders ("New Artist", "Track 01") into filenames.
+    # "Various Artists" is a legitimate credit on compilation tracks.
+    placeholder_fields = [
+        field
+        for field, value in (("artist", artist), ("title", title))
+        if is_suspicious_tag(value, field=field)
+        and (value or "").strip().lower() not in _VARIOUS_ARTISTS_ALIASES
+    ]
+    if placeholder_fields:
+        log.warning("Placeholder %s tag(s) for %s — flagging for review",
+                    ", ".join(placeholder_fields), path)
+        review_items.append({
+            "path": str(path),
+            "reason": "placeholder_tags",
+            "fields": placeholder_fields,
+        })
         return
 
     new_name = build_filename(track, artist, title, ext=path.suffix, disc=disc)
