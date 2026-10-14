@@ -135,11 +135,13 @@ def convert_list_folder(
     *,
     playlist_name: str | None = None,
     dry_run: bool = True,
-) -> None:
-    """Convert list folder into an .m3u8 playlist and report duplicates/retag actions."""
+    retag: bool = False,
+    remove_duplicates: bool = False,
+) -> tuple[int, int, int] | None:
+    """Convert list folder into an .m3u8 playlist and optionally retag unique tracks or prune duplicates."""
     if not folder_path.exists() or not folder_path.is_dir():
         log.error("Folder not found: %s", folder_path)
-        return
+        return None
 
     audio_files = sorted(
         p for p in folder_path.rglob("*")
@@ -185,6 +187,16 @@ def convert_list_folder(
                 rel = str(album_copy)
             playlist_lines.append(f"#EXTINF:-1,{track.stem}")
             playlist_lines.append(rel)
+
+            if remove_duplicates:
+                if dry_run:
+                    log.info("[DRY-RUN] Would remove duplicate list copy: %s (album copy: %s)", track.name, album_copy)
+                else:
+                    try:
+                        track.unlink()
+                        log.info("Removed duplicate list copy: %s", track.name)
+                    except OSError as exc:
+                        log.warning("Failed to remove duplicate %s: %s", track.name, exc)
         else:
             unique_tracks.append(track)
             try:
@@ -193,6 +205,31 @@ def convert_list_folder(
                 rel = str(track)
             playlist_lines.append(f"#EXTINF:-1,{track.stem}")
             playlist_lines.append(rel)
+
+            if retag:
+                tags = read_tags(track)
+                if tags:
+                    updates: dict[str, str | None] = {}
+                    if tags.get("compilation") == "1":
+                        updates["compilation"] = "0"
+                    if (tags.get("albumartist") or "").lower() in {"various artists", "va", "v.a."}:
+                        updates["albumartist"] = tags.get("artist") or None
+                    curr_album = (tags.get("album") or "").strip()
+                    is_list_album = (
+                        curr_album.lower() == folder_path.name.lower()
+                        or curr_album in CURATED_LIST_FOLDERS
+                        or "pitchfork" in curr_album.lower()
+                        or "rolling stone" in curr_album.lower()
+                    )
+                    if is_list_album:
+                        updates["album"] = None
+
+                    if updates:
+                        if dry_run:
+                            log.info("[DRY-RUN] Would retag list track %s: %s", track.name, updates)
+                        else:
+                            write_tags(track, updates)
+                            log.info("Retagged list track %s: %s", track.name, updates)
 
     playlist_content = "\n".join(playlist_lines) + "\n"
 
@@ -221,7 +258,9 @@ def convert_list_folder(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert curated list folder to .m3u8 playlist.")
     parser.add_argument("--dry-run", action="store_true", default=True, help="Preview without writing")
-    parser.add_argument("--no-dry-run", action="store_true", help="Write playlist")
+    parser.add_argument("--no-dry-run", action="store_true", help="Write playlist and apply operations")
+    parser.add_argument("--retag", action="store_true", help="Clear list album tag and compilation flag from unique tracks")
+    parser.add_argument("--remove-duplicates", action="store_true", help="Delete duplicate files that already exist on their original albums")
     parser.add_argument("--folder", type=str, default=None, help="Folder name or path under 0compilations/")
     parser.add_argument("--all", action="store_true", help="Convert all known curated list folders")
     parser.add_argument("--library-root", type=str, default=str(config.MUSIC_ROOT), help="Music library root")
@@ -268,6 +307,8 @@ def main() -> None:
             lib_root,
             playlist_name=args.playlist_name,
             dry_run=dry_run,
+            retag=args.retag,
+            remove_duplicates=args.remove_duplicates,
         )
         if res:
             t, d, u = res
