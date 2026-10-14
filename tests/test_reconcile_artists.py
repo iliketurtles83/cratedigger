@@ -180,6 +180,104 @@ class ReconcileArtistsTests(unittest.TestCase):
 
         self.assertEqual(plan.confidence, "partial")
 
+    def test_release_catalog_normalises_multiple_tag_spellings_in_one_unit(self) -> None:
+        known = self._track("G/Gotan Project/Gotan Project - Known/01.mp3")
+        first = self._track(
+            "G/gotan project/gotan project - Revancha/01.mp3"
+        )
+        second = self._track(
+            "G/gotan project/gotan project - Revancha/02.mp3"
+        )
+
+        def tags(path: Path) -> dict[str, str]:
+            if path == known:
+                return {
+                    "title": "Known",
+                    "albumartist": "Gotan Project",
+                    "album": "Known",
+                    "mb_albumartistid": "mb-gotan",
+                }
+            return {
+                "title": path.stem,
+                "albumartist": "gotan project",
+                "album": (
+                    "La Revancha Del Tango"
+                    if path == first
+                    else "la revancha del tango"
+                ),
+                "mb_albumartistid": "",
+            }
+
+        with patch("scripts.reconcile_artists.read_tags", side_effect=tags):
+            plan = build_merge_plans(
+                self.root,
+                self.database,
+                release_catalogs={"mb-gotan": {"la revancha del tango"}},
+            )[0]
+
+        self.assertEqual(plan.confidence, "confirmed")
+
+    def test_recording_catalog_corroborates_compilation_tracks(self) -> None:
+        known = self._track("R/Roots Manuva/Roots Manuva - Known/01.mp3")
+        compilation = self._track(
+            "R/roots manuva/roots manuva - Compilation/01.mp3"
+        )
+
+        def tags(path: Path) -> dict[str, str]:
+            if path == known:
+                return {
+                    "title": "Known",
+                    "albumartist": "Roots Manuva",
+                    "album": "Known",
+                    "mb_albumartistid": "mb-roots",
+                }
+            return {
+                "title": "Witness",
+                "albumartist": "roots manuva",
+                "album": "Various Artists Compilation",
+                "mb_albumartistid": "",
+            }
+
+        with patch("scripts.reconcile_artists.read_tags", side_effect=tags):
+            plan = build_merge_plans(
+                self.root,
+                self.database,
+                release_catalogs={"mb-roots": set()},
+                recording_catalogs={"mb-roots": {"witness"}},
+            )[0]
+
+        self.assertEqual(plan.confidence, "confirmed")
+        self.assertIn("MusicBrainz catalogs", plan.reason)
+
+    def test_recording_catalog_requires_every_unproven_track(self) -> None:
+        known = self._track("R/Roots Manuva/Roots Manuva - Known/01.mp3")
+        self._track("R/roots manuva/roots manuva - Other/01.mp3")
+        self._track("R/roots manuva/roots manuva - Other/02.mp3")
+
+        def tags(path: Path) -> dict[str, str]:
+            if path == known:
+                return {
+                    "title": "Known",
+                    "albumartist": "Roots Manuva",
+                    "album": "Known",
+                    "mb_albumartistid": "mb-roots",
+                }
+            return {
+                "title": "Witness" if path.name == "01.mp3" else "Unknown",
+                "albumartist": "roots manuva",
+                "album": "Compilation",
+                "mb_albumartistid": "",
+            }
+
+        with patch("scripts.reconcile_artists.read_tags", side_effect=tags):
+            plan = build_merge_plans(
+                self.root,
+                self.database,
+                recording_catalogs={"mb-roots": {"witness"}},
+            )[0]
+
+        self.assertEqual(plan.confidence, "partial")
+
     def test_plan_blocks_conflicting_ids(self) -> None:
         self._track("M/M.I.A./M.I.A. - First/01.mp3")
         self._track("M/MIA/MIA - Second/01.mp3")

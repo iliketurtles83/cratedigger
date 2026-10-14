@@ -96,6 +96,27 @@ class MbPhase3Tests(unittest.TestCase):
         )
         self.assertEqual(call.call_count, 2)
 
+    def test_artist_recording_titles_paginates(self) -> None:
+        first = {
+            "recording-list": [{"title": "First"}],
+            "recording-count": 2,
+        }
+        second = {
+            "recording-list": [{"title": "Second"}],
+            "recording-count": 2,
+        }
+        fake_client = types.SimpleNamespace(browse_recordings=object())
+
+        with (
+            patch.object(mb, "_HAS_MB", True),
+            patch.object(mb, "musicbrainzngs", fake_client),
+            patch.object(mb, "_mb_call_with_retry", side_effect=[first, second]) as call,
+        ):
+            titles = mb.artist_recording_titles("artist-id")
+
+        self.assertEqual(titles, ["First", "Second"])
+        self.assertEqual(call.call_count, 2)
+
     def test_mb_recording_search_uses_tag_votes_as_tiebreaker(self) -> None:
         def _search_recordings(*args, **kwargs):
             return {

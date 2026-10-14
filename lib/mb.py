@@ -165,6 +165,41 @@ def artist_release_groups(
         offset += len(batch)
 
 
+def artist_recording_titles(
+    artist_id: str,
+    *,
+    rate_limit_seconds: float = 1.1,
+) -> list[str]:
+    """Return every recording title credited to a MusicBrainz artist."""
+    if not _HAS_MB or musicbrainzngs is None or not artist_id:
+        return []
+
+    titles: list[str] = []
+    offset = 0
+    while True:
+        response = _mb_call_with_retry(
+            musicbrainzngs.browse_recordings,
+            artist=artist_id,
+            limit=100,
+            offset=offset,
+            rate_limit_seconds=rate_limit_seconds,
+        )
+        if not response:
+            return []
+        batch = response.get("recording-list", [])
+        if not isinstance(batch, list):
+            return []
+        titles.extend(
+            str(recording["title"])
+            for recording in batch
+            if isinstance(recording, dict) and recording.get("title")
+        )
+        total = int(response.get("recording-count", len(titles)))
+        if not batch or offset + len(batch) >= total:
+            return titles
+        offset += len(batch)
+
+
 def _release_sort_key(release: dict[str, object]) -> tuple[str, str, str]:
     """Stable key for deterministic release fallback selection."""
     date = str(release.get("date") or "")

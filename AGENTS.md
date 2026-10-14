@@ -9,7 +9,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Beets import trial: `.venv/bin/python -m beets -c config/beets.yaml import --pretend /path/to/album`
 - Audit & repair tags: `python scripts/audit_repair.py --dry-run --folder NAME [--fix]`
 - Repair folder-parse damage: `python scripts/repair_folder_parse.py --tags --structure --dry-run`
-- Audit duplicate artist folders: `python scripts/reconcile_artists.py` (collision evidence: `--online-release-evidence --collision-report`; opt-in preview: add `--resolve-collisions --fix`; apply the reviewed cache-backed set: add `--no-dry-run`)
+- Audit duplicate artist folders: `python scripts/reconcile_artists.py` (recording evidence for compilation/loose tracks: `--online-recording-evidence --fix`; collision evidence: `--online-release-evidence --collision-report`; apply only reviewed cache-backed sets by adding `--no-dry-run`)
 - Normalize cover art: `python scripts/normalize_covers.py --dry-run [--folder NAME]`
 - Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`

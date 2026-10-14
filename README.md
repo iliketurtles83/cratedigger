@@ -274,15 +274,25 @@ python3 scripts/reconcile_artists.py \
 # Apply only the reviewed, cache-backed collision resolutions
 python3 scripts/reconcile_artists.py \
   --online-release-evidence --resolve-collisions --fix --no-dry-run
+
+# Fetch recording-title catalogs to corroborate compilation and loose tracks
+python3 scripts/reconcile_artists.py --online-recording-evidence --fix
+
+# Apply exactly the reviewed recording-cache-backed set
+python3 scripts/reconcile_artists.py \
+  --online-recording-evidence --fix --no-dry-run
 ```
 
 Artist reconciliation is filesystem-first because the beets database may not
 index the entire library. Automatic merges require the same single
 MusicBrainz album-artist ID in every source folder, complete matching
 track-artist ID coverage, or an exact match for every unproven album in the
-known artist's MusicBrainz release-group catalog. Catalog evidence is fetched
-only during dry-runs and cached; live mode never discovers new candidates.
-Partial, missing, or conflicting artist evidence remains report-only.
+known artist's MusicBrainz release-group catalog. For compilation, edition,
+and loose tracks whose album title is not in that catalog, optional recording
+catalog evidence requires every unproven track title to occur in the known
+artist's MusicBrainz recordings. Catalog evidence is fetched only during
+dry-runs and cached; live mode never discovers new candidates. Partial,
+missing, or conflicting artist evidence remains report-only.
 Destination collisions also remain report-only unless `--resolve-collisions`
 is explicitly selected. Collision resolution requires compatible release IDs
 and at least one matching recording ID or title/duration pair. Identical audio
