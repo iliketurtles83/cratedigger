@@ -10,7 +10,7 @@ Personal music collection management pipeline. Tags audio files with genre and m
 
 | Script | Purpose |
 |---|---|
-| `intake.py` | Modern intake pipeline: imports new files in `INCOMING_FOLDER` via beets using `config/beets.yaml`, matching MusicBrainz releases, writing tags, and sorting into the Tier 1 artist-root contract. (Legacy flow available via `--legacy-move`). |
+| `intake.py` | Modern intake pipeline: uses beets with a transient catalog for MusicBrainz/AcoustID metadata, then runs cratedigger renaming, folder normalization, and Tier 1 placement. (Legacy staging flow available via `--legacy-move`). |
 | `scripts/audit_repair.py` | Audit library tags against backup (`/media/jack/monodong/audio2`) to purge junk folksonomy tags, restore unflattened subgenres, and protect collaboration credits. |
 | `01_tag.py` | Standalone tagger using AcoustID + MusicBrainz. Uses folder context as fallback only when existing tags are absent; guest/featured credits protected. |
 | `02_rename.py` | Normalise audio filenames using tags as source of truth. Uses folder structure (disc subfolders, sibling scan) to decide whether to apply a disc-track prefix. |
@@ -217,16 +217,32 @@ python3 02_rename.py --no-dry-run --folder jazz
 python3 03_folders.py --no-dry-run --folder jazz
 ```
 
-**Process new music dropped in the incoming folder (Modern Beets Flow):**
+**Process new music dropped in the incoming folder:**
 ```bash
-# Preview beets matching and destination path without writing
+# Preview beets matching and cratedigger's filename/folder/path changes
 python3 intake.py --dry-run
 
-# Run live intake (imports, matches MusicBrainz releases, writes canonical tags)
+# Match/write metadata, then let cratedigger organize into Tier 1
 python3 intake.py --no-dry-run
 
-# Or run beets import directly
-.venv/bin/python -m beets -c config/beets.yaml import /media/jack/buffer/audio/incoming
+# Metadata-only beets trial; this does not move or rename files
+.venv/bin/python -m beets -c config/beets.yaml import --pretend /media/jack/buffer/audio/incoming
+```
+
+Cratedigger is the sole owner of physical layout. Beets path templates are not
+configured, and `intake.py` gives beets a transient catalog so the subsequent
+cratedigger moves cannot leave stale paths in the persistent beets database.
+
+**Validate and repair Tier 1 layout:**
+```bash
+# Check that every top-level folder is covered by a config guardrail
+python3 04_move.py --validate-config
+
+# Preview explicitly tagged Various Artists releases currently under artists
+python3 04_move.py --relocate-compilations
+
+# Apply only after reviewing the dry-run
+python3 04_move.py --relocate-compilations --no-dry-run
 ```
 
 **Legacy intake staging flow:**
@@ -299,4 +315,3 @@ If you want those dry-run integration tests to target a specific top-level libra
 ```bash
 CRATEDIGGER_RUN_REAL_AUDIO_TESTS=1 CRATEDIGGER_TEST_FOLDER=pop .venv/bin/python -m unittest discover -s tests
 ```
-

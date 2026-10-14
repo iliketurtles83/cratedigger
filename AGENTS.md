@@ -12,14 +12,16 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Normalize cover art: `python scripts/normalize_covers.py --dry-run [--folder NAME]`
 - Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
+- Validate Tier 1 guardrails: `python 04_move.py --validate-config`
+- Relocate compilations: `python 04_move.py --relocate-compilations` (dry-run by default)
 - Review flagged items: `python 05_review.py`
 - Recommender evaluation & export: `python 07_recommend.py --evaluate` (export: `python 07_recommend.py --export`)
 
 ## Architecture & Pipeline Flow
 
-Cratedigger adopts **beets** for release-level identity, AcoustID/MB metadata matching, and canonical physical file organization, while retaining cratedigger for intake preparation, tag hygiene/audit, and custom genre taxonomy:
+Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata matching. Cratedigger exclusively owns filenames and physical layout:
 
-1. **intake.py** - New arrivals in `incoming/` are imported via beets (`--beets`, default) using `config/beets.yaml`, writing canonical MBIDs and organizing into the Tier 1 artist-root contract. (Legacy `01→02→04` staging flow preserved via `--legacy-move`).
+1. **intake.py** - New arrivals in `incoming/` are matched by beets using a transient catalog, then pass through `02_rename.py`, `03_folders.py`, and `04_move.py --to-artist-root`. This prevents stale paths in the persistent beets database. (Legacy `01→02→04` staging flow preserved via `--legacy-move`).
 2. **scripts/audit_repair.py** - Scans library against backup (`/media/jack/monodong/audio2`) to purge junk folksonomy tags, restore unflattened genres, and protect collaboration credits.
 3. **01_tag.py** - Standalone/pre-tagger. Folder genre is only a fallback when existing genres are absent (prevents feedback loops). Genre remapping is opt-in (`--remap-genres`). Guest/collaboration credits are protected during consistency passes.
 4. **02_rename.py / 03_folders.py** - File/folder normalizers according to cratedigger rules. `02_rename.py` refuses to write placeholder tags (`New Artist`, `Track 01`) into filenames and flags them instead. `03_folders.py` nests and re-buckets artist roots that hold loose files.
@@ -33,8 +35,8 @@ Cratedigger adopts **beets** for release-level identity, AcoustID/MB metadata ma
 - Folder naming contract: Tier 1 artist-root with letter bucketing (`A-Z`, `#` for symbols)
 - Special folders: `0compilations`, `0various`, `0mixes`, `0singles`, `0random`, `#`
 - Letter bucketing: articles stripped for bucketing only (`The Cure` → `C/The Cure/`)
-- Beets config: `config/beets.yaml` (enforces path templates, inline bucketing, AcoustID/MusicBrainz). Beets DB located at `/home/jack/.config/beets/library.db`. Always invoke beets with `-c config/beets.yaml`.
-- Artist-folder threshold: configurable (default 3 albums)
+- Beets config: `config/beets.yaml` (metadata matching only; no path templates or moves). The persistent Beets DB is located at `/home/jack/.config/beets/library.db`. Always invoke beets with `-c config/beets.yaml`.
+- Tier 1 always keeps an artist directory, including artists with only one album. The former album-count threshold is retired because it conflicts with this contract.
 - Folder context is read-only; scripts import from `lib/context.py`
 - Tags are written via `lib/tags.py` (format-agnostic wrapper)
 

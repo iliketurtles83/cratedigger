@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""04_move.py — Three modes: intake, restructure, promote.
+"""04_move.py — Route intake and maintain the canonical Tier 1 layout.
 
 Modes are mutually exclusive:
 
 - ``--intake``: route files from INCOMING_FOLDER into staging folders
-- ``--restructure``: apply artist-folder threshold rule to existing collection
+- ``--restructure``: compatibility alias for legacy genre-root migration
 - ``--promote``: move staged albums from STAGED_ALBUMS_FOLDER to genre folders
+- ``--to-artist-root``: migrate legacy genre roots to Tier 1
+- ``--relocate-compilations``: move Various Artists releases to 0compilations
+- ``--validate-config``: check top-level folder guardrails
 
 Usage:
-    python 04_move.py (--intake|--restructure|--promote)
+    python 04_move.py MODE
                       [--dry-run] [--folder NAME] [--log FILE]
 """
 
@@ -22,10 +25,17 @@ import subprocess
 from pathlib import Path
 
 import config
-from lib.context import artist_letter_bucket, classify_folder, infer_compilation_folder
+from lib.context import (
+    artist_letter_bucket,
+    classify_folder,
+    infer_compilation_folder,
+    is_letter_bucket,
+)
 from lib.genres import normalise_genre, parent_genre
 from lib.logger import setup_logger
-from lib.preferences import remap_genre, resolve_artist_folder_threshold
+from lib.parsers import sanitise_name
+from lib.path_updates import record_folder_move, update_downstream_paths
+from lib.preferences import remap_genre
 from lib.tags import read_tags
 
 log: logging.Logger = None  # type: ignore[assignment]
@@ -471,171 +481,23 @@ def run_intake_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
 
 # ── Artist folder threshold (configurable) ───────────────────────────────────
 
-def _count_album_subdirs(folder: Path) -> int:
-    """Count immediate child directories that classify as album."""
-    count = 0
-    for child in folder.iterdir():
-        if child.is_dir() and classify_folder(child) == "album":
-            count += 1
-    return count
-
-
-def _album_from_tags(folder: Path) -> dict[str, object]:
-    """Read artist/album/year tags from audio files directly in *folder*.
-
-    Artist values are deduplicated case-insensitively; first-seen casing wins.
-    """
-    artists: dict[str, str] = {}  # normalised-lower → first-seen original
-    albums: set[str] = set()
-    years: set[str] = set()
-    for f in sorted(folder.iterdir()):
-        if not f.is_file() or f.suffix.lower() not in config.AUDIO_EXTENSIONS:
-            continue
-        tags = read_tags(f)
-        if tags is None:
-            continue
-        artist = (tags.get("artist") or "").strip()
-        if artist and artist.lower() not in artists:
-            artists[artist.lower()] = artist
-        album = tags.get("album") or ""
-        if album:
-            albums.add(album)
-        year = (tags.get("year") or "")[:4]
-        if year:
-            years.add(year)
-    return {"artists": set(artists.values()), "albums": albums, "years": years}
-
-
-def _build_album_folder_name(artist: str, album: str, year: str | None) -> str:
-    if year:
-        return f"{artist} - {album} ({year})"
-    return f"{artist} - {album}"
-
-
-def restructure_artist_flat(
-    folder: Path,
-    genre_dir: Path,
-    *,
-    dry_run: bool = True,
-    review_items: list[dict],
-) -> None:
-    """Apply threshold rule to an artist_flat folder."""
-    existing_albums = _count_album_subdirs(folder)
-    tag_info = _album_from_tags(folder)
-    tag_artists = tag_info["artists"]
-    albums = tag_info["albums"]
-    years = tag_info["years"]
-
-    # Determine artist from tags, not folder name — folder name may be an
-    # album title, a truncated string, or include a year in parentheses.
-    if len(tag_artists) > 1:
-        # Mixed track artists → compilation-like folder already in the right
-        # place; leave it for 03_folders.py to normalise.
-        log.info("artist_flat has mixed track artists: %s — skipping "
-                 "restructure (likely inline compilation)", folder.name)
-        return
-    elif len(tag_artists) == 1:
-        artist = next(iter(tag_artists))
-    else:
-        artist = folder.name  # no readable tags — fall back
-
-    threshold = resolve_artist_folder_threshold(
-        artist=artist,
-        genre_folder=genre_dir.name,
-        default=config.ARTIST_FOLDER_THRESHOLD,
-    )
-
-    audio_files = [
-        f for f in sorted(folder.iterdir())
-        if f.is_file() and f.suffix.lower() in config.AUDIO_EXTENSIONS
-    ]
-    if not audio_files:
-        return
-
-    # Mixed album tags — cannot auto-decide
-    if existing_albums == 0 and len(albums) > 1:
-        log.warning("artist_flat with mixed album tags: %s — flagging for "
-                     "review", folder)
-        review_items.append({
-            "path": str(folder),
-            "reason": "artist_flat_mixed",
-            "albums": sorted(albums),
-        })
-        return
-
-    album_name = next(iter(albums)) if albums else "Unknown Album"
-    year = next(iter(years)) if len(years) == 1 else None
-    dest_folder_name = _build_album_folder_name(artist, album_name, year)
-
-    if existing_albums == 0 and len(albums) <= 1:
-        # Flatten to genre root: Artist - Album (Year)/
-        dest_dir = genre_dir / dest_folder_name
-    elif existing_albums < threshold:
-        # Below threshold — create in genre root
-        dest_dir = genre_dir / dest_folder_name
-    else:
-        # At or above threshold — create inside artist folder
-        dest_dir = folder / dest_folder_name
-
-    for f in audio_files:
-        dest_path = dest_dir / f.name
-        if dest_path.exists():
-            log.warning("Target exists, skipping: %s → %s", f, dest_path)
-            review_items.append({
-                "path": str(f),
-                "reason": "move_conflict",
-                "target": str(dest_path),
-            })
-            continue
-        _move_path(f, dest_path, dry_run=dry_run, review_items=review_items)
-
-    # Clean up empty artist folder (only if below threshold — files moved out)
-    if not dry_run and existing_albums < threshold:
-        try:
-            if not any(folder.iterdir()):
-                folder.rmdir()
-                log.info("Removed empty artist folder: %s", folder)
-        except OSError:
-            pass
-
-
-def walk_artist_folders(genre_dir: Path, **kwargs) -> list[dict]:
-    """Find and restructure artist_flat folders in a genre directory."""
-    review_items: list[dict] = []
-    for child in sorted(genre_dir.iterdir()):
-        if not child.is_dir():
-            continue
-        kind = classify_folder(child)
-        if kind == "artist_flat":
-            restructure_artist_flat(
-                child, genre_dir, review_items=review_items, **kwargs)
-        elif kind == "subgenre":
-            # Also process artist_flat folders inside subgenre buckets
-            items = walk_artist_folders(child, **kwargs)
-            review_items.extend(items)
-    return review_items
-
-
 def run_restructure_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
-    """Apply threshold-based artist-folder restructuring to collection folders."""
-    if folder:
-        folders = [config.MUSIC_ROOT / folder]
-    else:
-        _letter_skip = {b.lower() for b in getattr(config, "LETTER_BUCKETS", set())}
-        _symbol = getattr(config, "SYMBOL_BUCKET", "#")
-        skip = config.SPECIAL_FOLDERS | config.SKIP_FOLDERS | _letter_skip | {_symbol}
-        folders = sorted(
-            p for p in config.MUSIC_ROOT.iterdir()
-            if p.is_dir() and p.name.lower() not in skip
+    """Migrate legacy genre roots into the canonical Tier 1 artist layout.
+
+    The old album-count threshold conflicted with Tier 1 by flattening small
+    artists into bucket roots. ``--restructure`` remains as a compatibility
+    alias for ``--to-artist-root``.
+    """
+    if folder and is_letter_bucket(folder):
+        log.warning(
+            "%s is already a Tier 1 bucket; use 03_folders.py to normalize it",
+            folder,
         )
-
-    all_review: list[dict] = []
-    for genre_dir in folders:
-        log.info("Restructure folder: %s", genre_dir.name)
-        items = walk_artist_folders(genre_dir, dry_run=dry_run)
-        all_review.extend(items)
-
-    return all_review
+        return [{
+            "path": str(config.MUSIC_ROOT / folder),
+            "reason": "tier1_use_03_folders",
+        }]
+    return run_to_artist_root_mode(dry_run=dry_run, folder=folder)
 
 
 def run_promote_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
@@ -954,11 +816,161 @@ def run_to_artist_root_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
     return all_review
 
 
+_COMPILATION_ALBUMARTISTS = {
+    "various artists",
+    "various",
+    "va",
+    "v.a.",
+    "erinevad esitajad",
+}
+
+
+def _explicit_compilation_name(folder: Path) -> str | None:
+    """Return a canonical folder name for an explicitly tagged compilation."""
+    albumartists: set[str] = set()
+    albums: set[str] = set()
+    years: set[str] = set()
+
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in config.AUDIO_EXTENSIONS:
+            continue
+        tags = read_tags(path)
+        if not tags:
+            continue
+        albumartist = (tags.get("albumartist") or "").strip().casefold()
+        if albumartist:
+            albumartists.add(albumartist)
+        album = (tags.get("album") or "").strip()
+        if album:
+            albums.add(album)
+        year = (tags.get("year") or "").strip()[:4]
+        if re.fullmatch(r"\d{4}", year):
+            years.add(year)
+
+    if not albumartists or not albumartists.issubset(_COMPILATION_ALBUMARTISTS):
+        return None
+
+    if len(albums) == 1:
+        name = sanitise_name(next(iter(albums)))
+        if len(years) == 1:
+            name = f"{name} ({next(iter(years))})"
+        return name
+
+    prefix = folder.name.split(" - ", 1)
+    return prefix[1] if len(prefix) == 2 and prefix[0].casefold() in _COMPILATION_ALBUMARTISTS else folder.name
+
+
+def run_relocate_compilations_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
+    """Move explicitly tagged compilations out of Tier 1 artist trees."""
+    review_items: list[dict] = []
+    if folder:
+        buckets = [config.MUSIC_ROOT / folder]
+    else:
+        buckets = [
+            config.MUSIC_ROOT / bucket
+            for bucket in sorted(config.LETTER_BUCKETS | {config.SYMBOL_BUCKET})
+        ]
+
+    compilation_root = config.MUSIC_ROOT / "0compilations"
+    moved_paths: dict[Path, Path] = {}
+    for bucket in buckets:
+        if not bucket.is_dir() or not is_letter_bucket(bucket.name):
+            continue
+        for artist_dir in sorted(path for path in bucket.iterdir() if path.is_dir()):
+            if artist_dir.name.casefold() not in _COMPILATION_ALBUMARTISTS:
+                continue
+            for album_dir in sorted(path for path in artist_dir.iterdir() if path.is_dir()):
+                if album_dir.name == config.ARTIST_SINGLES_FOLDER:
+                    continue
+                destination_name = _explicit_compilation_name(album_dir)
+                if destination_name is None:
+                    continue
+                destination = compilation_root / destination_name
+                if destination.exists():
+                    log.warning(
+                        "Compilation target exists, skipping: %s → %s",
+                        album_dir,
+                        destination,
+                    )
+                    review_items.append({
+                        "path": str(album_dir),
+                        "reason": "move_conflict",
+                        "target": str(destination),
+                    })
+                    continue
+                if not dry_run:
+                    record_folder_move(
+                        album_dir,
+                        destination,
+                        moved_paths,
+                        audio_extensions=config.AUDIO_EXTENSIONS,
+                    )
+                _move_path(
+                    album_dir,
+                    destination,
+                    dry_run=dry_run,
+                    review_items=review_items,
+                )
+            _remove_if_empty(artist_dir, dry_run=dry_run)
+
+    if not dry_run:
+        update_downstream_paths(
+            moved_paths,
+            music_root=config.MUSIC_ROOT,
+            logger=log,
+        )
+    return review_items
+
+
+def run_validate_config_mode() -> list[dict]:
+    """Report folder-guardrail mismatches and unclassified top-level folders."""
+    review_items: list[dict] = []
+    top_level_special = set(config.TOP_LEVEL_SPECIAL)
+
+    for setting, values in (
+        ("SPECIAL_FOLDERS", set(config.SPECIAL_FOLDERS)),
+        ("SKIP_FOLDERS", set(config.SKIP_FOLDERS)),
+    ):
+        for name in sorted(values - top_level_special):
+            review_items.append({
+                "path": str(config.MUSIC_ROOT / name),
+                "reason": "config_guardrail_mismatch",
+                "setting": setting,
+                "detail": "not_in_TOP_LEVEL_SPECIAL",
+            })
+
+    known = (
+        top_level_special
+        | set(config.LETTER_BUCKETS)
+        | {config.SYMBOL_BUCKET}
+        | set(config.GENRE_FOLDERS)
+        | {
+            config.INCOMING_FOLDER.name,
+            config.STAGED_TRACKS_FOLDER.name,
+            config.STAGED_ALBUMS_FOLDER.name,
+        }
+    )
+    if config.MUSIC_ROOT.is_dir():
+        for path in sorted(entry for entry in config.MUSIC_ROOT.iterdir() if entry.is_dir()):
+            if path.name not in known:
+                review_items.append({
+                    "path": str(path),
+                    "reason": "unclassified_top_level_folder",
+                })
+
+    if review_items:
+        for item in review_items:
+            log.warning("Config validation: %s", item)
+    else:
+        log.info("Config validation passed")
+    return review_items
+
+
 def main() -> None:
     global log
 
     parser = argparse.ArgumentParser(
-        description="04_move modes: intake, restructure, promote")
+        description="04_move modes: intake, restructure, promote, Tier 1 repair")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--intake", action="store_true",
                       help="Route INCOMING_FOLDER files to staging folders")
@@ -968,6 +980,10 @@ def main() -> None:
                       help="Promote staged albums to main genre folders")
     mode.add_argument("--to-artist-root", action="store_true",
                       help="Restructure genre-root folders to artist-root layout (dry-run safe)")
+    mode.add_argument("--relocate-compilations", action="store_true",
+                      help="Move explicitly tagged compilations from artist trees to 0compilations")
+    mode.add_argument("--validate-config", action="store_true",
+                      help="Report guardrail mismatches and unclassified top-level folders")
     parser.add_argument("--dry-run", action="store_true", default=True,
                         help="Show changes without writing (default: True)")
     parser.add_argument("--no-dry-run", action="store_true",
@@ -987,6 +1003,13 @@ def main() -> None:
         all_review = run_restructure_mode(dry_run=dry_run, folder=args.folder)
     elif args.to_artist_root:
         all_review = run_to_artist_root_mode(dry_run=dry_run, folder=args.folder)
+    elif args.relocate_compilations:
+        all_review = run_relocate_compilations_mode(
+            dry_run=dry_run,
+            folder=args.folder,
+        )
+    elif args.validate_config:
+        all_review = run_validate_config_mode()
     else:
         all_review = run_promote_mode(dry_run=dry_run, folder=args.folder)
 

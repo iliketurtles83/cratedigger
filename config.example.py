@@ -19,12 +19,17 @@ ROOT_SINGLES_FOLDER   = "0singles"        # root-level holding pen for homeless 
 
 # Top-level special folders — never renamed, never moved, no genre injected from path
 TOP_LEVEL_SPECIAL = {
+    "0bestof",
     "0compilations",
-    "0various",
     "0mixes",
-    "0singles",
     "0random",
-    "#",
+    "0random_good",
+    "0shacks",
+    "0singles",
+    "0various",
+    "0videos",
+    "Playlists",
+    "soundtrack",
 }
 
 # Curated ranking lists (converted to playlists, never tagged as Various Artists)
@@ -36,13 +41,15 @@ CURATED_LIST_FOLDERS = {
 
 LETTER_BUCKETS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-# SKIP_FOLDERS includes letter buckets, the symbol bucket, and top-level special folders.
-# The pipeline descends into letter buckets rather than treating them as genre contexts.
-# TOP_LEVEL_SPECIAL folders are never renamed, never moved, never have genre injected from path.
-SKIP_FOLDERS = TOP_LEVEL_SPECIAL | LETTER_BUCKETS | {SYMBOL_BUCKET}
+# Completely ignored non-audio trees. Letter buckets are deliberately not
+# included because pipeline stages descend into them.
+SKIP_FOLDERS = {"0videos", "Playlists"}
 
 # Special folders — tag only, never move or rename files (kept for backward compatibility)
-SPECIAL_FOLDERS = TOP_LEVEL_SPECIAL
+SPECIAL_FOLDERS = {
+    "0bestof", "0compilations", "0mixes", "0random", "0random_good",
+    "0shacks", "0various",
+}
 
 # Folders where BPM detection makes no sense (speech, ambient, mixes)
 NO_BPM_FOLDERS = {"spoken", "0mixes"}
@@ -72,10 +79,6 @@ SUSPICIOUS_TAG_VALUES = {
     "album title", "album", "unknown album", "title", "new artist",
     "-", "--", "...", "?", "none", "n/a",
 }
-
-# Artists with this many or more albums get their own artist subfolder.
-# Below this they live flat in the genre root.
-ARTIST_FOLDER_THRESHOLD = 3
 
 # ── Phase 4: user preferences ────────────────────────────────────────────────
 # Optional genre remapping applied before folder routing and final genre writes.

@@ -24,10 +24,8 @@ Usage:
 import argparse
 import json
 import logging
-import pickle
 import re
 import shutil
-import sqlite3
 from pathlib import Path
 
 import config
@@ -40,6 +38,7 @@ from lib.context import (
     is_letter_bucket,
 )
 from lib.logger import setup_logger
+from lib.path_updates import record_folder_move, update_downstream_paths
 from lib.parsers import parse_folder_name, sanitise_name, validate_albumartist
 from lib.tags import read_tags
 
@@ -200,95 +199,21 @@ def _record_folder_rename(
     file_renamed_map: dict[Path, Path],
 ) -> None:
     """Record file path transformations before renaming a folder on disk."""
-    if not old_folder.exists():
-        return
-    current_to_orig = {v: k for k, v in file_renamed_map.items()}
-
-    for f in old_folder.rglob("*"):
-        if f.is_file() and f.suffix.lower() in config.AUDIO_EXTENSIONS:
-            try:
-                rel = f.relative_to(old_folder)
-                new_f = new_path / rel
-                orig = current_to_orig.get(f, f)
-                file_renamed_map[orig] = new_f
-            except ValueError:
-                pass
+    record_folder_move(
+        old_folder,
+        new_path,
+        file_renamed_map,
+        audio_extensions=config.AUDIO_EXTENSIONS,
+    )
 
 
 def _update_downstream(file_renamed_map: dict[Path, Path]) -> None:
     """Keep playlists, features.pkl, and beets DB in sync when folders are renamed."""
-    if not file_renamed_map:
-        return
-
-    # 1. Update Playlists
-    playlists_dir = config.MUSIC_ROOT / "Playlists"
-    if playlists_dir.exists():
-        updated_playlists = 0
-        for pl in playlists_dir.glob("*.m3u8"):
-            try:
-                content = pl.read_text(encoding="utf-8")
-                modified = False
-                for old_f, new_f in file_renamed_map.items():
-                    try:
-                        old_rel = str(old_f.relative_to(config.MUSIC_ROOT))
-                        new_rel = str(new_f.relative_to(config.MUSIC_ROOT))
-                        if f"../{old_rel}" in content:
-                            content = content.replace(f"../{old_rel}", f"../{new_rel}")
-                            modified = True
-                        elif old_rel in content:
-                            content = content.replace(old_rel, new_rel)
-                            modified = True
-                    except ValueError:
-                        pass
-                if modified:
-                    pl.write_text(content, encoding="utf-8")
-                    updated_playlists += 1
-            except Exception as exc:
-                log.warning("Could not update playlist %s: %s", pl.name, exc)
-        if updated_playlists:
-            log.info("Updated %d playlist(s) with renamed folder paths", updated_playlists)
-
-    # 2. Update features.pkl
-    features_path = Path("features.pkl")
-    if features_path.exists():
-        try:
-            with open(features_path, "rb") as f:
-                df = pickle.load(f)
-            path_updates = {str(old): str(new) for old, new in file_renamed_map.items()}
-            mask = df["path"].isin(path_updates)
-            if mask.any():
-                df.loc[mask, "path"] = df.loc[mask, "path"].map(path_updates)
-                with open(features_path, "wb") as f:
-                    pickle.dump(df, f)
-                log.info("Updated %d track path(s) in features.pkl", mask.sum())
-        except Exception as exc:
-            log.warning("Could not update features.pkl: %s", exc)
-
-    # 3. Update beets DB
-    db_path = Path.home() / ".config" / "beets" / "library.db"
-    if db_path.exists():
-        try:
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            updated_beets = 0
-            for old_f, new_f in file_renamed_map.items():
-                try:
-                    old_rel = str(old_f.relative_to(config.MUSIC_ROOT)).encode("utf-8")
-                    new_rel = str(new_f.relative_to(config.MUSIC_ROOT)).encode("utf-8")
-                    old_abs = str(old_f).encode("utf-8")
-                    new_abs = str(new_f).encode("utf-8")
-                    c.execute("UPDATE items SET path = ? WHERE path = ?", (new_rel, old_rel))
-                    updated_beets += c.rowcount
-                    c.execute("UPDATE items SET path = ? WHERE path = ?", (new_abs, old_abs))
-                    updated_beets += c.rowcount
-                except Exception:
-                    pass
-            conn.commit()
-            conn.close()
-            if updated_beets:
-                log.info("Updated %d item path(s) in beets library.db", updated_beets)
-        except Exception as exc:
-            log.warning("Could not update beets DB: %s", exc)
+    update_downstream_paths(
+        file_renamed_map,
+        music_root=config.MUSIC_ROOT,
+        logger=log,
+    )
 
 
 def _parse_album_name(name: str) -> dict[str, str | None] | None:

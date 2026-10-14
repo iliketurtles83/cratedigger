@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""intake.py — Orchestrate 01_tag → 02_rename → 04_move --intake for incoming.
+"""intake.py — Tag and organize files arriving in INCOMING_FOLDER.
 
-Processes new files arriving in ``INCOMING_FOLDER``, running the intake pipeline
-automatically.
+The default flow uses beets only for release matching and metadata, then lets
+cratedigger own all filename and path changes:
+
+    beets metadata → 02_rename → 03_folders → 04_move --to-artist-root
+
+The beets import uses a transient catalog so moving the files afterward cannot
+leave stale paths in the persistent beets database.
 
 Usage:
     python intake.py [--dry-run] [--overwrite] [--log FILE]
@@ -12,6 +17,7 @@ import argparse
 import logging
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import config
@@ -103,7 +109,7 @@ def main() -> None:
             log.error("Moving failed — stopping pipeline")
             return
     else:
-        # Modern beets intake pipeline
+        # Beets supplies metadata; cratedigger exclusively owns layout.
         if args.pre_tag:
             tag_args = common_args[:]
             if args.overwrite:
@@ -120,15 +126,48 @@ def main() -> None:
             log.error("Beets config not found at %s. Run with --legacy-move or create config/beets.yaml", beets_cfg)
             return
 
-        beet_cmd = [sys.executable, "-m", "beets", "-c", str(beets_cfg), "import"]
-        if dry_run:
-            beet_cmd.append("--pretend")
-        beet_cmd.append(str(intake_folder))
-        log.info("Running beets intake: %s", " ".join(beet_cmd))
-        result = subprocess.run(beet_cmd)
-        if result.returncode != 0:
-            log.error("Beets import failed with code %d", result.returncode)
-            return
+        with tempfile.TemporaryDirectory(prefix="cratedigger-beets-") as tmp:
+            transient_db = Path(tmp) / "library.db"
+            beet_cmd = [
+                sys.executable,
+                "-m",
+                "beets",
+                "--library",
+                str(transient_db),
+                "-c",
+                str(beets_cfg),
+                "import",
+                "--nomove",
+                "--nocopy",
+            ]
+            if dry_run:
+                beet_cmd.append("--pretend")
+            beet_cmd.append(str(intake_folder))
+            log.info("Running beets metadata import: %s", " ".join(beet_cmd))
+            result = subprocess.run(beet_cmd)
+            if result.returncode != 0:
+                log.error("Beets import failed with code %d", result.returncode)
+                return
+
+        for script, step_args in (
+            ("02_rename.py", common_args),
+            ("03_folders.py", common_args),
+            (
+                "04_move.py",
+                [
+                    "--to-artist-root",
+                    "--folder",
+                    incoming_folder_name,
+                    "--log",
+                    args.log,
+                    *(["--no-dry-run"] if not dry_run else []),
+                ],
+            ),
+        ):
+            rc = run_step(script, step_args)
+            if rc != 0:
+                log.error("%s failed — stopping pipeline", script)
+                return
 
     mode = "DRY-RUN" if dry_run else "LIVE"
     log.info("Intake complete (%s) — processed %d files", mode, len(audio_files))
