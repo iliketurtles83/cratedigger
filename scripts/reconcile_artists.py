@@ -128,7 +128,10 @@ def reconcile_artists(*, dry_run: bool = True, fix: bool = False, min_tracks: in
                     (old_spelling, old_spelling),
                 ).fetchall()
                 for p_bytes, item_art, item_alb_art in item_rows:
-                    p = Path(p_bytes.decode("utf-8", "replace"))
+                    path_str = p_bytes.decode("utf-8", "replace") if isinstance(p_bytes, bytes) else str(p_bytes)
+                    p = Path(path_str)
+                    if not p.is_absolute():
+                        p = config.MUSIC_ROOT / p
                     if p.exists():
                         tags_to_update = {}
                         if item_art == old_spelling:

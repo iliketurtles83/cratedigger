@@ -485,7 +485,7 @@ def main() -> None:
     parser.add_argument("--backfill-hashes", action="store_true", help="Backfill audio_hash in features.pkl")
     parser.add_argument("--backfill-embeddings", action="store_true", help="Extract pretrained embeddings for features.pkl")
     parser.add_argument("--max-embeddings", type=int, default=None, help="Max tracks to compute embeddings for in this run")
-    parser.add_argument("--evaluate", action="store_true", help="Run 20% holdout evaluation benchmark")
+    parser.add_argument("--evaluate", action="store_true", help="Run 20%% holdout evaluation benchmark")
     parser.add_argument("--tune-weights", action="store_true", help="Search for optimal hybrid vector weights")
     parser.add_argument("--export", action="store_true", help="Export features for phone/server")
     parser.add_argument("--output", type=Path, default=Path("features_export.json.gz"), help="Export output path")
