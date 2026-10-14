@@ -124,6 +124,47 @@ def _mb_call_with_retry(fn, *args, rate_limit_seconds: float = 1.1, **kwargs):
             time.sleep(backoff)
 
 
+def artist_release_groups(
+    artist_id: str,
+    *,
+    rate_limit_seconds: float = 1.1,
+) -> list[dict[str, str]]:
+    """Return every MusicBrainz release-group title and first-release date."""
+    if not _HAS_MB or musicbrainzngs is None or not artist_id:
+        return []
+
+    groups: list[dict[str, str]] = []
+    offset = 0
+    while True:
+        response = _mb_call_with_retry(
+            musicbrainzngs.browse_release_groups,
+            artist=artist_id,
+            limit=100,
+            offset=offset,
+            rate_limit_seconds=rate_limit_seconds,
+        )
+        if not response:
+            return []
+        batch = response.get("release-group-list", [])
+        if not isinstance(batch, list):
+            return []
+        for group in batch:
+            if not isinstance(group, dict):
+                continue
+            title = group.get("title")
+            if title:
+                groups.append({
+                    "title": str(title),
+                    "first_release_date": str(
+                        group.get("first-release-date") or ""
+                    ),
+                })
+        total = int(response.get("release-group-count", len(groups)))
+        if not batch or offset + len(batch) >= total:
+            return groups
+        offset += len(batch)
+
+
 def _release_sort_key(release: dict[str, object]) -> tuple[str, str, str]:
     """Stable key for deterministic release fallback selection."""
     date = str(release.get("date") or "")

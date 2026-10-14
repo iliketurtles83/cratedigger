@@ -4,14 +4,16 @@
 Groups folders with equivalent artist spellings, gathers identity evidence
 from tags and the beets database, and classifies each group:
 
-- confirmed: every folder has the same single MusicBrainz album-artist ID
+- confirmed: every folder has the same album-artist ID, complete matching
+  track-artist IDs, or exact album-title coverage in a cached MB artist catalog
 - partial: one shared ID exists, but at least one folder has no ID evidence
 - no_id: no folder has MusicBrainz identity evidence
 - conflict: multiple MusicBrainz identities occur in the group
 
 Only confirmed, collision-free groups are eligible for automatic repair.
 Dry-run is always the default; both ``--fix`` and ``--no-dry-run`` are required
-to write tags or move folders.
+to write tags or move folders. Online evidence is fetched only during dry-runs
+and cached so a reviewed live run cannot acquire new candidates.
 
 Usage:
     python scripts/reconcile_artists.py
@@ -23,11 +25,14 @@ import argparse
 from collections import Counter, defaultdict
 from contextlib import closing
 from dataclasses import dataclass, field
+import json
 import logging
 from pathlib import Path
 import shutil
 import sqlite3
 import sys
+import re
+import unicodedata
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -35,6 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import config
 from lib.context import artist_letter_bucket
+from lib.mb import artist_release_groups
 from lib.parsers import artist_comparison_key, sanitise_name, title_case_clean
 from lib.path_updates import record_folder_move, update_downstream_paths
 from lib.tags import read_tags, write_tags
@@ -49,6 +55,11 @@ class ArtistFolderEvidence:
     track_count: int = 0
     albumartists: Counter[str] = field(default_factory=Counter)
     mb_albumartist_ids: set[str] = field(default_factory=set)
+    mb_artist_ids: set[str] = field(default_factory=set)
+    mb_artist_id_tracks: int = 0
+    album_titles_by_unit: dict[str, set[str]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
 
 
 @dataclass
@@ -72,6 +83,19 @@ def get_beets_db_path() -> Path:
             config,
             "BEETS_DB_PATH",
             Path.home() / ".config" / "beets" / "library.db",
+        )
+    )
+
+
+def get_release_evidence_cache_path() -> Path:
+    return Path(
+        getattr(
+            config,
+            "MB_RELEASE_GROUP_CACHE",
+            Path.home()
+            / ".cache"
+            / "cratedigger"
+            / "mb-artist-release-groups.json",
         )
     )
 
@@ -123,6 +147,15 @@ def collect_folder_evidence(folder: Path) -> ArtistFolderEvidence:
         mb_id = (tags.get("mb_albumartistid") or "").strip()
         if mb_id:
             evidence.mb_albumartist_ids.add(mb_id)
+        artist_id = (tags.get("mb_artistid") or "").strip()
+        if artist_id:
+            evidence.mb_artist_ids.add(artist_id)
+            evidence.mb_artist_id_tracks += 1
+        album = (tags.get("album") or "").strip()
+        if album:
+            relative = path.relative_to(folder)
+            unit = relative.parts[0] if len(relative.parts) > 1 else "."
+            evidence.album_titles_by_unit[unit].add(album)
     return evidence
 
 
@@ -151,6 +184,8 @@ def _beets_spelling_counts(
 
 def _classify_identity(
     folders: list[ArtistFolderEvidence],
+    *,
+    release_titles: set[str] | None = None,
 ) -> tuple[str, str, str | None]:
     per_folder_ids = [folder.mb_albumartist_ids for folder in folders]
     all_ids = set().union(*per_folder_ids)
@@ -162,7 +197,45 @@ def _classify_identity(
     mb_id = next(iter(all_ids))
     if all(ids == {mb_id} for ids in per_folder_ids):
         return "confirmed", "same MusicBrainz album-artist ID in every folder", mb_id
+    if all(
+        ids == {mb_id}
+        or (
+            not ids
+            and folder.track_count > 0
+            and folder.mb_artist_id_tracks == folder.track_count
+            and folder.mb_artist_ids == {mb_id}
+        )
+        for folder, ids in zip(folders, per_folder_ids)
+    ):
+        return (
+            "confirmed",
+            "album-artist ID corroborated by complete track artist-ID coverage",
+            mb_id,
+        )
+    if release_titles is not None and all(
+        ids == {mb_id}
+        or (
+            not ids
+            and bool(folder.album_titles_by_unit)
+            and all(
+                len(titles) == 1
+                and _normalise_release_title(next(iter(titles))) in release_titles
+                for titles in folder.album_titles_by_unit.values()
+            )
+        )
+        for folder, ids in zip(folders, per_folder_ids)
+    ):
+        return (
+            "confirmed",
+            "every unproven album matches the known artist's MusicBrainz catalog",
+            mb_id,
+        )
     return "partial", "shared MusicBrainz ID with incomplete folder coverage", mb_id
+
+
+def _normalise_release_title(title: str) -> str:
+    value = unicodedata.normalize("NFKC", title).casefold()
+    return " ".join(re.sub(r"[^\w]+", " ", value).split())
 
 
 def _canonical_name(
@@ -215,12 +288,29 @@ def _find_collisions(
     return collisions
 
 
-def build_merge_plans(root: Path, database: Path) -> list[ArtistMergePlan]:
+def build_merge_plans(
+    root: Path,
+    database: Path,
+    *,
+    release_catalogs: dict[str, set[str]] | None = None,
+) -> list[ArtistMergePlan]:
     """Build evidence-backed merge plans for every duplicate folder group."""
     plans: list[ArtistMergePlan] = []
     for key, paths in sorted(find_artist_folder_groups(root).items()):
         folders = [collect_folder_evidence(path) for path in paths]
         confidence, reason, mb_id = _classify_identity(folders)
+        if (
+            release_catalogs is not None
+            and confidence == "partial"
+            and mb_id
+            and "/" not in mb_id
+        ):
+            catalog = release_catalogs.get(mb_id, set())
+            if catalog:
+                confidence, reason, mb_id = _classify_identity(
+                    folders,
+                    release_titles=catalog,
+                )
         canonical = _canonical_name(folders, database=database, mb_id=mb_id)
         target = (
             root
@@ -239,6 +329,70 @@ def build_merge_plans(root: Path, database: Path) -> list[ArtistMergePlan]:
             )
         )
     return plans
+
+
+def _load_release_catalogs(cache_path: Path) -> dict[str, set[str]]:
+    if not cache_path.exists():
+        return {}
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        log.warning("Could not load MusicBrainz release evidence cache: %s", exc)
+        return {}
+    if not isinstance(payload, dict):
+        log.warning("Ignoring invalid MusicBrainz release evidence cache")
+        return {}
+    return {
+        str(artist_id): {str(title) for title in titles}
+        for artist_id, titles in payload.items()
+        if isinstance(titles, list)
+    }
+
+
+def _save_release_catalogs(
+    cache_path: Path,
+    catalogs: dict[str, set[str]],
+) -> None:
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(
+                {
+                    artist_id: sorted(titles)
+                    for artist_id, titles in sorted(catalogs.items())
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning("Could not save MusicBrainz release evidence cache: %s", exc)
+
+
+def _refresh_release_catalogs(
+    plans: list[ArtistMergePlan],
+    catalogs: dict[str, set[str]],
+) -> None:
+    artist_ids = sorted({
+        mb_id
+        for plan in plans
+        if plan.confidence == "partial"
+        for folder in plan.folders
+        for mb_id in folder.mb_albumartist_ids
+        if mb_id and "/" not in mb_id
+    })
+    for artist_id in artist_ids:
+        if artist_id in catalogs:
+            continue
+        groups = artist_release_groups(artist_id)
+        titles = {
+            _normalise_release_title(group["title"])
+            for group in groups
+            if group.get("title")
+        }
+        if titles:
+            catalogs[artist_id] = titles
 
 
 def _update_beets_artist_names(
@@ -367,10 +521,29 @@ def reconcile_artists(
     dry_run: bool = True,
     fix: bool = False,
     min_tracks: int = 1,
+    online_release_evidence: bool = False,
 ) -> list[ArtistMergePlan]:
     """Audit duplicate artist folders and optionally apply confirmed merges."""
     database = get_beets_db_path()
-    plans = build_merge_plans(config.MUSIC_ROOT, database)
+    release_catalogs: dict[str, set[str]] | None = None
+    if online_release_evidence:
+        cache_path = get_release_evidence_cache_path()
+        release_catalogs = _load_release_catalogs(cache_path)
+        if dry_run:
+            offline_plans = build_merge_plans(config.MUSIC_ROOT, database)
+            _refresh_release_catalogs(offline_plans, release_catalogs)
+            _save_release_catalogs(cache_path, release_catalogs)
+        elif not release_catalogs:
+            log.error(
+                "Online release evidence cache is empty; run a dry-run with "
+                "--online-release-evidence first"
+            )
+            return []
+    plans = build_merge_plans(
+        config.MUSIC_ROOT,
+        database,
+        release_catalogs=release_catalogs,
+    )
     counts = Counter(plan.confidence for plan in plans)
     log.info(
         "Found %d duplicate artist groups: %d confirmed, %d partial, "
@@ -444,6 +617,11 @@ def main() -> None:
         default=1,
         help="Minimum total tracks in a group to report",
     )
+    parser.add_argument(
+        "--online-release-evidence",
+        action="store_true",
+        help="Use cached MB artist catalogs; dry-runs fetch missing catalogs",
+    )
     args = parser.parse_args()
     if args.no_dry_run and not args.fix:
         parser.error("--no-dry-run requires --fix")
@@ -451,6 +629,7 @@ def main() -> None:
         dry_run=not args.no_dry_run,
         fix=args.fix,
         min_tracks=args.min_tracks,
+        online_release_evidence=args.online_release_evidence,
     )
 
 

@@ -100,6 +100,85 @@ class ReconcileArtistsTests(unittest.TestCase):
         self.assertEqual(plan.confidence, "partial")
         self.assertFalse(plan.eligible)
 
+    def test_plan_accepts_complete_matching_track_artist_ids(self) -> None:
+        first = self._track("B/Bloodhound Gang/Bloodhound Gang - First/01.mp3")
+        second = self._track("B/The Bloodhound Gang/The Bloodhound Gang - Second/01.mp3")
+
+        def tags(path: Path) -> dict[str, str]:
+            if path == first:
+                return {
+                    "albumartist": "Bloodhound Gang",
+                    "mb_albumartistid": "mb-bloodhound",
+                    "mb_artistid": "mb-bloodhound",
+                }
+            return {
+                "albumartist": "The Bloodhound Gang",
+                "mb_albumartistid": "",
+                "mb_artistid": "mb-bloodhound",
+            }
+
+        with patch("scripts.reconcile_artists.read_tags", side_effect=tags):
+            plan = build_merge_plans(self.root, self.database)[0]
+
+        self.assertEqual(plan.confidence, "confirmed")
+        self.assertIn("complete track artist-ID coverage", plan.reason)
+        self.assertTrue(plan.eligible)
+
+    def test_plan_accepts_every_album_in_online_artist_catalog(self) -> None:
+        known = self._track("A/Arcade Fire/Arcade Fire - Known/01.mp3")
+        unknown = self._track("A/The Arcade Fire/The Arcade Fire - Funeral/01.mp3")
+
+        def tags(path: Path) -> dict[str, str]:
+            if path == known:
+                return {
+                    "albumartist": "Arcade Fire",
+                    "album": "Known",
+                    "mb_albumartistid": "mb-arcade",
+                    "mb_artistid": "mb-arcade",
+                }
+            return {
+                "albumartist": "The Arcade Fire",
+                "album": "Funeral",
+                "mb_albumartistid": "",
+                "mb_artistid": "",
+            }
+
+        with patch("scripts.reconcile_artists.read_tags", side_effect=tags):
+            plan = build_merge_plans(
+                self.root,
+                self.database,
+                release_catalogs={"mb-arcade": {"funeral"}},
+            )[0]
+
+        self.assertEqual(plan.confidence, "confirmed")
+        self.assertIn("MusicBrainz catalog", plan.reason)
+
+    def test_online_catalog_requires_every_album_to_match(self) -> None:
+        known = self._track("A/Arcade Fire/Arcade Fire - Known/01.mp3")
+        unknown = self._track("A/The Arcade Fire/The Arcade Fire - Other/01.mp3")
+
+        def tags(path: Path) -> dict[str, str]:
+            if path == known:
+                return {
+                    "albumartist": "Arcade Fire",
+                    "album": "Known",
+                    "mb_albumartistid": "mb-arcade",
+                }
+            return {
+                "albumartist": "The Arcade Fire",
+                "album": "Not Their Album",
+                "mb_albumartistid": "",
+            }
+
+        with patch("scripts.reconcile_artists.read_tags", side_effect=tags):
+            plan = build_merge_plans(
+                self.root,
+                self.database,
+                release_catalogs={"mb-arcade": {"funeral"}},
+            )[0]
+
+        self.assertEqual(plan.confidence, "partial")
+
     def test_plan_blocks_conflicting_ids(self) -> None:
         self._track("M/M.I.A./M.I.A. - First/01.mp3")
         self._track("M/MIA/MIA - Second/01.mp3")

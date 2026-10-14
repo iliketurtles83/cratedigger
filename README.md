@@ -255,13 +255,24 @@ python3 scripts/reconcile_artists.py --fix
 
 # Apply the confirmed subset
 python3 scripts/reconcile_artists.py --fix --no-dry-run
+
+# Fetch missing artist catalogs during a dry-run and cache the reviewed set
+python3 scripts/reconcile_artists.py --online-release-evidence --fix
+
+# Apply exactly the cache-backed, collision-free set (no live API fetches)
+python3 scripts/reconcile_artists.py \
+  --online-release-evidence --fix --no-dry-run
 ```
 
 Artist reconciliation is filesystem-first because the beets database may not
 index the entire library. Automatic merges require the same single
-MusicBrainz album-artist ID in every source folder. Partial, missing, or
-conflicting identity evidence and any destination collision remain report-only.
-Only `albumartist` is normalized; per-track artist credits are preserved.
+MusicBrainz album-artist ID in every source folder, complete matching
+track-artist ID coverage, or an exact match for every unproven album in the
+known artist's MusicBrainz release-group catalog. Catalog evidence is fetched
+only during dry-runs and cached; live mode never discovers new candidates.
+Partial, missing, or conflicting evidence and any destination collision remain
+report-only. Only `albumartist` is normalized; per-track artist credits are
+preserved.
 
 **Legacy intake staging flow:**
 ```bash

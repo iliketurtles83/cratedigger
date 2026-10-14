@@ -65,6 +65,37 @@ class MbPhase3Tests(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    def test_artist_release_groups_paginates(self) -> None:
+        first = {
+            "release-group-list": [
+                {"title": "First", "first-release-date": "2001"},
+            ],
+            "release-group-count": 2,
+        }
+        second = {
+            "release-group-list": [
+                {"title": "Second", "first-release-date": "2002"},
+            ],
+            "release-group-count": 2,
+        }
+        fake_client = types.SimpleNamespace(browse_release_groups=object())
+
+        with (
+            patch.object(mb, "_HAS_MB", True),
+            patch.object(mb, "musicbrainzngs", fake_client),
+            patch.object(mb, "_mb_call_with_retry", side_effect=[first, second]) as call,
+        ):
+            groups = mb.artist_release_groups("artist-id")
+
+        self.assertEqual(
+            groups,
+            [
+                {"title": "First", "first_release_date": "2001"},
+                {"title": "Second", "first_release_date": "2002"},
+            ],
+        )
+        self.assertEqual(call.call_count, 2)
+
     def test_mb_recording_search_uses_tag_votes_as_tiebreaker(self) -> None:
         def _search_recordings(*args, **kwargs):
             return {
