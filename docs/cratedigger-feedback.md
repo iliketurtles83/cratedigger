@@ -33,7 +33,7 @@ Strawberry wrote ratings into the files: every sampled file in `0faves/` and `0r
 
 - When cratedigger rewrites tags, it **must preserve** `POPM`, `TXXX:FMPS_Rating` and `TXXX:FMPS_Playcount` (MP3), and `FMPS_RATING`/`RATING` (Vorbis/FLAC). A tag writer that rebuilds the tag from scratch loses them.
 - A rating is the right place for "good" and "favourite". Once ratings are set, the `0random_good` and `0faves` folders aren't needed.
-- The player doesn't read ratings yet (Beets can't). Reading them during the registry scan and sending them to the phone is planned on the player side.
+- **The player reads ratings since 2026-10-13** (its registry scan, not Beets): `FMPS_Rating` first, then the highest `POPM`, then `RATING`; a 0 counts as unrated. In the library's files today, 0faves and 0random_good read as 5 stars. The phone shows them, filters and sorts by them, and has a "Top rated" mix.
 
 ## 4. Artist names
 
@@ -89,7 +89,13 @@ The player groups albums by album artist + album, so this one album shows as 11 
 - **An empty album artist is fine.** The player falls back to `artist`. A wrong one is worse than none.
 - **Fix the tag, then derive the path.** After the fix, Kylesa should move to `K/Kylesa/2010 - Spiral Shadow/` (or wherever section 7's layout puts it).
 
-## 9. Tagging standard
+## 9. Found while using the player (2026-10-13)
+
+- **Placeholder tags from a CD ripper.** 137 tracks have the album `Album Title`, and 83 of those have the artist `New Artist`. Those are the defaults some rippers fill in when they can't look the CD up. Vangelis' *A Vihar* bootleg (`V/Vangelis/A Vihar   [Bootleg]/`) is one: it shows as an album called "Album Title". Other placeholder albums: `Album` (46), `Unknown` (19), `Untitled` (13), `title` (10), `unknown` (9), `Unknown Album` (1). 542 titles are placeholders like `Track 01`, `Audio Track …` or `Unknown …`, and 63 tracks have the artist `New Artist`, `Unknown Artist` or `Artist`. Treat all of these as empty: look the release up, or leave the field empty (section 6). Never keep a placeholder, because the player groups by it.
+- **The Pitchfork 500 shows as an album on each artist's page.** Its 500 tracks have no album artist (412) or a mix of values (81 different ones), so the player files each track under its own artist. The Talking Heads, The Smiths, The Cure and The Clash each get a "The Pitchfork 500" album. It's a list, not a release: tag each song with its real release and turn the folder into a playlist (section 1).
+- **Cover art under other names.** *More Songs About Buildings and Food* has its cover as `0413. Talking Heads - More Songs About Buildings And Food.jpg`, so the player finds no art: it only looks for embedded art, `cover.jpg` and `folder.jpg`. Rename such files to `cover.jpg`, or embed them (picture type 3), when there's one image in the folder.
+
+## 10. Tagging standard
 
 There is no single formal standard. In practice the reference is the **MusicBrainz Picard tag mapping** (https://picard-docs.musicbrainz.org/en/appendices/tag_mapping.html). Beets (through its `mediafile` library), foobar2000, Strawberry, Navidrome and Android's MediaStore read the same frames. The table lists what the player relies on, with the frames `mediafile` reads (checked against beets 2.14.1 in this repo's venv).
 
@@ -140,4 +146,6 @@ Cratedigger works on a local copy that is then synced to the server. The server 
 - **Ogg, Opus and WMA files (about 1%) are hashed whole, tags included.** If a file is retagged *and* moved between two syncs, the server sees a new file and gives it a new track ID, which drops it from phone playlists and favourites. Doing the two steps in separate local passes doesn't help if both land in one sync. For these formats: retag, sync, refresh, then move, sync, refresh. MP3, FLAC, M4A and WAV don't have this problem.
 - **Propagate deletions.** A move is a delete plus a new file on the server side. A sync that doesn't delete (rsync without `--delete`, for example) leaves the old copy, and the library ends up with duplicates. Plain rsync also re-sends renamed files in full; `--fuzzy` or a rename-aware tool avoids that.
 - **Let the sync finish before refreshing.** A refresh mid-sync (the nightly timer can start one) sees moved files as deleted. The next refresh links them back to their old track IDs by audio hash, so nothing is lost, but phones may briefly see them as gone. Avoid syncing across the nightly refresh time.
-- The player doesn't read `.m3u8` playlists yet; serving `Playlists/` to the app is a small player feature to add when the lists are converted.
+- **The player reads `Playlists/` since 2026-10-13:** every `.m3u8`/`.m3u` under `MUSIC_ROOT/Playlists/` (subfolders too), paths relative to the playlist file, in list order. Forward slashes, please; backslashes and a different letter case are tolerated. The file name (without extension) is the playlist's name and id, so pick names you'll keep. Write the playlist in the **same sync** as the moves it describes, so the player never sees the folder gone without its list.
+
+**Order of work for 0faves, 0random_good and the list folders (sections 1–2):** both replacements now work in the player, so the moves are safe. Keep the ratings (section 3) when retagging, write the playlist files, then move. A phone that keeps one of these folders on the phone sees its files as "not kept anymore" after the move and asks before deleting them; keeping the new playlist instead is one tap.

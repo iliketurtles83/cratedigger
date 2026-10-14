@@ -8,6 +8,8 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Dry-run intake pipeline: `python intake.py --dry-run`
 - Beets import trial: `.venv/bin/python -m beets -c config/beets.yaml import --pretend /path/to/album`
 - Audit & repair tags: `python scripts/audit_repair.py --dry-run --folder NAME [--fix]`
+- Normalize cover art: `python scripts/normalize_covers.py --dry-run [--folder NAME]`
+- Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
 - Review flagged items: `python 05_review.py`
 - Recommender evaluation & export: `python 07_recommend.py --evaluate` (export: `python 07_recommend.py --export`)
