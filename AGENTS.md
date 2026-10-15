@@ -11,6 +11,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Repair folder-parse damage: `python scripts/repair_folder_parse.py --tags --structure --dry-run`
 - Audit duplicate artist folders: `python scripts/reconcile_artists.py` (recording evidence for compilation/loose tracks: `--online-recording-evidence --fix`; collision evidence: `--online-release-evidence --collision-report`; apply only reviewed cache-backed sets by adding `--no-dry-run`)
 - Repair misidentified tracks: `python scripts/repair_track_identity.py` (fingerprint uncached candidates in a dry-run with `--online-fingerprints`; apply reviewed cache-backed repairs with `--fix --relocate --no-dry-run [--artist NAME]`, then re-run `02_rename.py` on the touched folders)
+- Audit & repair Windows paths: `python scripts/repair_windows_paths.py` (apply reviewed case-insensitive merges and invalid-name normalization with `--fix --no-dry-run`)
 - Normalize cover art: `python scripts/normalize_covers.py --dry-run [--folder NAME]`
 - Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
@@ -35,6 +36,7 @@ Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata m
 ## Architecture Notes
 
 - Folder naming contract: Tier 1 artist-root with letter bucketing (`A-Z`, `#` for symbols)
+- Windows path contract: no reserved device names, control characters, `< > : " / \ | ? *`, trailing spaces/dots, or case-insensitive sibling collisions
 - Special folders: `0compilations`, `0various`, `0mixes`, `0singles`, `0random`, `#`
 - Letter bucketing: articles stripped for bucketing only (`The Cure` → `C/The Cure/`)
 - Beets config: `config/beets.yaml` (metadata matching only; no path templates or moves). The persistent Beets DB at `/home/jack/.config/beets/library.db` is retained as legacy state and is not consumed or synchronized by the active pipeline. Always invoke beets with `-c config/beets.yaml`.

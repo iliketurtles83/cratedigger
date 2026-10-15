@@ -75,6 +75,10 @@ _FOLDER_PATTERN = re.compile(
 
 # Characters illegal in filenames on Linux/macOS/Windows
 _ILLEGAL_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED_NAME = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$",
+    re.IGNORECASE,
+)
 
 
 # Common ripper annotations to strip
@@ -315,7 +319,7 @@ def title_case_clean(text: str | None) -> str | None:
 
 
 def sanitise_name(value: str) -> str:
-    """Remove ripper annotations, illegal filename/folder characters, and clean formatting."""
+    """Return a filename/folder component accepted by Windows and POSIX."""
     # Unescape backslashes before quotes (e.g. B-52\'s → B-52's)
     value = re.sub(r'\\([\'"])', r'\1', value)
     # Strip ripper damage/incomplete markers
@@ -330,7 +334,10 @@ def sanitise_name(value: str) -> str:
     value = re.sub(r'(?:^|\s)_(.+?)_(?:\s|$)', r' \1 ', value)
     # Collapse multiple spaces
     value = re.sub(r" {2,}", " ", value)
-    return value.strip()
+    value = value.strip(" .")
+    if _WINDOWS_RESERVED_NAME.fullmatch(value):
+        value = f"_{value}"
+    return value or "_"
 
 
 _sanitise = sanitise_name  # kept for internal callers

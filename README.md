@@ -234,6 +234,12 @@ configured, and `intake.py` gives beets a transient catalog. The historical
 persistent Beets database is retained for now but is not part of the active
 pipeline and is not synchronized after cratedigger moves.
 
+All generated path components are Windows-safe: reserved device names,
+control characters, `< > : " / \ | ? *`, and trailing spaces/dots are removed
+or replaced. Destination checks and the repair utility also treat names
+case-insensitively, since Windows cannot store sibling paths that differ only
+by capitalization.
+
 `scripts/sync_beets_db.py` is legacy-only and should not be used as a routine
 post-move step. Player refresh is also not run from this machine: after
 `scripts/server_sync.sh` completes, refresh the player on the remote host
@@ -249,6 +255,15 @@ python3 04_move.py --relocate-compilations
 
 # Apply only after reviewing the dry-run
 python3 04_move.py --relocate-compilations --no-dry-run
+```
+
+**Audit and repair Windows path compatibility:**
+```bash
+# Report invalid names and case-insensitive collisions
+python3 scripts/repair_windows_paths.py
+
+# Apply the reviewed normalization and merges
+python3 scripts/repair_windows_paths.py --fix --no-dry-run
 ```
 
 Full Various Artists releases move to `0compilations`. Loose tracks found
