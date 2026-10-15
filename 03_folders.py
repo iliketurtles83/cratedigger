@@ -39,7 +39,12 @@ from lib.context import (
 )
 from lib.logger import setup_logger
 from lib.path_updates import record_folder_move, update_downstream_paths
-from lib.parsers import parse_folder_name, sanitise_name, validate_albumartist
+from lib.parsers import (
+    parse_folder_name,
+    sanitise_component,
+    sanitise_name,
+    validate_albumartist,
+)
 from lib.tags import read_tags
 
 log: logging.Logger = logging.getLogger("03_folders")
@@ -246,16 +251,16 @@ def _build_folder_name(artist: str, album: str, year: str | None) -> str:
     artist = sanitise_name(artist)
     album = sanitise_name(album)
     if year:
-        return f"{artist} - {album} ({year})"
-    return f"{artist} - {album}"
+        return sanitise_component(f"{artist} - {album} ({year})")
+    return sanitise_component(f"{artist} - {album}")
 
 
 def _build_compilation_folder_name(album: str, year: str | None) -> str:
     """Build folder name for soundtracks/compilations: Album (Year)."""
     album = sanitise_name(album)
     if year:
-        return f"{album} ({year})"
-    return album
+        return sanitise_component(f"{album} ({year})")
+    return sanitise_component(album)
 
 
 def _normalise_folder(
@@ -598,7 +603,7 @@ def _artist_flat_target(
         # current depth rather than inventing an artist folder.
         return folder.parent / proposed_name
 
-    artist_dir = sanitise_name(artist)
+    artist_dir = sanitise_component(sanitise_name(artist))
     bucket = artist_letter_bucket(artist_dir)
     return config.MUSIC_ROOT / bucket / artist_dir / proposed_name
 
@@ -723,7 +728,7 @@ def _normalise_artist_folder(
 ) -> None:
     """Fix artist folder name (The-suffix) and process album children."""
     name = folder.name
-    fixed = _fix_the(sanitise_name(name))
+    fixed = sanitise_component(_fix_the(sanitise_name(name)))
     current = folder
 
     if fixed != name:

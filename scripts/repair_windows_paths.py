@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import config
 from lib.audiohash import audio_hash
-from lib.parsers import sanitise_name
+from lib.parsers import sanitise_component
 from lib.path_updates import record_folder_move, update_downstream_paths
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -115,7 +115,7 @@ def _merge_tree(
     dry_run: bool,
 ) -> None:
     for child in sorted(source.iterdir()):
-        target = destination / sanitise_name(child.name)
+        target = destination / sanitise_component(child.name)
         existing = _casefold_child(destination, target.name) if destination.exists() else None
         if existing is not None:
             target = existing
@@ -156,7 +156,7 @@ def _normalize_component_names(
 ) -> None:
     """Normalize invalid child names, merging if the target already exists."""
     for child in sorted(list(folder.iterdir()), key=lambda path: path.name):
-        safe_name = sanitise_name(child.name)
+        safe_name = sanitise_component(child.name)
         if safe_name == child.name:
             continue
         destination = child.with_name(safe_name)

@@ -33,7 +33,7 @@ from lib.context import (
 )
 from lib.genres import normalise_genre, parent_genre
 from lib.logger import setup_logger
-from lib.parsers import artist_comparison_key, sanitise_name
+from lib.parsers import artist_comparison_key, sanitise_component, sanitise_name
 from lib.path_updates import record_folder_move, update_downstream_paths
 from lib.preferences import remap_genre
 from lib.tags import read_tags, write_tags
@@ -854,7 +854,7 @@ def _explicit_compilation_name(folder: Path) -> str | None:
         name = sanitise_name(next(iter(albums)))
         if len(years) == 1:
             name = f"{name} ({next(iter(years))})"
-        return name
+        return sanitise_component(name)
 
     prefix = folder.name.split(" - ", 1)
     return prefix[1] if len(prefix) == 2 and prefix[0].casefold() in _COMPILATION_ALBUMARTISTS else folder.name
@@ -881,7 +881,7 @@ def _canonical_artist_folder_name(artist: str) -> tuple[str | None, str | None]:
     ] if bucket.is_dir() else []
     if len(matches) > 1:
         return None, "ambiguous_artist_folder"
-    return (matches[0] if matches else sanitise_name(artist)), None
+    return (matches[0] if matches else sanitise_component(sanitise_name(artist))), None
 
 
 def _relocate_various_artist_singles(

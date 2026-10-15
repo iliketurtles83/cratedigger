@@ -41,7 +41,12 @@ import config
 from lib.audiohash import audio_hash
 from lib.context import artist_letter_bucket, is_letter_bucket
 from lib.mb import fingerprint_lookup
-from lib.parsers import artist_comparison_key, normalise_title, sanitise_name
+from lib.parsers import (
+    artist_comparison_key,
+    normalise_title,
+    sanitise_component,
+    sanitise_name,
+)
 from lib.path_updates import record_folder_move, update_downstream_paths
 from lib.tags import read_tags, write_tags
 
@@ -394,7 +399,7 @@ def relocate_album(
     artist_root = (
         config.MUSIC_ROOT
         / artist_letter_bucket(new_artist)
-        / sanitise_name(new_artist)
+        / sanitise_component(sanitise_name(new_artist))
     )
     destination = artist_root / _relocated_album_name(source, old_artist, new_artist)
     if dry_run:

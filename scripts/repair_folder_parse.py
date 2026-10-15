@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 from lib.context import artist_letter_bucket, classify_folder, is_letter_bucket
 from lib.logger import setup_logger
-from lib.parsers import parse_folder_name, sanitise_name
+from lib.parsers import parse_folder_name, sanitise_component, sanitise_name
 from lib.tags import read_tags, write_tags
 
 log: logging.Logger = logging.getLogger("repair_folder_parse")
@@ -199,7 +199,7 @@ def repair_structure(root: Path, *, dry_run: bool, folder: str | None) -> int:
             log.warning("No artist resolvable for %s — skipping", stranded)
             continue
 
-        artist_dir = sanitise_name(artist)
+        artist_dir = sanitise_component(sanitise_name(artist))
         destination = (
             root / artist_letter_bucket(artist_dir) / artist_dir / stranded.name
         )

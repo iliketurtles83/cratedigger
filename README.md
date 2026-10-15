@@ -235,15 +235,21 @@ persistent Beets database is retained for now but is not part of the active
 pipeline and is not synchronized after cratedigger moves.
 
 All generated path components are Windows-safe: reserved device names,
-control characters, `< > : " / \ | ? *`, and trailing spaces/dots are removed
-or replaced. Destination checks and the repair utility also treat names
-case-insensitively, since Windows cannot store sibling paths that differ only
-by capitalization.
+control characters, `< > : " / \ | ? *`, leading dots, and trailing
+spaces/dots are removed or replaced. Destination checks and the repair utility
+also treat names case-insensitively, since Windows cannot store sibling paths
+that differ only by capitalization.
 
 `scripts/sync_beets_db.py` is legacy-only and should not be used as a routine
 post-move step. Player refresh is also not run from this machine: after
 `scripts/server_sync.sh` completes, refresh the player on the remote host
 according to that host's deployment procedure.
+
+`scripts/server_sync.sh` removes obsolete destination paths before transfer so
+legacy capitalization variants cannot alias canonical paths on a
+case-insensitive filesystem. Hidden files, editor backups, and VDJ stem files
+are perishable exclusions: they are not copied and cannot keep a stale
+directory alive. The excluded `0videos` tree remains protected from deletion.
 
 **Validate and repair Tier 1 layout:**
 ```bash

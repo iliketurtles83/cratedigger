@@ -50,6 +50,7 @@ from lib.mb import artist_recording_titles, artist_release_groups
 from lib.parsers import (
     artist_comparison_key,
     normalise_title,
+    sanitise_component,
     sanitise_name,
     title_case_clean,
 )
@@ -515,7 +516,7 @@ def build_merge_plans(
         target = (
             root
             / artist_letter_bucket(canonical)
-            / sanitise_name(canonical)
+            / sanitise_component(sanitise_name(canonical))
         )
         collisions = _find_collisions(folders, target, canonical)
         plans.append(

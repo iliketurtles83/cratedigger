@@ -319,7 +319,12 @@ def title_case_clean(text: str | None) -> str | None:
 
 
 def sanitise_name(value: str) -> str:
-    """Return a filename/folder component accepted by Windows and POSIX."""
+    """Clean a single tag-derived field used to build a path component.
+
+    Field values keep meaningful trailing periods ("R.E.M.", "Dinosaur Jr."),
+    because only a whole path component may not end in a period on Windows.
+    Apply :func:`sanitise_component` to the assembled component.
+    """
     # Unescape backslashes before quotes (e.g. B-52\'s → B-52's)
     value = re.sub(r'\\([\'"])', r'\1', value)
     # Strip ripper damage/incomplete markers
@@ -334,7 +339,18 @@ def sanitise_name(value: str) -> str:
     value = re.sub(r'(?:^|\s)_(.+?)_(?:\s|$)', r' \1 ', value)
     # Collapse multiple spaces
     value = re.sub(r" {2,}", " ", value)
-    value = value.strip(" .")
+    return value.strip()
+
+
+def sanitise_component(name: str) -> str:
+    """Return *name* as a single path component accepted by Windows and POSIX.
+
+    Windows rejects reserved device names and silently drops trailing periods
+    and spaces, so a component ending in "." would alias a different path.
+    """
+    value = _ILLEGAL_CHARS.sub("", name.replace("/", "-"))
+    value = value.lstrip(".").rstrip(" .")
+    value = re.sub(r" {2,}", " ", value).strip()
     if _WINDOWS_RESERVED_NAME.fullmatch(value):
         value = f"_{value}"
     return value or "_"
@@ -524,4 +540,4 @@ def build_filename(
     if not parts:
         return f"unknown{ext}"
 
-    return " - ".join(parts) + ext
+    return sanitise_component(" - ".join(parts) + ext)

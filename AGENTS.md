@@ -36,7 +36,7 @@ Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata m
 ## Architecture Notes
 
 - Folder naming contract: Tier 1 artist-root with letter bucketing (`A-Z`, `#` for symbols)
-- Windows path contract: no reserved device names, control characters, `< > : " / \ | ? *`, trailing spaces/dots, or case-insensitive sibling collisions
+- Windows path contract: no reserved device names, control characters, `< > : " / \ | ? *`, leading dots, trailing spaces/dots, or case-insensitive sibling collisions
 - Special folders: `0compilations`, `0various`, `0mixes`, `0singles`, `0random`, `#`
 - Letter bucketing: articles stripped for bucketing only (`The Cure` → `C/The Cure/`)
 - Beets config: `config/beets.yaml` (metadata matching only; no path templates or moves). The persistent Beets DB at `/home/jack/.config/beets/library.db` is retained as legacy state and is not consumed or synchronized by the active pipeline. Always invoke beets with `-c config/beets.yaml`.

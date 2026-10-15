@@ -31,6 +31,25 @@ _DISC_IN_FOLDER_NAME = re.compile(r"[\(\[]\s*disc\s*\d+\s*[\)\]]", re.IGNORECASE
 
 _VARIOUS_ARTISTS_ALIASES = {"various artists", "various", "va", "v.a.", "v. a."}
 
+# Marker added by collision repair to keep a differing encode of the same track
+_ALTERNATE_MARKER = re.compile(r"\s*\[alternate-[0-9a-f]+(?:-\d+)?\]", re.IGNORECASE)
+
+
+def _existing_sibling(path: Path, *, source: Path) -> Path | None:
+    """Return a sibling of *path* matching case-insensitively, excluding *source*.
+
+    Windows cannot store two siblings differing only by case, so a rename onto
+    such a name must be treated as a conflict even on a case-sensitive host.
+    """
+    key = path.name.casefold()
+    parent = path.parent
+    if not parent.is_dir():
+        return None
+    for sibling in parent.iterdir():
+        if sibling != source and sibling.name.casefold() == key:
+            return sibling
+    return None
+
 
 def _parse_disc_value(disc_str: str | None) -> tuple[int | None, int | None]:
     """Parse disc tag value like '1', '1/2' into (disc_number, disc_total)."""
@@ -164,18 +183,23 @@ def rename_file(
         return
 
     new_name = build_filename(track, artist, title, ext=path.suffix, disc=disc)
+    marker = _ALTERNATE_MARKER.search(path.stem)
+    if marker:
+        stem, ext = new_name.rsplit(path.suffix, 1)[0], path.suffix
+        new_name = f"{stem}{marker.group(0)}{ext}"
     new_path = path.parent / new_name
 
     if new_path == path:
         log.debug("Already canonical: %s", path.name)
         return
 
-    if new_path.exists():
+    existing = _existing_sibling(new_path, source=path)
+    if existing is not None:
         log.warning("Target already exists, skipping: %s → %s", path.name, new_name)
         review_items.append({
             "path": str(path),
             "reason": "rename_conflict",
-            "target": str(new_path),
+            "target": str(existing),
         })
         return
 

@@ -2,8 +2,9 @@
 # server_sync.sh — Contract-compliant rsync from buffer audio to server.
 #
 # Enforces:
-# 1. Deletion propagation (--delete) so moves do not duplicate files.
-# 2. Rename detection (--fuzzy) to avoid re-uploading entire files.
+# 1. Deletion propagation before transfer so stale case variants do not alias
+#    canonical Windows-safe paths.
+# 2. Perishable junk exclusions so hidden files cannot preserve stale folders.
 # 3. Whole-file hashed formats check (.ogg, .opus, .wma).
 # 4. Player refresh is performed separately on the remote player host.
 #
@@ -54,13 +55,12 @@ echo "==============================="
 
 RSYNC_FLAGS=(
     -avh
-    --delete
-    --fuzzy
+    --delete-before
     --prune-empty-dirs
     --partial
-    --exclude=".*"
-    --exclude="*~"
-    --exclude="*.vdjstems"
+    --filter="-p .*"
+    --filter="-p *~"
+    --filter="-p *.vdjstems"
     --exclude="0videos"
 )
 

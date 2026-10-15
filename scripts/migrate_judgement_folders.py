@@ -33,7 +33,13 @@ if str(REPO_ROOT) not in sys.path:
 import config
 from lib.audiohash import audio_hash
 from lib.context import get_folder_context
-from lib.parsers import parse_filename, sanitise_name, validate_albumartist, validate_year
+from lib.parsers import (
+    parse_filename,
+    sanitise_component,
+    sanitise_name,
+    validate_albumartist,
+    validate_year,
+)
 from lib.tags import read_tags, write_tags
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -179,7 +185,9 @@ def migrate_folder(
         year = validate_year(tags.get("year"))
 
         bucket = _artist_letter_bucket(artist)
-        dest_filename = f"{sanitise_name(artist)} - {sanitise_name(title)}{src_file.suffix.lower()}"
+        dest_filename = sanitise_component(
+            f"{sanitise_name(artist)} - {sanitise_name(title)}{src_file.suffix.lower()}"
+        )
 
         # If genuine album release exists and not a placeholder folder name
         is_album_release = (
@@ -189,10 +197,16 @@ def migrate_folder(
         )
 
         if is_album_release:
-            album_folder = f"{sanitise_name(artist)} - {sanitise_name(album)} ({year})"
-            dest_dir = library_root / bucket / sanitise_name(artist) / album_folder
+            album_folder = sanitise_component(
+                f"{sanitise_name(artist)} - {sanitise_name(album)} ({year})"
+            )
+            dest_dir = (
+                library_root / bucket / sanitise_component(sanitise_name(artist)) / album_folder
+            )
         else:
-            dest_dir = library_root / bucket / sanitise_name(artist) / "0singles"
+            dest_dir = (
+                library_root / bucket / sanitise_component(sanitise_name(artist)) / "0singles"
+            )
 
         dest_file = dest_dir / dest_filename
 
