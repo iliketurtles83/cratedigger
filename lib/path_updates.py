@@ -2,7 +2,6 @@
 
 import logging
 import pickle
-import sqlite3
 from pathlib import Path
 
 
@@ -31,7 +30,7 @@ def update_downstream_paths(
     music_root: Path,
     logger: logging.Logger,
 ) -> None:
-    """Update playlists, features.pkl, and the beets DB after path changes."""
+    """Update playlists and features.pkl after path changes."""
     if not path_map:
         return
 
@@ -82,39 +81,3 @@ def update_downstream_paths(
                 logger.info("Updated %d track path(s) in features.pkl", mask.sum())
         except (OSError, KeyError, TypeError, ValueError, pickle.PickleError) as exc:
             logger.warning("Could not update features.pkl: %s", exc)
-
-    database = Path.home() / ".config" / "beets" / "library.db"
-    if not database.exists():
-        return
-    try:
-        with sqlite3.connect(database) as connection:
-            updated_items = 0
-            for old_path, new_path in path_map.items():
-                old_relative = str(old_path.relative_to(music_root)).encode("utf-8")
-                new_relative = str(new_path.relative_to(music_root)).encode("utf-8")
-                old_absolute = str(old_path).encode("utf-8")
-                new_absolute = str(new_path).encode("utf-8")
-                for old_value, new_value in (
-                    (old_relative, new_relative),
-                    (old_absolute, new_absolute),
-                ):
-                    destination_exists = connection.execute(
-                        "SELECT 1 FROM items WHERE path = ? LIMIT 1",
-                        (new_value,),
-                    ).fetchone()
-                    statement = (
-                        "DELETE FROM items WHERE path = ?"
-                        if destination_exists
-                        else "UPDATE items SET path = ? WHERE path = ?"
-                    )
-                    parameters = (
-                        (old_value,)
-                        if destination_exists
-                        else (new_value, old_value)
-                    )
-                    cursor = connection.execute(statement, parameters)
-                    updated_items += cursor.rowcount
-        if updated_items:
-            logger.info("Updated %d item path(s) in beets library.db", updated_items)
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        logger.warning("Could not update beets DB: %s", exc)

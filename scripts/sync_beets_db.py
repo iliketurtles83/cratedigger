@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""sync_beets_db.py — Synchronize Beets library.db with on-disk audio tags.
+"""LEGACY: synchronize the retired persistent Beets database.
 
 Reads tags directly from audio files on disk and commits the refreshed metadata
 into Beets' SQLite database (library.db). Resolves album artist leaks, phantom
 curator artists, and collapsed albums.
+
+The active cratedigger pipeline uses a transient Beets catalog and does not
+consume or maintain this database. Keep this utility only for historical
+recovery or an explicitly requested one-off database rebuild.
 
 Usage:
     python scripts/sync_beets_db.py [--all-lists] [--faves] [--query QUERY]

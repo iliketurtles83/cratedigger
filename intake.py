@@ -6,8 +6,8 @@ cratedigger own all filename and path changes:
 
     beets metadata → 02_rename → 03_folders → 04_move --to-artist-root
 
-The beets import uses a transient catalog so moving the files afterward cannot
-leave stale paths in the persistent beets database.
+The beets import uses a transient catalog. The historical persistent beets
+database is not part of this pipeline and is not updated by subsequent moves.
 
 Usage:
     python intake.py [--dry-run] [--overwrite] [--log FILE]

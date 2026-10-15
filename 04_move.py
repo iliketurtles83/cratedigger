@@ -33,10 +33,10 @@ from lib.context import (
 )
 from lib.genres import normalise_genre, parent_genre
 from lib.logger import setup_logger
-from lib.parsers import sanitise_name
+from lib.parsers import artist_comparison_key, sanitise_name
 from lib.path_updates import record_folder_move, update_downstream_paths
 from lib.preferences import remap_genre
-from lib.tags import read_tags
+from lib.tags import read_tags, write_tags
 
 log: logging.Logger = None  # type: ignore[assignment]
 
@@ -860,8 +860,113 @@ def _explicit_compilation_name(folder: Path) -> str | None:
     return prefix[1] if len(prefix) == 2 and prefix[0].casefold() in _COMPILATION_ALBUMARTISTS else folder.name
 
 
+def _primary_track_artist(artist: str) -> str:
+    """Return the lead artist from a credited track-artist string."""
+    return re.split(
+        r"\s+(?:feat\.?|ft\.?|featuring)\s+",
+        artist,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+
+
+def _canonical_artist_folder_name(artist: str) -> tuple[str | None, str | None]:
+    """Return an existing Tier 1 spelling, or a sanitized new folder name."""
+    bucket = config.MUSIC_ROOT / _artist_letter_bucket(artist)
+    matches = [
+        path.name
+        for path in bucket.iterdir()
+        if path.is_dir()
+        and artist_comparison_key(path.name) == artist_comparison_key(artist)
+    ] if bucket.is_dir() else []
+    if len(matches) > 1:
+        return None, "ambiguous_artist_folder"
+    return (matches[0] if matches else sanitise_name(artist)), None
+
+
+def _relocate_various_artist_singles(
+    artist_dir: Path,
+    *,
+    dry_run: bool,
+    moved_paths: dict[Path, Path],
+    review_items: list[dict],
+) -> None:
+    """Convert loose Various Artists tracks into per-artist singles."""
+    singles_dir = artist_dir / config.ARTIST_SINGLES_FOLDER
+    if not singles_dir.is_dir():
+        return
+
+    for source in sorted(singles_dir.iterdir()):
+        if not source.is_file() or source.suffix.lower() not in config.AUDIO_EXTENSIONS:
+            continue
+        tags = read_tags(source)
+        credited_artist = (tags.get("artist") or "").strip() if tags else ""
+        primary_artist = _primary_track_artist(credited_artist)
+        if not primary_artist:
+            review_items.append({
+                "path": str(source),
+                "reason": "no_artist_tag",
+            })
+            continue
+
+        artist_folder, error = _canonical_artist_folder_name(primary_artist)
+        if error or not artist_folder:
+            review_items.append({
+                "path": str(source),
+                "reason": error or "no_artist_folder",
+            })
+            continue
+
+        destination = (
+            config.MUSIC_ROOT
+            / _artist_letter_bucket(artist_folder)
+            / artist_folder
+            / config.ARTIST_SINGLES_FOLDER
+            / source.name
+        )
+        if destination == source:
+            continue
+        if destination.exists():
+            log.warning(
+                "Artist single target exists, skipping: %s → %s",
+                source,
+                destination,
+            )
+            review_items.append({
+                "path": str(source),
+                "reason": "move_conflict",
+                "target": str(destination),
+            })
+            continue
+
+        if not dry_run:
+            write_tags(
+                source,
+                {
+                    "albumartist": artist_folder,
+                    "album": "",
+                    "compilation": "0",
+                    "track": "",
+                    "disc": "",
+                    "mb_albumid": "",
+                    "mb_albumartistid": "",
+                    "mb_releasegroupid": "",
+                },
+                dry_run=False,
+            )
+            moved_paths[source] = destination
+        _move_path(
+            source,
+            destination,
+            dry_run=dry_run,
+            review_items=review_items,
+        )
+
+    _remove_if_empty(singles_dir, dry_run=dry_run)
+
+
 def run_relocate_compilations_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
-    """Move explicitly tagged compilations out of Tier 1 artist trees."""
+    """Move compilations and rehome loose Various Artists tracks."""
     review_items: list[dict] = []
     if folder:
         buckets = [config.MUSIC_ROOT / folder]
@@ -879,6 +984,12 @@ def run_relocate_compilations_mode(*, dry_run: bool, folder: str | None) -> list
         for artist_dir in sorted(path for path in bucket.iterdir() if path.is_dir()):
             if artist_dir.name.casefold() not in _COMPILATION_ALBUMARTISTS:
                 continue
+            _relocate_various_artist_singles(
+                artist_dir,
+                dry_run=dry_run,
+                moved_paths=moved_paths,
+                review_items=review_items,
+            )
             for album_dir in sorted(path for path in artist_dir.iterdir() if path.is_dir()):
                 if album_dir.name == config.ARTIST_SINGLES_FOLDER:
                     continue

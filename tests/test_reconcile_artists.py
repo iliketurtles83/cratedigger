@@ -509,28 +509,17 @@ class ReconcileArtistsTests(unittest.TestCase):
 
         with closing(sqlite3.connect(self.database)) as connection, connection:
             self.assertEqual(
-                connection.execute(
-                    "SELECT albumartist FROM albums"
-                ).fetchone()[0],
-                "Can",
-            )
-            self.assertEqual(
-                set(connection.execute(
-                    "SELECT artist, albumartist FROM items WHERE id IN (1, 2)"
-                ).fetchall()),
-                {("Can", "Can"), ("CAN", "Can")},
-            )
-            self.assertEqual(
-                connection.execute(
-                    "SELECT artist, albumartist FROM items WHERE album_id = 2"
-                ).fetchone(),
-                ("CAN", "CAN"),
-            )
-            self.assertEqual(
-                connection.execute(
-                    "SELECT albumartist FROM albums WHERE id = 2"
-                ).fetchone()[0],
+                connection.execute("SELECT albumartist FROM albums WHERE id = 1")
+                .fetchone()[0],
                 "CAN",
+            )
+            self.assertEqual(
+                set(
+                    connection.execute(
+                        "SELECT artist, albumartist FROM items WHERE id IN (1, 2)"
+                    ).fetchall()
+                ),
+                {("Can", "Can"), ("CAN", "CAN")},
             )
 
 

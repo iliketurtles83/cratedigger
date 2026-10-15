@@ -5,17 +5,16 @@
 # 1. Deletion propagation (--delete) so moves do not duplicate files.
 # 2. Rename detection (--fuzzy) to avoid re-uploading entire files.
 # 3. Whole-file hashed formats check (.ogg, .opus, .wma).
-# 4. Optional player refresh trigger after sync completion.
+# 4. Player refresh is performed separately on the remote player host.
 #
 # Usage:
-#   ./scripts/server_sync.sh [--dry-run] [--source /path/to/buffer] [--dest user@server:/path] [--refresh]
+#   ./scripts/server_sync.sh [--dry-run] [--source /path/to/buffer] [--dest user@server:/path]
 
 set -euo pipefail
 
 SOURCE="/media/jack/buffer/audio/"
 DEST="${MUSIC_SERVER_DEST:-}"
 DRY_RUN=false
-DO_REFRESH=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -31,13 +30,9 @@ while [[ $# -gt 0 ]]; do
             DEST="$2"
             shift 2
             ;;
-        --refresh)
-            DO_REFRESH=true
-            shift
-            ;;
         *)
             echo "Unknown argument: $1" >&2
-            echo "Usage: $0 [--dry-run] [--source DIR] [--dest DEST] [--refresh]" >&2
+            echo "Usage: $0 [--dry-run] [--source DIR] [--dest DEST]" >&2
             exit 1
             ;;
     esac
@@ -75,11 +70,5 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 rsync "${RSYNC_FLAGS[@]}" "$SOURCE" "$DEST"
-
-if [ "$DRY_RUN" = false ] && [ "$DO_REFRESH" = true ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    echo "Triggering player refresh..."
-    "${SCRIPT_DIR}/player_refresh.sh" || echo "Warning: Player refresh exited with non-zero code."
-fi
 
 echo "Sync completed successfully."

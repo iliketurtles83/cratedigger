@@ -513,6 +513,7 @@ def repair_track_identity(
     dry_run: bool = True,
     fix: bool = False,
     relocate: bool = False,
+    misattributions_only: bool = False,
     artists: list[str] | None = None,
     online_fingerprints: bool = False,
     min_score: float = 0.8,
@@ -595,6 +596,13 @@ def repair_track_identity(
         len(decisions),
         ", ".join(f"{action}={count}" for action, count in sorted(counts.items())) or "none",
     )
+    if misattributions_only:
+        decisions = [
+            decision
+            for decision in decisions
+            if decision.action == "misattributed"
+        ]
+
     for decision in decisions:
         if decision.action == "ok":
             continue
@@ -698,6 +706,11 @@ def main() -> None:
         help="Also move misattributed audio to the correct artist; requires --fix",
     )
     parser.add_argument(
+        "--misattributions-only",
+        action="store_true",
+        help="Apply/report only fingerprint-confirmed foreign-artist credits",
+    )
+    parser.add_argument(
         "--no-dry-run",
         action="store_true",
         help="Apply selected repairs; requires --fix",
@@ -711,6 +724,7 @@ def main() -> None:
         dry_run=not args.no_dry_run,
         fix=args.fix,
         relocate=args.relocate,
+        misattributions_only=args.misattributions_only,
         artists=args.artist,
         online_fingerprints=args.online_fingerprints,
         min_score=args.min_score,

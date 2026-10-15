@@ -15,7 +15,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
 - Validate Tier 1 guardrails: `python 04_move.py --validate-config`
-- Relocate compilations: `python 04_move.py --relocate-compilations` (dry-run by default)
+- Relocate compilations and loose Various Artists singles: `python 04_move.py --relocate-compilations` (dry-run by default; loose singles move to the primary artist's Tier 1 `0singles`)
 - Review flagged items: `python 05_review.py`
 - Recommender evaluation & export: `python 07_recommend.py --evaluate` (export: `python 07_recommend.py --export`)
 
@@ -23,7 +23,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 
 Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata matching. Cratedigger exclusively owns filenames and physical layout:
 
-1. **intake.py** - New arrivals in `incoming/` are matched by beets using a transient catalog, then pass through `02_rename.py`, `03_folders.py`, and `04_move.py --to-artist-root`. This prevents stale paths in the persistent beets database. (Legacy `01→02→04` staging flow preserved via `--legacy-move`).
+1. **intake.py** - New arrivals in `incoming/` are matched by beets using a transient catalog, then pass through `02_rename.py`, `03_folders.py`, and `04_move.py --to-artist-root`. The historical persistent Beets DB is not part of this pipeline. (Legacy `01→02→04` staging flow preserved via `--legacy-move`).
 2. **scripts/audit_repair.py** - Scans library against backup (`/media/jack/monodong/audio2`) to purge junk folksonomy tags, restore unflattened genres, and protect collaboration credits.
 3. **01_tag.py** - Standalone/pre-tagger. Folder genre is only a fallback when existing genres are absent (prevents feedback loops). Genre remapping is opt-in (`--remap-genres`). Guest/collaboration credits are protected during consistency passes.
 4. **02_rename.py / 03_folders.py** - File/folder normalizers according to cratedigger rules. `02_rename.py` refuses to write placeholder tags (`New Artist`, `Track 01`) into filenames and flags them instead. `03_folders.py` nests and re-buckets artist roots that hold loose files.
@@ -37,7 +37,7 @@ Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata m
 - Folder naming contract: Tier 1 artist-root with letter bucketing (`A-Z`, `#` for symbols)
 - Special folders: `0compilations`, `0various`, `0mixes`, `0singles`, `0random`, `#`
 - Letter bucketing: articles stripped for bucketing only (`The Cure` → `C/The Cure/`)
-- Beets config: `config/beets.yaml` (metadata matching only; no path templates or moves). The persistent Beets DB is located at `/home/jack/.config/beets/library.db`. Always invoke beets with `-c config/beets.yaml`.
+- Beets config: `config/beets.yaml` (metadata matching only; no path templates or moves). The persistent Beets DB at `/home/jack/.config/beets/library.db` is retained as legacy state and is not consumed or synchronized by the active pipeline. Always invoke beets with `-c config/beets.yaml`.
 - Tier 1 always keeps an artist directory, including artists with only one album. The former album-count threshold is retired because it conflicts with this contract.
 - Folder context is read-only; scripts import from `lib/context.py`
 - Tags are written via `lib/tags.py` (format-agnostic wrapper)
@@ -62,7 +62,7 @@ Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata m
 - All audio operations respect dry-run mode
 - Never re-encode audio during cleanup (changes `audio_hash`, invalidating feature store and client cache)
 - Audio hash identity: features and client tracks are keyed by `audio_hash`, not path or track_id
-- Player refresh: after batch moves or tag updates, trigger `python -m music.maintenance refresh` (or run `./scripts/player_refresh.sh`). Exit code 75 means a refresh is already running
+- Player refresh is remote-only: after `scripts/server_sync.sh` completes, refresh the player on the remote host; do not run a local player refresh or synchronize the legacy persistent Beets database
 - Preserve ratings: never wipe `POPM`, `TXXX:FMPS_Rating`, `TXXX:FMPS_Playcount`, `FMPS_RATING`, or `RATING`. Beets config must not use `scrub`
 - Tag standard: follow MusicBrainz Picard mappings and write ID3v2.4. `albumartist` must be written on all album tracks to bind featured/guest credits (`feat.`) without splitting albums
 - Compilations vs Lists: real compilations receive `albumartist = Various Artists` and `compilation = 1`. Curated lists (Pitchfork 500, etc.) are converted to `.m3u8` playlists via `scripts/convert_lists.py`

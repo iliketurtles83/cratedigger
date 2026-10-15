@@ -625,64 +625,6 @@ def _refresh_recording_catalogs(
             catalogs[artist_id] = titles
 
 
-def _update_beets_artist_names(
-    database: Path,
-    variants: set[str],
-    canonical: str,
-    paths: list[Path],
-) -> None:
-    if not database.exists():
-        return
-    try:
-        with closing(sqlite3.connect(database)) as connection, connection:
-            columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(items)")
-            }
-            has_album_id = "album_id" in columns
-            album_ids: set[int] = set()
-            for path in paths:
-                relative = path.relative_to(config.MUSIC_ROOT)
-                candidates = (
-                    str(path),
-                    str(path).encode("utf-8"),
-                    str(relative),
-                    str(relative).encode("utf-8"),
-                )
-                placeholders = ", ".join("?" for _ in candidates)
-                fields = "id, artist, albumartist"
-                if has_album_id:
-                    fields += ", album_id"
-                rows = connection.execute(
-                    f"SELECT {fields} FROM items WHERE path IN ({placeholders})",
-                    candidates,
-                ).fetchall()
-                for row in rows:
-                    item_id, _artist, albumartist, *album_id = row
-                    updates: list[str] = []
-                    values: list[object] = []
-                    if albumartist in variants and albumartist != canonical:
-                        updates.append("albumartist = ?")
-                        values.append(canonical)
-                    if updates:
-                        connection.execute(
-                            f"UPDATE items SET {', '.join(updates)} WHERE id = ?",
-                            (*values, item_id),
-                        )
-                    if album_id and album_id[0] is not None:
-                        album_ids.add(int(album_id[0]))
-            for album_id in album_ids:
-                connection.execute(
-                    """
-                    UPDATE albums
-                    SET albumartist = ?
-                    WHERE id = ? AND albumartist IN ({})
-                    """.format(", ".join("?" for _ in variants)),
-                    (canonical, album_id, *sorted(variants)),
-                )
-    except sqlite3.Error as exc:
-        log.warning("Could not update beets artist names: %s", exc)
-
-
 def _file_digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -801,11 +743,9 @@ def apply_merge_plan(
 
     variants = {folder.path.name for folder in plan.folders}
     updated_tags = 0
-    target_audio_paths: list[Path] = []
     for path in sorted(plan.target.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in config.AUDIO_EXTENSIONS:
             continue
-        target_audio_paths.append(path)
         tags = read_tags(path)
         if not tags:
             continue
@@ -821,12 +761,6 @@ def apply_merge_plan(
         path_map,
         music_root=config.MUSIC_ROOT,
         logger=log,
-    )
-    _update_beets_artist_names(
-        database,
-        variants,
-        plan.canonical,
-        target_audio_paths,
     )
     return updated_tags, path_map
 

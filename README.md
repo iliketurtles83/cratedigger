@@ -230,20 +230,32 @@ python3 intake.py --no-dry-run
 ```
 
 Cratedigger is the sole owner of physical layout. Beets path templates are not
-configured, and `intake.py` gives beets a transient catalog so the subsequent
-cratedigger moves cannot leave stale paths in the persistent beets database.
+configured, and `intake.py` gives beets a transient catalog. The historical
+persistent Beets database is retained for now but is not part of the active
+pipeline and is not synchronized after cratedigger moves.
+
+`scripts/sync_beets_db.py` is legacy-only and should not be used as a routine
+post-move step. Player refresh is also not run from this machine: after
+`scripts/server_sync.sh` completes, refresh the player on the remote host
+according to that host's deployment procedure.
 
 **Validate and repair Tier 1 layout:**
 ```bash
 # Check that every top-level folder is covered by a config guardrail
 python3 04_move.py --validate-config
 
-# Preview explicitly tagged Various Artists releases currently under artists
+# Preview Various Artists releases and loose singles currently under artists
 python3 04_move.py --relocate-compilations
 
 # Apply only after reviewing the dry-run
 python3 04_move.py --relocate-compilations --no-dry-run
 ```
+
+Full Various Artists releases move to `0compilations`. Loose tracks found
+under `Bucket/Various Artists/0singles` move to the primary track artist's
+Tier 1 `0singles` folder. Existing artist-folder spellings are reused, featured
+credits remain in the `artist` tag, and release-scoped compilation metadata is
+cleared so the extracted track behaves as a standalone single.
 
 **Audit duplicate artist folders:**
 ```bash

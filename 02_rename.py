@@ -15,7 +15,6 @@ import json
 import logging
 import pickle
 import re
-import sqlite3
 from collections import defaultdict
 from pathlib import Path
 
@@ -252,7 +251,7 @@ def _review_item_key(item: dict) -> str:
 
 
 def _update_downstream(renamed_map: dict[Path, Path]) -> None:
-    """Keep playlists, features.pkl, and beets DB in sync when files are renamed."""
+    """Keep playlists and features.pkl in sync when files are renamed."""
     if not renamed_map:
         return
 
@@ -301,33 +300,6 @@ def _update_downstream(renamed_map: dict[Path, Path]) -> None:
                 log.info("Updated %d track path(s) in features.pkl", mask.sum())
         except Exception as exc:
             log.warning("Could not update features.pkl: %s", exc)
-
-    # 3. Update beets DB
-    db_path = Path.home() / ".config" / "beets" / "library.db"
-    if db_path.exists():
-        try:
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            updated_beets = 0
-            for old_p, new_p in renamed_map.items():
-                try:
-                    old_rel = str(old_p.relative_to(config.MUSIC_ROOT)).encode("utf-8")
-                    new_rel = str(new_p.relative_to(config.MUSIC_ROOT)).encode("utf-8")
-                    old_abs = str(old_p).encode("utf-8")
-                    new_abs = str(new_p).encode("utf-8")
-                    c.execute("UPDATE items SET path = ? WHERE path = ?", (new_rel, old_rel))
-                    updated_beets += c.rowcount
-                    c.execute("UPDATE items SET path = ? WHERE path = ?", (new_abs, old_abs))
-                    updated_beets += c.rowcount
-                except Exception:
-                    pass
-            conn.commit()
-            conn.close()
-            if updated_beets:
-                log.info("Updated %d item path(s) in beets library.db", updated_beets)
-        except Exception as exc:
-            log.warning("Could not update beets DB: %s", exc)
-
 
 def main() -> None:
     global log

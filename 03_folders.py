@@ -208,7 +208,7 @@ def _record_folder_rename(
 
 
 def _update_downstream(file_renamed_map: dict[Path, Path]) -> None:
-    """Keep playlists, features.pkl, and beets DB in sync when folders are renamed."""
+    """Keep playlists and features.pkl in sync when folders are renamed."""
     update_downstream_paths(
         file_renamed_map,
         music_root=config.MUSIC_ROOT,

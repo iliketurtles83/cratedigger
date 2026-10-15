@@ -96,6 +96,69 @@ class Tier1MoveRepairTests(unittest.TestCase):
 
         move.assert_not_called()
 
+    def test_rehomes_various_artist_single_under_primary_artist(self) -> None:
+        source = (
+            self.root
+            / "V"
+            / "Various Artists"
+            / "0singles"
+            / "Akon feat. Eminem - Smack That.mp3"
+        )
+        source.parent.mkdir(parents=True)
+        source.touch()
+        (self.root / "A" / "Akon").mkdir(parents=True)
+
+        with patch.object(
+            move_module,
+            "read_tags",
+            return_value={
+                "artist": "Akon feat. Eminem",
+                "albumartist": "Various Artists",
+                "album": "Compilation",
+                "compilation": "1",
+            },
+        ), patch.object(
+            move_module,
+            "write_tags",
+        ) as write_tags, patch.object(
+            move_module,
+            "update_downstream_paths",
+        ) as update_paths:
+            review = move_module.run_relocate_compilations_mode(
+                dry_run=False,
+                folder="V",
+            )
+
+        destination = (
+            self.root
+            / "A"
+            / "Akon"
+            / "0singles"
+            / source.name
+        )
+        self.assertEqual(review, [])
+        self.assertTrue(destination.exists())
+        self.assertFalse(source.exists())
+        write_tags.assert_called_once_with(
+            source,
+            {
+                "albumartist": "Akon",
+                "album": "",
+                "compilation": "0",
+                "track": "",
+                "disc": "",
+                "mb_albumid": "",
+                "mb_albumartistid": "",
+                "mb_releasegroupid": "",
+            },
+            dry_run=False,
+        )
+        update_paths.assert_called_once_with(
+            {source: destination},
+            music_root=self.root,
+            logger=move_module.log,
+        )
+
     def test_does_not_move_va_tagged_release_from_named_artist(self) -> None:
         album = self.root / "A" / "Artist" / "Artist - Compilation"
         track = album / "01.mp3"
