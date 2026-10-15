@@ -7,6 +7,8 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Run tests: `.venv/bin/python -m unittest discover -s tests` (real audio tests: `CRATEDIGGER_RUN_REAL_AUDIO_TESTS=1 .venv/bin/python -m unittest discover -s tests`)
 - Dry-run intake pipeline: `python intake.py --dry-run`
 - Beets import trial: `.venv/bin/python -m beets -c config/beets.yaml import --pretend /path/to/album`
+- Audit unmatched releases with isolated Beets catalogs: `.venv/bin/python scripts/audit_beets_matches.py --bucket Q [--online]`
+- Apply reviewed Beets evidence: `.venv/bin/python scripts/apply_beets_matches.py --report REPORT --release-id MB_RELEASE_ID [--fix --no-dry-run]`
 - Audit & repair tags: `python scripts/audit_repair.py --dry-run --folder NAME [--fix]`
 - Repair folder-parse damage: `python scripts/repair_folder_parse.py --tags --structure --dry-run`
 - Audit duplicate artist folders: `python scripts/reconcile_artists.py` (recording evidence for compilation/loose tracks: `--online-recording-evidence --fix`; collision evidence: `--online-release-evidence --collision-report`; apply only reviewed cache-backed sets by adding `--no-dry-run`)

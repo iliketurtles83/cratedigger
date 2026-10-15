@@ -272,6 +272,41 @@ python3 scripts/repair_windows_paths.py
 python3 scripts/repair_windows_paths.py --fix --no-dry-run
 ```
 
+**Audit unmatched releases against Beets/MusicBrainz:**
+```bash
+# Inventory one bounded artist bucket without network access
+.venv/bin/python scripts/audit_beets_matches.py --bucket Q
+
+# Match the inventory online using temporary catalogs without writing tags
+.venv/bin/python scripts/audit_beets_matches.py --bucket Q --online
+```
+
+The audit command requires a single bucket or a folder relative to the music
+root. Online mode forces `--nowrite --nomove --nocopy --noincremental`, uses a
+separate temporary Beets catalog for each unit, verifies that source size and
+timestamps did not change, and writes a JSON evidence report under
+`~/.cache/cratedigger/`. It never reads or updates the legacy persistent Beets
+database.
+
+Apply only explicitly reviewed release IDs from that report:
+```bash
+# Preview exact tag writes
+.venv/bin/python scripts/apply_beets_matches.py \
+  --report ~/.cache/cratedigger/beets-match-audit-q.json \
+  --release-id MUSICBRAINZ_RELEASE_ID
+
+# Apply the same reviewed evidence
+.venv/bin/python scripts/apply_beets_matches.py \
+  --report ~/.cache/cratedigger/beets-match-audit-q.json \
+  --release-id MUSICBRAINZ_RELEASE_ID --fix --no-dry-run
+```
+
+Application refuses stale source files, incomplete release matches, conflicting
+existing release IDs, and release IDs not explicitly allowlisted. It writes an
+application record alongside the audit report. Run `02_rename.py` and
+`03_folders.py` in dry-run mode afterward; cratedigger remains the sole owner
+of filenames and layout.
+
 Full Various Artists releases move to `0compilations`. Loose tracks found
 under `Bucket/Various Artists/0singles` move to the primary track artist's
 Tier 1 `0singles` folder. Existing artist-folder spellings are reused, featured
