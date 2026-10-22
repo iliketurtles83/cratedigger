@@ -1,11 +1,14 @@
-"""Mutagen read / write wrappers for all supported audio formats."""
-
+import base64
+import logging
 from pathlib import Path
 import re
 
 from mutagen import File as MutagenFile
-from mutagen.id3 import ID3, TBPM, TCON, TDRC, TIT2, TALB, TPE1, TPE2, TPOS, TRCK, TSRC, TCMP, UFID, TXXX, POPM
-from mutagen.mp4 import MP4FreeForm
+from mutagen.flac import Picture
+from mutagen.id3 import APIC, ID3, TBPM, TCON, TDRC, TIT2, TALB, TPE1, TPE2, TPOS, TRCK, TSRC, TCMP, UFID, TXXX, POPM
+from mutagen.mp4 import MP4Cover, MP4FreeForm
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -575,3 +578,134 @@ def write_tags(path: Path, tags: dict[str, str | None], *, dry_run: bool = True)
             audio.save()
 
     return written
+
+
+# ---------------------------------------------------------------------------
+# Embedded artwork helpers
+# ---------------------------------------------------------------------------
+
+def has_embedded_artwork(path: Path) -> bool:
+    """Return True if *path* contains embedded cover art."""
+    try:
+        audio = MutagenFile(path, easy=False)
+    except Exception:
+        return False
+    if audio is None:
+        return False
+
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        if audio.tags is None:
+            return False
+        return any(k.startswith("APIC") for k in audio.tags.keys())
+    elif suffix == ".flac":
+        pics = getattr(audio, "pictures", None)
+        return bool(pics and len(pics) > 0)
+    elif suffix in {".m4a", ".mp4", ".aac"}:
+        if audio.tags is None:
+            return False
+        covr = audio.tags.get("covr")
+        return bool(covr and len(covr) > 0)
+    elif suffix in {".ogg", ".opus"}:
+        if audio.tags is None:
+            return False
+        return bool(audio.tags.get("metadata_block_picture"))
+    elif suffix == ".wma":
+        if audio.tags is None:
+            return False
+        return bool(audio.tags.get("WM/Picture"))
+
+    return False
+
+
+def embed_artwork(
+    path: Path,
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+    *,
+    dry_run: bool = True,
+    force: bool = False,
+) -> bool:
+    """Embed front cover art into *path*.
+
+    For MP3, FLAC, and M4A, embedding updates tag headers while preserving audio_hash.
+    For Ogg, Opus, and WMA, the entire file is hashed; embedding changes audio_hash.
+    Embedding is refused on Ogg/Opus/WMA unless *force* is True.
+
+    Returns True if artwork was (or in dry_run, would be) embedded.
+    """
+    if not image_bytes:
+        return False
+
+    suffix = path.suffix.lower()
+    if suffix in {".ogg", ".opus", ".wma"} and not force:
+        log.warning(
+            "Skipping embedded artwork for %s (%s alters audio_hash). Use force=True to override.",
+            path.name,
+            suffix,
+        )
+        return False
+
+    supported_suffixes = {".mp3", ".flac", ".m4a", ".aac", ".mp4", ".ogg", ".opus"}
+    if suffix not in supported_suffixes:
+        log.warning("Embedding artwork not supported for format: %s", suffix)
+        return False
+
+    if dry_run:
+        return True
+
+    try:
+        audio = MutagenFile(path, easy=False)
+    except Exception as exc:
+        log.warning("Cannot open %s for embedding artwork: %s", path, exc)
+        return False
+
+    if audio is None:
+        return False
+
+    if suffix == ".mp3":
+        id3 = _ensure_id3(audio)
+        id3.delall("APIC")
+        id3.add(APIC(
+            encoding=3,
+            mime=mime_type,
+            type=3,  # Cover (front)
+            desc="Cover",
+            data=image_bytes,
+        ))
+        audio.save(v2_version=_ID3_SAVE_VERSION)
+        return True
+
+    elif suffix == ".flac":
+        pic = Picture()
+        pic.data = image_bytes
+        pic.type = 3  # Cover (front)
+        pic.mime = mime_type
+        pic.desc = "Cover"
+        audio.clear_pictures()
+        audio.add_picture(pic)
+        audio.save()
+        return True
+
+    elif suffix in {".m4a", ".aac", ".mp4"}:
+        if audio.tags is None:
+            audio.add_tags()
+        fmt = MP4Cover.FORMAT_PNG if mime_type == "image/png" else MP4Cover.FORMAT_JPEG
+        audio.tags["covr"] = [MP4Cover(image_bytes, imageformat=fmt)]
+        audio.save()
+        return True
+
+    elif suffix in {".ogg", ".opus"} and force:
+        pic = Picture()
+        pic.data = image_bytes
+        pic.type = 3
+        pic.mime = mime_type
+        pic.desc = "Cover"
+        encoded = base64.b64encode(pic.write()).decode("ascii")
+        if audio.tags is None:
+            audio.add_tags()
+        audio.tags["metadata_block_picture"] = [encoded]
+        audio.save()
+        return True
+
+    return False

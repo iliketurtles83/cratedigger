@@ -6,8 +6,12 @@ is not set — falls back to folder-genre-only tagging.
 
 import logging
 import os
+import socket
 import time
 from pathlib import Path
+
+# Ensure all urllib / network operations to MB and CAA time out if server stalls
+socket.setdefaulttimeout(30.0)
 
 from dotenv import load_dotenv
 
@@ -108,6 +112,11 @@ def _mb_call_with_retry(fn, *args, rate_limit_seconds: float = 1.1, **kwargs):
             _record_mb_success(rate_limit_seconds)
             return response
         except transient_errors as exc:
+            status_code = getattr(getattr(exc, "cause", None), "code", None)
+            if status_code in (400, 404):
+                log.debug("MB non-transient status %s: %s", status_code, exc)
+                return None
+
             _record_mb_failure(rate_limit_seconds, attempt)
             if attempt >= MB_MAX_RETRIES:
                 log.error("MB call failed after %d retries: %s", MB_MAX_RETRIES, exc)
@@ -640,3 +649,137 @@ def mb_recording_metadata(
     result["track"] = selected_track
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Cover Art Archive lookups
+# ---------------------------------------------------------------------------
+
+def fetch_caa_cover(
+    release_id: str,
+    *,
+    size: str = "1200",
+    rate_limit_seconds: float = 1.0,
+) -> bytes | None:
+    """Fetch front cover image binary data from Cover Art Archive for release_id.
+
+    Returns bytes when found, or None if no cover exists or on error.
+    Falls back to original size if size="1200" is unavailable.
+    """
+    if not _HAS_MB or musicbrainzngs is None or not release_id:
+        return None
+
+    data = _mb_call_with_retry(
+        musicbrainzngs.get_image_front,
+        release_id,
+        size=size,
+        rate_limit_seconds=rate_limit_seconds,
+    )
+    if data:
+        return data
+
+    if size is not None:
+        data = _mb_call_with_retry(
+            musicbrainzngs.get_image_front,
+            release_id,
+            size=None,
+            rate_limit_seconds=rate_limit_seconds,
+        )
+        if data:
+            return data
+
+    return None
+
+
+def fetch_caa_release_group_cover(
+    release_group_id: str,
+    *,
+    size: str = "1200",
+    rate_limit_seconds: float = 1.0,
+) -> bytes | None:
+    """Fetch front cover image binary data from Cover Art Archive for release_group_id.
+
+    Returns bytes when found, or None if no cover exists or on error.
+    Falls back to original size if size="1200" is unavailable.
+    """
+    if not _HAS_MB or musicbrainzngs is None or not release_group_id:
+        return None
+
+    data = _mb_call_with_retry(
+        musicbrainzngs.get_release_group_image_front,
+        release_group_id,
+        size=size,
+        rate_limit_seconds=rate_limit_seconds,
+    )
+    if data:
+        return data
+
+    if size is not None:
+        data = _mb_call_with_retry(
+            musicbrainzngs.get_release_group_image_front,
+            release_group_id,
+            size=None,
+            rate_limit_seconds=rate_limit_seconds,
+        )
+        if data:
+            return data
+
+    return None
+
+
+def search_release_mbid(
+    artist: str,
+    album: str,
+    *,
+    rate_limit_seconds: float = 1.1,
+) -> tuple[str | None, str | None]:
+    """Search MusicBrainz by artist and album title.
+
+    Returns (release_id, release_group_id), with None for values not found.
+    """
+    if not _HAS_MB or musicbrainzngs is None:
+        return None, None
+
+    artist = (artist or "").strip()
+    album = (album or "").strip()
+    if not artist or not album:
+        return None, None
+
+    data = _mb_call_with_retry(
+        musicbrainzngs.search_releases,
+        artist=artist,
+        release=album,
+        limit=5,
+        rate_limit_seconds=rate_limit_seconds,
+    )
+    if not data:
+        return None, None
+
+    releases = data.get("release-list", [])
+    if not isinstance(releases, list) or not releases:
+        return None, None
+
+    def _match_score(rel: dict) -> int:
+        score = 0
+        rel_title = str(rel.get("title") or "")
+        if rel_title.lower() == album.lower():
+            score += 2
+        credits = rel.get("artist-credit", [])
+        if isinstance(credits, list) and credits:
+            first = credits[0]
+            if isinstance(first, dict):
+                artist_obj = first.get("artist", {})
+                if isinstance(artist_obj, dict):
+                    rel_artist = str(artist_obj.get("name") or "")
+                    if rel_artist.lower() == artist.lower():
+                        score += 2
+        return score
+
+    best_rel = max(releases, key=_match_score)
+    rel_id = str(best_rel.get("id") or "") or None
+    rg_id = None
+    rg = best_rel.get("release-group")
+    if isinstance(rg, dict) and rg.get("id"):
+        rg_id = str(rg.get("id")) or None
+
+    return rel_id, rg_id

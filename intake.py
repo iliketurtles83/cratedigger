@@ -4,7 +4,7 @@
 The default flow uses beets only for release matching and metadata, then lets
 cratedigger own all filename and path changes:
 
-    beets metadata → 02_rename → 03_folders → 04_move --to-artist-root
+    beets metadata → enrich_covers → 02_rename → 03_folders → 04_move --to-artist-root
 
 The beets import uses a transient catalog. The historical persistent beets
 database is not part of this pipeline and is not updated by subsequent moves.
@@ -53,6 +53,8 @@ def main() -> None:
                         help="Use legacy 04_move.py --intake staging routing instead of beets")
     parser.add_argument("--pre-tag", action="store_true",
                         help="Run 01_tag.py on incoming folder before beets import")
+    parser.add_argument("--no-enrich", action="store_true",
+                        help="Skip cover art enrichment")
     parser.add_argument("--log", type=str, default="review.log",
                         help="Log file path (default: review.log)")
     args = parser.parse_args()
@@ -95,6 +97,12 @@ def main() -> None:
         if rc != 0:
             log.error("Tagging failed — stopping pipeline")
             return
+
+        if not args.no_enrich:
+            rc = run_step("scripts/enrich_covers.py", common_args)
+            if rc != 0:
+                log.error("Artwork enrichment failed — stopping pipeline")
+                return
 
         rc = run_step("02_rename.py", common_args)
         if rc != 0:
@@ -149,7 +157,10 @@ def main() -> None:
                 log.error("Beets import failed with code %d", result.returncode)
                 return
 
-        for script, step_args in (
+        pipeline_steps = []
+        if not args.no_enrich:
+            pipeline_steps.append(("scripts/enrich_covers.py", common_args))
+        pipeline_steps.extend([
             ("02_rename.py", common_args),
             ("03_folders.py", common_args),
             (
@@ -163,7 +174,9 @@ def main() -> None:
                     *(["--no-dry-run"] if not dry_run else []),
                 ],
             ),
-        ):
+        ])
+
+        for script, step_args in pipeline_steps:
             rc = run_step(script, step_args)
             if rc != 0:
                 log.error("%s failed — stopping pipeline", script)

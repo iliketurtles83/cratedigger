@@ -15,7 +15,9 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Repair misidentified tracks: `python scripts/repair_track_identity.py` (fingerprint uncached candidates in a dry-run with `--online-fingerprints`; apply reviewed cache-backed repairs with `--fix --relocate --no-dry-run [--artist NAME]`, then re-run `02_rename.py` on the touched folders)
 - Audit & repair Windows paths: `python scripts/repair_windows_paths.py` (apply reviewed case-insensitive merges and invalid-name normalization with `--fix --no-dry-run`)
 - Normalize cover art: `python scripts/normalize_covers.py --dry-run [--folder NAME]`
+- Enrich missing cover art: `python scripts/enrich_covers.py --dry-run [--folder NAME] [--bucket BUCKET] [--singles]`
 - Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
+- Retag curated lists: `python scripts/retag_lists.py --dry-run --folder "The Pitchfork 500" [--as-compilation]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
 - Validate Tier 1 guardrails: `python 04_move.py --validate-config`
 - Relocate compilations and loose Various Artists singles: `python 04_move.py --relocate-compilations` (dry-run by default; loose singles move to the primary artist's Tier 1 `0singles`)
@@ -26,7 +28,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 
 Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata matching. Cratedigger exclusively owns filenames and physical layout:
 
-1. **intake.py** - New arrivals in `incoming/` are matched by beets using a transient catalog, then pass through `02_rename.py`, `03_folders.py`, and `04_move.py --to-artist-root`. The historical persistent Beets DB is not part of this pipeline. (Legacy `01→02→04` staging flow preserved via `--legacy-move`).
+1. **intake.py** - New arrivals in `incoming/` are matched by beets using a transient catalog, then pass through `scripts/enrich_covers.py`, `02_rename.py`, `03_folders.py`, and `04_move.py --to-artist-root`. The historical persistent Beets DB is not part of this pipeline. (Legacy `01→02→04` staging flow preserved via `--legacy-move`).
 2. **scripts/audit_repair.py** - Scans library against backup (`/media/jack/monodong/audio2`) to purge junk folksonomy tags, restore unflattened genres, and protect collaboration credits.
 3. **01_tag.py** - Standalone/pre-tagger. Folder genre is only a fallback when existing genres are absent (prevents feedback loops). Genre remapping is opt-in (`--remap-genres`). Guest/collaboration credits are protected during consistency passes.
 4. **02_rename.py / 03_folders.py** - File/folder normalizers according to cratedigger rules. `02_rename.py` refuses to write placeholder tags (`New Artist`, `Track 01`) into filenames and flags them instead. `03_folders.py` nests and re-buckets artist roots that hold loose files.

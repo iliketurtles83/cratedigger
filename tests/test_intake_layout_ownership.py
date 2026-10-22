@@ -37,16 +37,44 @@ class IntakeLayoutOwnershipTests(unittest.TestCase):
                 intake_module.main()
 
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(len(commands), 4)
+        self.assertEqual(len(commands), 5)
         self.assertIn("--library", commands[0])
         self.assertIn("--nomove", commands[0])
         self.assertIn("--nocopy", commands[0])
         self.assertIn("--pretend", commands[0])
+        self.assertEqual(commands[1][1], "scripts/enrich_covers.py")
+        self.assertEqual(commands[2][1], "02_rename.py")
+        self.assertEqual(commands[3][1], "03_folders.py")
+        self.assertEqual(commands[4][1], "04_move.py")
+        self.assertIn("--to-artist-root", commands[4])
+
+    def test_no_enrich_flag_skips_enrich_covers(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            incoming = root / "incoming"
+            incoming.mkdir()
+            (incoming / "track.mp3").touch()
+            completed = Mock(returncode=0)
+
+            with patch.object(config, "INCOMING_FOLDER", incoming), \
+                 patch.object(config, "AUDIO_EXTENSIONS", {".mp3"}), \
+                 patch.object(intake_module, "setup_logger"), \
+                 patch.object(intake_module.subprocess, "run", return_value=completed) as run, \
+                 patch.object(
+                     sys,
+                     "argv",
+                     ["intake.py", "--dry-run", "--no-enrich", "--log", str(root / "review.log")],
+                 ):
+                intake_module.setup_logger.return_value = Mock()
+                intake_module.main()
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(len(commands), 4)
         self.assertEqual(commands[1][1], "02_rename.py")
         self.assertEqual(commands[2][1], "03_folders.py")
         self.assertEqual(commands[3][1], "04_move.py")
-        self.assertIn("--to-artist-root", commands[3])
 
 
 if __name__ == "__main__":
     unittest.main()
+

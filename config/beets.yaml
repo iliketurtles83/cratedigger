@@ -4,11 +4,31 @@
 directory: /media/jack/buffer/audio
 library: /home/jack/.config/beets/library.db
 
+art_filename: cover
+
 plugins:
   - musicbrainz   # MusicBrainz metadata source
   - chroma        # AcoustID audio fingerprinting
   - fromfilename  # Fallback when tags are empty
   - info          # Command-line inspection
+  - fetchart      # Automatic album art retrieval
+
+fetchart:
+  auto: yes
+  cautious: yes
+  cover_names:
+    - cover
+    - front
+    - folder
+    - albumart
+  sources:
+    - filesystem
+    - coverart
+    - itunes
+    - amazon
+  maxwidth: 1200
+  enforce_ratio: yes
+  cover_format: JPEG
 
 import:
   autotag: yes    # Enable MusicBrainz / AcoustID metadata matching
