@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import config
-from lib.parsers import sanitise_name, validate_albumartist
+from lib.parsers import parse_filename, sanitise_name, validate_albumartist
 from lib.tags import read_tags, write_tags
 from scripts.convert_lists import CURATED_LIST_FOLDERS
 
@@ -91,11 +91,17 @@ def load_library_album_index() -> dict[tuple[str, str], tuple[str, str, str | No
 
 def retag_list_folder(
     folder_path: Path,
-    library_index: dict[tuple[str, str], tuple[str, str, str | None]],
+    library_index: dict[tuple[str, str], tuple[str, str, str | None]] | None = None,
     *,
     dry_run: bool = True,
+    as_compilation: bool = False,
+    album_title: str | None = None,
 ) -> tuple[int, int]:
     """Inspect and clean tags for all tracks in a list folder.
+
+    When as_compilation is True, unifies tracks into a single Various Artists
+    compilation release (albumartist="Various Artists", compilation="1",
+    album=album_title or folder_path.name) while preserving individual track artists.
 
     Returns (total_tracks, modified_tracks).
     """
@@ -111,8 +117,13 @@ def retag_list_folder(
         log.warning("No audio files in %s", folder_path)
         return 0, 0
 
-    log.info("\n=== Processing list folder: %s (%d tracks) ===", folder_path.name, len(audio_files))
+    mode_label = "as Various Artists compilation" if as_compilation else "with original release tags"
+    log.info("\n=== Processing list folder: %s (%d tracks) %s ===", folder_path.name, len(audio_files), mode_label)
     modified_count = 0
+
+    target_album = (album_title or folder_path.name).strip()
+    target_aa = "Various Artists"
+    target_comp = "1"
 
     for path in audio_files:
         tags = read_tags(path)
@@ -126,34 +137,46 @@ def retag_list_folder(
 
         updates: dict[str, str | None] = {}
 
-        # 1. Check if album tag is a fake list name
-        is_list_album = _is_list_album_name(raw_album, folder_path.name)
-        if is_list_album:
-            match_key = (raw_artist.strip().lower(), (tags.get("title") or "").strip().lower())
-            if match_key in library_index:
-                known_alb, known_aa, known_yr = library_index[match_key]
-                updates["album"] = known_alb
-                updates["albumartist"] = known_aa
-                if known_yr and not tags.get("year"):
-                    updates["year"] = known_yr
-            else:
-                # Leave album empty so it becomes a clean single
-                updates["album"] = ""
+        if as_compilation:
+            if (raw_album or "").strip() != target_album:
+                updates["album"] = target_album
+            if (raw_aa or "").strip() != target_aa:
+                updates["albumartist"] = target_aa
+            if str(raw_comp or "").strip() != target_comp:
+                updates["compilation"] = target_comp
+            if not tags.get("track"):
+                parsed = parse_filename(path)
+                if parsed.get("track"):
+                    updates["track"] = parsed["track"]
+        else:
+            # 1. Check if album tag is a fake list name
+            is_list_album = _is_list_album_name(raw_album, folder_path.name)
+            if is_list_album:
+                match_key = (raw_artist.strip().lower(), (tags.get("title") or "").strip().lower())
+                if library_index and match_key in library_index:
+                    known_alb, known_aa, known_yr = library_index[match_key]
+                    updates["album"] = known_alb
+                    updates["albumartist"] = known_aa
+                    if known_yr and not tags.get("year"):
+                        updates["year"] = known_yr
+                else:
+                    # Leave album empty so it becomes a clean single
+                    updates["album"] = ""
 
-        # 2. Determine target albumartist
-        main_artist = _extract_main_artist(raw_artist)
-        valid_aa = validate_albumartist(raw_aa, raw_artist, tags.get("track"))
+            # 2. Determine target albumartist
+            main_artist = _extract_main_artist(raw_artist)
+            valid_aa = validate_albumartist(raw_aa, raw_artist, tags.get("track"))
 
-        # If album was matched, albumartist is already set in updates
-        if "albumartist" not in updates:
-            if not valid_aa or valid_aa.lower() in {"various artists", "va", "pitchfork media"}:
-                updates["albumartist"] = main_artist
-            elif not raw_aa and main_artist:
-                updates["albumartist"] = main_artist
+            # If album was matched, albumartist is already set in updates
+            if "albumartist" not in updates:
+                if not valid_aa or valid_aa.lower() in {"various artists", "va", "pitchfork media"}:
+                    updates["albumartist"] = main_artist
+                elif not raw_aa and main_artist:
+                    updates["albumartist"] = main_artist
 
-        # 3. Ensure compilation is '0'
-        if raw_comp != "0":
-            updates["compilation"] = "0"
+            # 3. Ensure compilation is '0'
+            if raw_comp != "0":
+                updates["compilation"] = "0"
 
         # 4. Filter no-op updates
         real_updates: dict[str, str | None] = {}
@@ -183,6 +206,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Retag curated list folders to clean release metadata.")
     parser.add_argument("--dry-run", action="store_true", default=True, help="Preview changes without writing")
     parser.add_argument("--no-dry-run", action="store_true", help="Apply tag updates")
+    parser.add_argument("--as-compilation", action="store_true",
+                        help="Retag as a unified Various Artists compilation in 0compilations/")
+    parser.add_argument("--album-title", type=str, default=None,
+                        help="Custom album title when using --as-compilation (defaults to folder name)")
     parser.add_argument("--folder", type=str, default=None, help="Target list folder under 0compilations/")
     parser.add_argument("--all", action="store_true", help="Retag all known curated list folders")
     parser.add_argument("--library-root", type=str, default=str(config.MUSIC_ROOT), help="Music library root")
@@ -215,12 +242,18 @@ def main() -> None:
     else:
         parser.error("Must specify either --folder <name> or --all")
 
-    library_index = load_library_album_index()
+    library_index = {} if args.as_compilation else load_library_album_index()
 
     total_all = 0
     modified_all = 0
     for target in folders_to_process:
-        tot, mod = retag_list_folder(target, library_index, dry_run=dry_run)
+        tot, mod = retag_list_folder(
+            target,
+            library_index,
+            dry_run=dry_run,
+            as_compilation=args.as_compilation,
+            album_title=args.album_title,
+        )
         total_all += tot
         modified_all += mod
 
