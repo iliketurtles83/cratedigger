@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -103,6 +104,35 @@ class TestAnalyzeIncremental(unittest.TestCase):
         df = analyze.analyze_folder(self.root, self.output, force=False, dry_run=True)
         self.assertEqual(len(df), 0)
         self.assertFalse(self.output.exists())
+
+    def test_unreadable_store_stops_without_overwriting(self):
+        original = b"unreadable feature store"
+        self.output.write_bytes(original)
+        with patch.object(analyze, "extract_features") as extract:
+            with self.assertRaisesRegex(RuntimeError, "avoid overwriting saved progress"):
+                analyze.analyze_folder(self.root, self.output)
+        extract.assert_not_called()
+        self.assertEqual(self.output.read_bytes(), original)
+
+    def test_incompatible_pickle_stops_without_overwriting(self):
+        original = b"existing feature store"
+        self.output.write_bytes(original)
+        with patch.object(analyze.pd, "read_pickle", side_effect=NotImplementedError("str array")):
+            with self.assertRaisesRegex(RuntimeError, "compatible pandas version"):
+                analyze.analyze_folder(self.root, self.output)
+        self.assertEqual(self.output.read_bytes(), original)
+
+    def test_non_dataframe_store_stops_without_overwriting(self):
+        analyze.pd.to_pickle({"not": "a DataFrame"}, self.output)
+        original = self.output.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "avoid overwriting saved progress"):
+            analyze.analyze_folder(self.root, self.output)
+        self.assertEqual(self.output.read_bytes(), original)
+
+    def test_empty_cache_does_not_precompute_hashes(self):
+        with patch.object(analyze, "audio_hash") as hash_file:
+            analyze.analyze_folder(self.root, self.output, dry_run=True)
+        hash_file.assert_not_called()
 
     def test_dry_run_preserves_cached_rows(self):
         analyze.analyze_folder(self.root, self.output, force=False, dry_run=False)

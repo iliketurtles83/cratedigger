@@ -474,7 +474,7 @@ def _load_existing(output_path: Path) -> pd.DataFrame:
     try:
         df = pd.read_pickle(output_path)
         if not isinstance(df, pd.DataFrame):
-            return pd.DataFrame(columns=FEATURE_COLUMNS)
+            raise TypeError("Feature store must contain a pandas DataFrame")
         for col in FEATURE_COLUMNS:
             if col not in df.columns:
                 df[col] = None
@@ -482,8 +482,12 @@ def _load_existing(output_path: Path) -> pd.DataFrame:
             df["error"] = df["error"].where(df["error"].notna(), None)
         return df[FEATURE_COLUMNS]
     except Exception as exc:
-        log.warning("Could not load existing feature store %s: %s", output_path, exc)
-        return pd.DataFrame(columns=FEATURE_COLUMNS)
+        raise RuntimeError(
+            f"Could not load existing feature store {output_path}; stopping to "
+            "avoid overwriting saved progress. Use the Python environment that "
+            "created the store (normally .venv/bin/python) with a compatible "
+            "pandas version."
+        ) from exc
 
 
 def _has_error(val) -> bool:
@@ -563,7 +567,7 @@ def analyze_folder(
         else:
             # Check if this file is a renamed/moved file whose audio_hash already exists
             ah = None
-            if not force:
+            if not force and existing_by_hash:
                 try:
                     ah = audio_hash(str(path))
                 except Exception:

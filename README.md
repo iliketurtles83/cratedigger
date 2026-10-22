@@ -176,14 +176,22 @@ audio tags.
 
 ```bash
 # First run: full analysis
-python3 06_analyze.py --folder rock --no-dry-run
+.venv/bin/python 06_analyze.py --folder rock
 
 # Re-run: incremental, only new/changed files are re-analyzed
-python3 06_analyze.py --folder rock
+.venv/bin/python 06_analyze.py --folder rock
 
 # Re-analyze everything (e.g. after a schema bump)
-python3 06_analyze.py --folder rock --force
+.venv/bin/python 06_analyze.py --folder rock --force
 ```
+
+Unlike the tagging/movement scripts, analysis writes its feature store by
+default; use `--dry-run` to preview without extracting or saving. Omit
+`--folder` to scan the entire configured music root. Progress is checkpointed
+every 50 completed files; restart the same command to resume from saved rows.
+Use the same Python environment when resuming: pandas pickle files may not be
+readable by older pandas versions. An unreadable existing store stops the run
+rather than discarding saved progress.
 
 The output path defaults to `config.FEATURES_STORE_PATH` (`features.pkl`).
 The DataFrame is keyed by absolute file path with incremental detection via
