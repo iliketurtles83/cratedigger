@@ -29,6 +29,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 import config
 from lib.audiohash import audio_hash
@@ -187,8 +188,9 @@ def run_evaluation(df: pd.DataFrame) -> None:
 
 def run_weight_tuning(df: pd.DataFrame) -> None:
     """Grid search over component weights to maximize holdout Recall@10 and MRR."""
+    faves_df = _get_faves_dataframe(df)
     print("\n" + "=" * 70)
-    print("  HYBRID COMPONENT WEIGHT TUNING")
+    print(f"  HYBRID COMPONENT WEIGHT TUNING (20% Holdout on {len(faves_df)} favorites)")
     print("=" * 70)
 
     candidates = [
@@ -204,7 +206,7 @@ def run_weight_tuning(df: pd.DataFrame) -> None:
     for weights in candidates:
         baker = VectorBaker(weights=weights)
         baker.fit_scalars(df)
-        evaluator = HoldoutEvaluator(baker, df, holdout_ratio=0.20, random_seed=42)
+        evaluator = HoldoutEvaluator(baker, faves_df, holdout_ratio=0.20, random_seed=42)
         m = evaluator.evaluate(k_neighbors=5, top_k_list=(10,))
         score = m.get("recall@10", 0.0) + m.get("mrr", 0.0)
         print(f"Weights {weights} -> Recall@10: {m.get('recall@10'):.4f}, MRR: {m.get('mrr'):.4f}")
@@ -215,34 +217,56 @@ def run_weight_tuning(df: pd.DataFrame) -> None:
     print(f"\nBest Weights: {best_weights} (Score: {best_score:.4f})\n")
 
 
-def inspect_clusters(df: pd.DataFrame, n_clusters: int = 4) -> None:
-    """Analyze taste clusters/archetypes across favorites."""
-    faves_df = _get_faves_dataframe(df)
-    print(f"\n=== TASTE CLUSTERS IN FAVORITES (K={n_clusters}, N={len(faves_df)}) ===")
-    baker = VectorBaker()
-    baker.fit_scalars(df)
-    vectors = np.array([baker.bake_vector(r) for _, r in faves_df.iterrows()])
+def inspect_clusters(
+    df: pd.DataFrame,
+    n_clusters: Optional[int] = None,
+    all_tracks: bool = False,
+) -> None:
+    """Analyze taste clusters/archetypes across favorites or full collection."""
+    target_df = df if all_tracks else _get_faves_dataframe(df)
+    if n_clusters is None:
+        n_clusters = 6 if all_tracks else 4
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit(vectors)
-    df_clustered = faves_df.copy()
+    label = "FULL COLLECTION" if all_tracks else "FAVORITES"
+    print(f"\n=== TASTE CLUSTERS IN {label} (K={n_clusters}, N={len(target_df)}) ===")
+
+    feature_cols = [
+        "bpm", "energy", "loudness_lufs", "spectral_centroid",
+        "zero_crossing_rate", "danceability", "speechiness",
+        "acousticness", "instrumentalness", "liveness", "valence"
+    ]
+    X_df = target_df[feature_cols].copy()
+    X_df["bpm"] = X_df["bpm"].clip(40, 260)
+    X_df["energy"] = X_df["energy"].clip(0, 1)
+    X_df["loudness_lufs"] = X_df["loudness_lufs"].clip(-40, 0)
+    X_df["spectral_centroid"] = X_df["spectral_centroid"].clip(200, 8000)
+    X_raw = X_df.fillna(X_df.median())
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_raw)
+
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit(X_scaled)
+    df_clustered = target_df.copy()
     df_clustered["cluster"] = kmeans.labels_
 
     for c in range(n_clusters):
         c_df = df_clustered[df_clustered["cluster"] == c]
-        avg_bpm = c_df["bpm"].mean()
-        avg_energy = c_df["energy"].mean()
+        avg_bpm = c_df["bpm"].clip(40, 260).mean()
+        avg_energy = c_df["energy"].clip(0, 1).mean()
         avg_val = c_df["valence"].mean()
+        avg_dance = c_df["danceability"].mean()
+        avg_ac = c_df["acousticness"].mean()
         top_genres = c_df["genre_tag"].dropna().value_counts().head(3).to_dict()
 
         # Find closest track to cluster center
         center = kmeans.cluster_centers_[c]
-        dists = np.linalg.norm(vectors[df_clustered["cluster"] == c] - center, axis=1)
+        dists = np.linalg.norm(X_scaled[df_clustered["cluster"] == c] - center, axis=1)
         rep_idx = c_df.index[np.argmin(dists)]
         rep_row = df.loc[rep_idx]
-        rep_title = Path(rep_row["path"]).stem
+        rep_title = Path(rep_row["path"]).name
 
         print(f"\n[Cluster {c}] ({len(c_df)} tracks)")
-        print(f"  Avg Tempo: {avg_bpm:.1f} BPM | Avg Energy: {avg_energy:.2f} | Avg Valence: {avg_val:.2f}")
+        print(f"  Avg Tempo: {avg_bpm:.1f} BPM | Avg Energy: {avg_energy:.2f} | Avg Dance: {avg_dance:.2f} | Avg Acoustic: {avg_ac:.2f} | Avg Valence: {avg_val:.2f}")
         print(f"  Top Genres: {top_genres}")
         print(f"  Representative Track: {rep_title}")
 
@@ -287,13 +311,26 @@ def run_query(df: pd.DataFrame, query: str, top_n: int = 5) -> None:
         print(f"    Genre: {r.get('genre_tag')} | BPM: {r.get('bpm')} (Δ{bpm_delta:.1f}) | Key: {r.get('key')} {r.get('mode')}")
 
 
-def run_visualization(df: pd.DataFrame, out_prefix: str = "0faves_clusters") -> None:
-    """Generate both static PNG and interactive HTML visualizations of 0faves clusters."""
+def run_visualization(
+    df: pd.DataFrame,
+    out_prefix: Optional[str] = None,
+    n_clusters: Optional[int] = None,
+    all_tracks: bool = False,
+) -> None:
+    """Generate both static PNG and interactive HTML visualizations of clusters."""
     import json
     import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
     import seaborn as sns
     from sklearn.manifold import TSNE
+    from sklearn.decomposition import PCA
     from sklearn.preprocessing import StandardScaler
+
+    target_df = df.copy() if all_tracks else _get_faves_dataframe(df)
+    if n_clusters is None:
+        n_clusters = 6 if all_tracks else 4
+    if out_prefix is None:
+        out_prefix = "library_clusters" if all_tracks else "0faves_clusters"
 
     feature_cols = [
         "bpm", "energy", "loudness_lufs", "spectral_centroid",
@@ -301,40 +338,81 @@ def run_visualization(df: pd.DataFrame, out_prefix: str = "0faves_clusters") -> 
         "acousticness", "instrumentalness", "liveness", "valence"
     ]
 
-    X_raw = df[feature_cols].copy().fillna(df[feature_cols].median())
+    X_df = target_df[feature_cols].copy()
+    X_df["bpm"] = X_df["bpm"].clip(40, 260)
+    X_df["energy"] = X_df["energy"].clip(0, 1)
+    X_df["loudness_lufs"] = X_df["loudness_lufs"].clip(-40, 0)
+    X_df["spectral_centroid"] = X_df["spectral_centroid"].clip(200, 8000)
+    X_raw = X_df.fillna(X_df.median())
+
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
 
-    n_clusters = 4
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit(X_scaled)
-    df_plot = df.copy()
+    df_plot = target_df.copy()
     df_plot["cluster"] = kmeans.labels_
 
-    tsne = TSNE(n_components=2, perplexity=30, random_state=42, max_iter=1000)
-    tsne_2d = tsne.fit_transform(X_scaled)
+    # Dimensionality reduction: use PCA initialization for speed on large datasets
+    if len(target_df) > 1000:
+        pca = PCA(n_components=min(10, len(feature_cols)), random_state=42)
+        X_reduced = pca.fit_transform(X_scaled)
+        tsne = TSNE(n_components=2, perplexity=50, max_iter=300, init="pca", n_jobs=-1, random_state=42)
+        tsne_2d = tsne.fit_transform(X_reduced)
+    else:
+        tsne = TSNE(n_components=2, perplexity=30, random_state=42, max_iter=1000)
+        tsne_2d = tsne.fit_transform(X_scaled)
+
     df_plot["x"] = np.round(tsne_2d[:, 0], 2)
     df_plot["y"] = np.round(tsne_2d[:, 1], 2)
 
-    cluster_names = {
-        0: "Punk & Urban Alternative",
-        1: "Uptempo Driving Rock",
-        2: "Electronic & Chilled Melodic",
-        3: "High-Impact Bass & Dub",
-    }
+    palette = sns.color_palette("tab10" if n_clusters <= 10 else "tab20", n_clusters)
+    colors = [mcolors.to_hex(c) for c in palette]
+
+    if all_tracks:
+        cluster_names = {}
+        for c in range(n_clusters):
+            sub = df_plot[df_plot["cluster"] == c]
+            top_genres = list(sub["genre_tag"].dropna().value_counts().head(2).index)
+            genre_str = " / ".join(g.split(" / ")[0] for g in top_genres) if top_genres else f"Cluster {c}"
+            avg_energy = sub["energy"].clip(0, 1).mean()
+            avg_ac = sub["acousticness"].mean()
+            avg_dance = sub["danceability"].mean()
+            avg_bpm = sub["bpm"].clip(40, 260).mean()
+
+            if avg_ac > 0.55:
+                trait = "Acoustic / Ambient"
+            elif avg_energy > 0.22:
+                trait = "High Energy"
+            elif avg_dance > 0.52 and avg_bpm < 130:
+                trait = "Groove & Dance"
+            elif avg_bpm > 150:
+                trait = "Fast Tempo"
+            else:
+                trait = "Melodic Drive"
+            cluster_names[c] = f"{genre_str} ({trait})"
+    else:
+        preset_names = {
+            0: "Punk & Urban Alternative",
+            1: "Uptempo Driving Rock",
+            2: "Electronic & Chilled Melodic",
+            3: "High-Impact Bass & Dub",
+        }
+        cluster_names = {c: preset_names.get(c, f"Cluster {c}") for c in range(n_clusters)}
+
     df_plot["cluster_name"] = df_plot["cluster"].map(cluster_names)
-    colors = {0: "#e41a1c", 1: "#377eb8", 2: "#4daf4a", 3: "#984ea3"}
 
     # 1. Static 2-panel plot (PNG)
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7), dpi=150)
-    palette = sns.color_palette("tab10", n_clusters)
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7.5), dpi=150)
+    point_size = 6 if all_tracks else 60
+    point_alpha = 0.35 if all_tracks else 0.75
 
     ax1 = axes[0]
     for c in range(n_clusters):
         subset = df_plot[df_plot["cluster"] == c]
         ax1.scatter(
             subset["x"], subset["y"],
-            label=f"{cluster_names[c]} ({len(subset)})",
-            color=palette[c], alpha=0.75, s=60, edgecolors="none",
+            label=f"{cluster_names[c]} ({len(subset):,})",
+            color=palette[c], alpha=point_alpha, s=point_size, edgecolors="none",
         )
 
     for c in range(n_clusters):
@@ -351,21 +429,22 @@ def run_visualization(df: pd.DataFrame, out_prefix: str = "0faves_clusters") -> 
                 bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7, edgecolor="none"),
             )
 
-    ax1.set_title("0faves 2D Audio Manifold (t-SNE Projection)", fontsize=13, fontweight="bold", pad=12)
+    dataset_label = f"Full Library ({len(target_df):,} tracks)" if all_tracks else f"0faves ({len(target_df):,} tracks)"
+    ax1.set_title(f"{dataset_label} 2D Audio Manifold (t-SNE)", fontsize=13, fontweight="bold", pad=12)
     ax1.set_xlabel("t-SNE Dimension 1", fontsize=10)
     ax1.set_ylabel("t-SNE Dimension 2", fontsize=10)
-    ax1.legend(loc="upper right", frameon=True, fontsize=9)
+    ax1.legend(loc="upper right", frameon=True, fontsize=8 if n_clusters > 5 else 9)
     ax1.grid(True, linestyle="--", alpha=0.3)
 
     ax2 = axes[1]
     compare_cols = ["danceability", "valence", "acousticness", "energy", "speechiness"]
     means_df = df_plot.groupby("cluster_name")[compare_cols].mean().T
-    means_df.plot(kind="bar", ax=ax2, colormap="tab10", width=0.8, edgecolor="black", linewidth=0.5)
+    means_df.plot(kind="bar", ax=ax2, colormap="tab10" if n_clusters <= 10 else "tab20", width=0.8, edgecolor="black", linewidth=0.5)
     ax2.set_title("Cluster Acoustic Feature Profiles", fontsize=13, fontweight="bold", pad=12)
     ax2.set_ylabel("Mean Value (0.0 - 1.0)", fontsize=10)
     ax2.set_xlabel("Feature", fontsize=10)
     ax2.tick_params(axis="x", rotation=30)
-    ax2.legend(title="Cluster", fontsize=8, title_fontsize=9)
+    ax2.legend(title="Cluster", fontsize=7.5 if n_clusters > 5 else 8, title_fontsize=8.5)
     ax2.grid(True, axis="y", linestyle="--", alpha=0.3)
 
     plt.tight_layout()
@@ -376,6 +455,10 @@ def run_visualization(df: pd.DataFrame, out_prefix: str = "0faves_clusters") -> 
 
     # 2. Interactive HTML plot
     traces = []
+    scatter_type = "scattergl" if all_tracks else "scatter"
+    marker_size = 4 if all_tracks else 9
+    marker_opacity = 0.55 if all_tracks else 0.85
+
     for c in range(n_clusters):
         sub = df_plot[df_plot["cluster"] == c]
         hover_texts = []
@@ -403,20 +486,19 @@ def run_visualization(df: pd.DataFrame, out_prefix: str = "0faves_clusters") -> 
             "text": hover_texts,
             "hoverinfo": "text",
             "mode": "markers",
-            "type": "scatter",
-            "name": f"{cluster_names[c]} ({len(sub)})",
+            "type": scatter_type,
+            "name": f"{cluster_names[c]} ({len(sub):,})",
             "marker": {
-                "size": 9,
+                "size": marker_size,
                 "color": colors[c],
-                "opacity": 0.85,
-                "line": {"width": 1, "color": "#ffffff"},
+                "opacity": marker_opacity,
             },
         }
         traces.append(trace)
 
     layout = {
         "title": {
-            "text": "<b>0faves Audio Manifold & Taste Clusters</b><br><span style='font-size:12px;color:#666'>Interactive 2D t-SNE projection of 426 favorite tracks</span>",
+            "text": f"<b>{dataset_label} Audio Manifold & Clusters</b><br><span style='font-size:12px;color:#666'>Interactive 2D t-SNE projection of {len(target_df):,} tracks</span>",
             "x": 0.05,
         },
         "hovermode": "closest",
@@ -424,45 +506,46 @@ def run_visualization(df: pd.DataFrame, out_prefix: str = "0faves_clusters") -> 
         "paper_bgcolor": "#ffffff",
         "xaxis": {"title": "t-SNE Dimension 1", "showgrid": True, "gridcolor": "#e5e7eb"},
         "yaxis": {"title": "t-SNE Dimension 2", "showgrid": True, "gridcolor": "#e5e7eb"},
-        "legend": {"title": {"text": "<b>Taste Archetype</b>"}, "x": 1.02, "y": 1},
-        "margin": {"l": 60, "r": 180, "t": 80, "b": 60},
+        "legend": {"title": {"text": "<b>Archetype</b>"}, "x": 1.02, "y": 1},
+        "margin": {"l": 60, "r": 200, "t": 80, "b": 60},
     }
+
+    stat_boxes = []
+    for c in range(n_clusters):
+        sub = df_plot[df_plot["cluster"] == c]
+        top_g = ", ".join(list(sub["genre_tag"].dropna().value_counts().head(3).index))
+        if len(top_g) > 40:
+            top_g = top_g[:37] + "..."
+        stat_boxes.append(f"""
+            <div class="stat-box" style="border-color: {colors[c]};">
+                <h4>{cluster_names[c]}</h4>
+                <div><b>{len(sub):,} tracks</b></div>
+                <div style="font-size: 11px; color: #555; margin-top: 4px;">Top: {top_g}</div>
+            </div>""")
+
+    stat_boxes_html = "\n".join(stat_boxes)
+    grid_cols = min(n_clusters, 6)
 
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>0faves Cluster Visualization</title>
+    <title>{dataset_label} Cluster Visualization</title>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f3f4f6; }}
-        .card {{ background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); max-width: 1200px; margin: 0 auto; }}
-        #chart {{ width: 100%; height: 700px; }}
-        .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-top: 20px; }}
+        .card {{ background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); max-width: 1400px; margin: 0 auto; }}
+        #chart {{ width: 100%; height: 750px; }}
+        .stats {{ display: grid; grid-template-columns: repeat({grid_cols}, 1fr); gap: 15px; margin-top: 20px; }}
         .stat-box {{ background: #f9fafb; border-left: 4px solid #ccc; padding: 12px 16px; border-radius: 6px; font-size: 13px; }}
-        .stat-box h4 {{ margin: 0 0 6px 0; font-size: 14px; }}
+        .stat-box h4 {{ margin: 0 0 6px 0; font-size: 13px; font-weight: 600; }}
     </style>
 </head>
 <body>
     <div class="card">
         <div id="chart"></div>
         <div class="stats">
-            <div class="stat-box" style="border-color: #e41a1c;">
-                <h4>Punk & Urban Alternative</h4>
-                <div>Top: Punk, Rock, Hip Hop</div>
-            </div>
-            <div class="stat-box" style="border-color: #377eb8;">
-                <h4>Uptempo Driving Rock</h4>
-                <div>Top: Rock, Punk, Electronic</div>
-            </div>
-            <div class="stat-box" style="border-color: #4daf4a;">
-                <h4>Electronic & Chilled</h4>
-                <div>Top: Electronic, Rock, Pop</div>
-            </div>
-            <div class="stat-box" style="border-color: #984ea3;">
-                <h4>High-Impact Bass & Dub</h4>
-                <div>Top: Electronic, Reggae, Downtempo</div>
-            </div>
+{stat_boxes_html}
         </div>
     </div>
     <script>
@@ -489,8 +572,10 @@ def main() -> None:
     parser.add_argument("--tune-weights", action="store_true", help="Search for optimal hybrid vector weights")
     parser.add_argument("--export", action="store_true", help="Export features for phone/server")
     parser.add_argument("--output", type=Path, default=Path("features_export.json.gz"), help="Export output path")
-    parser.add_argument("--clusters", action="store_true", help="Inspect taste archetypes in 0faves")
+    parser.add_argument("--clusters", action="store_true", help="Inspect taste archetypes in 0faves or entire collection")
     parser.add_argument("--visualize", action="store_true", help="Generate 2D static PNG and interactive HTML cluster visualizations")
+    parser.add_argument("--all", action="store_true", help="Scope clusters or visualization to entire library instead of favorites")
+    parser.add_argument("--n-clusters", type=int, default=None, help="Number of clusters (default: 4 for faves, 6 for --all)")
     parser.add_argument("--seed", type=str, help="Search for seed track and display similar tracks")
     parser.add_argument("--top-n", type=int, default=5, help="Number of similar tracks to return")
 
@@ -503,7 +588,7 @@ def main() -> None:
     df = _load_features(args.store)
 
     if args.visualize:
-        run_visualization(df)
+        run_visualization(df, n_clusters=args.n_clusters, all_tracks=args.all)
         return
 
     if args.backfill_embeddings:
@@ -519,7 +604,7 @@ def main() -> None:
         return
 
     if args.clusters:
-        inspect_clusters(df)
+        inspect_clusters(df, n_clusters=args.n_clusters, all_tracks=args.all)
         return
 
     if args.seed:

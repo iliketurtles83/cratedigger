@@ -11,3 +11,4 @@ models/*.onnx
 features_export.json.gz
 *.gz
 0faves_clusters.*
+library_clusters.*
