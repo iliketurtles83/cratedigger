@@ -21,6 +21,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Reconcile 2-tier genres: `python scripts/reconcile_genres.py --dry-run [--fix]`
 - Consolidate small/incomplete releases: `python scripts/consolidate_small_releases.py --dry-run [--bucket BUCKET] [--fix]`
 - Quarantine identical album duplicates: `python scripts/quarantine_album_duplicates.py --dry-run [--fix --no-dry-run]`
+- Generate top-level genre playlists for singles: `python scripts/generate_genre_playlists.py --dry-run [--fix --no-dry-run]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
 - Validate Tier 1 guardrails: `python 04_move.py --validate-config`
 - Relocate compilations and loose Various Artists singles: `python 04_move.py --relocate-compilations` (dry-run by default; loose singles move to the primary artist's Tier 1 `0singles`)
