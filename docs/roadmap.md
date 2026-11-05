@@ -206,9 +206,6 @@ Found while browsing the library in music-player; details and counts are in musi
 - A dry run lists every cover rename and every ambiguous folder; a live run leaves no album folder with a lone, differently named image.
 - No track in the library keeps a placeholder album, artist or title.
 
-
-
-
 ---
 
 ## Breaking Changes (Planned)
