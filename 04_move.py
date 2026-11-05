@@ -39,6 +39,7 @@ from lib.preferences import remap_genre
 from lib.tags import read_tags, write_tags
 
 log: logging.Logger = None  # type: ignore[assignment]
+MOVED_SINGLES: list[Path] = []
 
 # Build reverse map: display genre → folder name
 _GENRE_TO_FOLDER: dict[str, str] = {v.lower(): k for k, v in config.FOLDER_TO_GENRE.items()}
@@ -318,6 +319,9 @@ def _move_path(
         dry_run=dry_run,
         review_items=review_items,
     )
+
+    if "0singles" in dest.parts and dest.suffix.lower() in config.AUDIO_EXTENSIONS:
+        MOVED_SINGLES.append(dest)
 
     if dry_run:
         log.info("[DRY-RUN] Would move: %s → %s", src, dest)
@@ -1077,6 +1081,55 @@ def run_validate_config_mode() -> list[dict]:
     return review_items
 
 
+def _record_intake_playlist(moved_singles: list[Path], *, dry_run: bool) -> Path | None:
+    """Record moved singles into a dated intake playlist."""
+    if not moved_singles:
+        return None
+    from datetime import date
+    today_str = date.today().isoformat()
+    playlist_dir = config.MUSIC_ROOT / "Playlists"
+    playlist_path = playlist_dir / f"Intake_{today_str}.m3u8"
+    if dry_run:
+        log.info("[DRY-RUN] Would record %d moved single(s) into playlist: %s", len(moved_singles), playlist_path)
+        return playlist_path
+
+    playlist_dir.mkdir(parents=True, exist_ok=True)
+    existing_paths = set()
+    existing_content = ""
+    if playlist_path.exists():
+        existing_content = playlist_path.read_text(encoding="utf-8")
+        for line in existing_content.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                existing_paths.add(line)
+
+    new_lines = []
+    if not existing_content:
+        new_lines.append("#EXTM3U\n")
+
+    added = 0
+    for file_path in moved_singles:
+        try:
+            rel = f"../{file_path.relative_to(config.MUSIC_ROOT)}"
+        except ValueError:
+            rel = str(file_path)
+        if rel in existing_paths:
+            continue
+        tags = read_tags(file_path) or {}
+        parsed = parse_filename(file_path)
+        artist = (tags.get("artist") or parsed.get("artist") or "Unknown").strip()
+        title = (tags.get("title") or parsed.get("title") or file_path.stem).strip()
+        new_lines.append(f"#EXTINF:-1,{artist} - {title}\n{rel}\n")
+        existing_paths.add(rel)
+        added += 1
+
+    if added > 0:
+        with playlist_path.open("a" if existing_content else "w", encoding="utf-8") as handle:
+            handle.write("".join(new_lines))
+        log.info("Recorded %d new single(s) into playlist: %s", added, playlist_path)
+    return playlist_path
+
+
 def main() -> None:
     global log
 
@@ -1125,6 +1178,9 @@ def main() -> None:
         all_review = run_promote_mode(dry_run=dry_run, folder=args.folder)
 
     _write_review_items(all_review, dry_run=dry_run)
+
+    if (args.intake or args.to_artist_root) and MOVED_SINGLES:
+        _record_intake_playlist(MOVED_SINGLES, dry_run=dry_run)
 
     log.info("Done (%s)", "DRY-RUN" if dry_run else "LIVE")
 
