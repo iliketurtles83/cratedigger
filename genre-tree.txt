@@ -5,7 +5,9 @@
 Rock
   Alternative Rock
   Art Rock
+  Blues Rock
   Britpop
+  Classic Rock
   Dream Pop
   Emo
   Garage Rock
@@ -13,6 +15,7 @@ Rock
   Gothic Rock
   Grunge
   Hard Rock
+  Indie
   Indie Rock
   Krautrock
   Lo-Fi
@@ -20,12 +23,14 @@ Rock
   New Wave
   Noise Pop
   Noise Rock
+  Pop Rock
   Post-Punk
   Post-Rock
   Power Pop
   Progressive Rock
   Psychedelic Rock
   Punk Rock
+  Rock & Roll
   Shoegaze
   Soft Rock
   Southern Rock
@@ -38,12 +43,14 @@ Electronic
   Ambient
   Breakbeat
   Chillwave
+  Chiptune
   Dance
   Downtempo
   Drum & Bass
   Dubstep
   Electro
   Electronica
+  Eurodance
   Experimental Electronic
   Future Bass
   Glitch
@@ -52,6 +59,7 @@ Electronic
   Industrial Electronic
   Jungle
   Minimal
+  Synth-Pop
   Synthpop
   Synthwave
   Techno
@@ -132,7 +140,6 @@ Pop
   K-Pop
   Power Pop Pop
   Sophisti-Pop
-  Synth-Pop
   Teen Pop
   Vocal Pop
 
@@ -271,3 +278,18 @@ World
   Raga
   Tuvan Throat Singing
   Zydeco
+
+Chill
+  Ambient
+  Chillout
+  Chillwave
+  Downtempo
+  Lounge
+  Meditation
+  New Age
+  Trip-Hop
+
+Estonian
+  Estonian Folk
+  Estonian Pop
+  Estonian Rock
