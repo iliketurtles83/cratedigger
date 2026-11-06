@@ -22,10 +22,10 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Consolidate small/incomplete releases: `python scripts/consolidate_small_releases.py --dry-run [--bucket BUCKET] [--report reports/consolidation/NAME.json] [--fix]`
 - Quarantine identical album duplicates: `python scripts/quarantine_album_duplicates.py --dry-run [--fix --no-dry-run]`
 - Generate top-level genre playlists for singles: `python scripts/generate_genre_playlists.py --dry-run [--fix --no-dry-run]`
-- Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
+- Standalone tagger: `python 01_tag.py --dry-run --folder jazz` (fast local preview skipping MB/BPM: add `--no-mb --no-bpm`)
 - Validate Tier 1 guardrails: `python 04_move.py --validate-config`
 - Relocate compilations and loose Various Artists singles: `python 04_move.py --relocate-compilations` (dry-run by default; loose singles move to the primary artist's Tier 1 `0singles`)
-- Review flagged items: `python 05_review.py`
+- Review flagged items: `python 05_review.py` (interactive: blocks on stdin; never invoke in unattended agent sessions)
 - Recommender evaluation & export: `python 07_recommend.py --evaluate` (export: `python 07_recommend.py --export`)
 
 ## Architecture & Pipeline Flow
@@ -51,11 +51,13 @@ Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata m
 - Tier 1 always keeps an artist directory, including artists with only one album. The former album-count threshold is retired because it conflicts with this contract.
 - Folder context is read-only; scripts import from `lib/context.py`
 - Tags are written via `lib/tags.py` (format-agnostic wrapper)
+- External dependencies: `fpcalc` (Chromaprint binary) must be available on `$PATH` (e.g. `/usr/bin/fpcalc`) for AcoustID fingerprinting; without it, `pyacoustid` lookups fail even if python packages are installed
+- Path convention: Use `pathlib.Path` consistently across all tools and scripts
 - Repo layout & outputs: Numbered CLI scripts (`01`–`07`), `intake.py`, and `runscripts.py` reside in repo root for now. Active operational state (`features.pkl`, `features_export.json.gz`, `review.json`, `review.log`) lives in repo root; never delete `features.pkl` (feature store for ~44k tracks) or `review.json`. All one-off audit reports, reconciliation data, and cluster plots belong in `reports/` (e.g. `reports/consolidation/`, `reports/genres/`, `reports/clusters/`); never scatter reports or plot images in the repo root. Log archives live in `logs/archive/`. Both `reports/` and `logs/` are gitignored.
 
 ## Configuration
 
-- Main config: `config.py` (never committed)
+- Main config: `config.py` (never committed; required at module import time by all scripts; initialize from `config.example.py` if missing)
 - Beets config: `config/beets.yaml`
 - API keys: `.env` (never committed)
 - Genre mapping: `FOLDER_TO_GENRE` dict
