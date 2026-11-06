@@ -8,7 +8,7 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Dry-run intake pipeline: `python intake.py --dry-run`
 - Beets import trial: `.venv/bin/python -m beets -c config/beets.yaml import --pretend /path/to/album`
 - Audit unmatched releases with isolated Beets catalogs: `.venv/bin/python scripts/audit_beets_matches.py --bucket Q [--online]`
-- Apply reviewed Beets evidence: `.venv/bin/python scripts/apply_beets_matches.py --report REPORT --release-id MB_RELEASE_ID [--fix --no-dry-run]`
+- Apply reviewed Beets evidence: `.venv/bin/python scripts/apply_beets_matches.py --report reports/... --release-id MB_RELEASE_ID [--fix --no-dry-run]`
 - Audit & repair tags: `python scripts/audit_repair.py --dry-run --folder NAME [--fix]`
 - Repair folder-parse damage: `python scripts/repair_folder_parse.py --tags --structure --dry-run`
 - Audit duplicate artist folders: `python scripts/reconcile_artists.py` (recording evidence for compilation/loose tracks: `--online-recording-evidence --fix`; collision evidence: `--online-release-evidence --collision-report`; apply only reviewed cache-backed sets by adding `--no-dry-run`)
@@ -18,8 +18,8 @@ This file helps OpenCode agents avoid mistakes and ramp up quickly. Every line a
 - Enrich missing cover art: `python scripts/enrich_covers.py --dry-run [--folder NAME] [--bucket BUCKET] [--singles]`
 - Convert curated lists: `python scripts/convert_lists.py --dry-run --folder "The Pitchfork 500" [--retag]`
 - Retag curated lists: `python scripts/retag_lists.py --dry-run --folder "The Pitchfork 500" [--as-compilation]`
-- Reconcile 2-tier genres: `python scripts/reconcile_genres.py --dry-run [--fix]`
-- Consolidate small/incomplete releases: `python scripts/consolidate_small_releases.py --dry-run [--bucket BUCKET] [--fix]`
+- Reconcile 2-tier genres: `python scripts/reconcile_genres.py --dry-run [--report reports/genres/NAME.json] [--fix]`
+- Consolidate small/incomplete releases: `python scripts/consolidate_small_releases.py --dry-run [--bucket BUCKET] [--report reports/consolidation/NAME.json] [--fix]`
 - Quarantine identical album duplicates: `python scripts/quarantine_album_duplicates.py --dry-run [--fix --no-dry-run]`
 - Generate top-level genre playlists for singles: `python scripts/generate_genre_playlists.py --dry-run [--fix --no-dry-run]`
 - Standalone tagger: `python 01_tag.py --dry-run --folder jazz`
@@ -51,6 +51,7 @@ Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata m
 - Tier 1 always keeps an artist directory, including artists with only one album. The former album-count threshold is retired because it conflicts with this contract.
 - Folder context is read-only; scripts import from `lib/context.py`
 - Tags are written via `lib/tags.py` (format-agnostic wrapper)
+- Repo layout & outputs: Numbered CLI scripts (`01`–`07`), `intake.py`, and `runscripts.py` reside in repo root for now. Active operational state (`features.pkl`, `features_export.json.gz`, `review.json`, `review.log`) lives in repo root; never delete `features.pkl` (feature store for ~44k tracks) or `review.json`. All one-off audit reports, reconciliation data, and cluster plots belong in `reports/` (e.g. `reports/consolidation/`, `reports/genres/`, `reports/clusters/`); never scatter reports or plot images in the repo root. Log archives live in `logs/archive/`. Both `reports/` and `logs/` are gitignored.
 
 ## Configuration
 
