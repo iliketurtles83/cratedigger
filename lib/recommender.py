@@ -284,6 +284,55 @@ class HoldoutEvaluator:
 # Feature Exporter
 # ---------------------------------------------------------------------------
 
+def _row_preference_score(row: pd.Series) -> tuple[int, int, int, float]:
+    """Score a feature row to pick the canonical representative per audio_hash."""
+    err = row.get("error")
+    has_no_error = 1 if (err is None or (isinstance(err, float) and np.isnan(err)) or err == "") else 0
+    emb = row.get("embedding")
+    has_emb = 1 if isinstance(emb, np.ndarray) and emb.size > 0 else 0
+
+    path_str = str(row.get("path") or "")
+    parts = Path(path_str).parts
+    tier_score = 0
+    for idx, part in enumerate(parts[:-1]):
+        if part == "#" or (len(part) == 1 and part.isalpha() and part.isupper()):
+            if "0singles" in parts[idx + 1 :]:
+                tier_score = max(tier_score, 2)
+            else:
+                tier_score = max(tier_score, 3)
+            break
+    if tier_score == 0:
+        if any(p in {"0compilations", "0various", "soundtrack"} for p in parts):
+            tier_score = 1
+
+    rating_val = row.get("rating")
+    rating_score = float(rating_val) if pd.notna(rating_val) else -1.0
+    return (has_no_error, has_emb, tier_score, rating_score)
+
+
+def deduplicate_features_by_audio_hash(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of *df* with at most one canonical row per non-empty audio_hash."""
+    if df.empty or "audio_hash" not in df.columns:
+        return df.copy()
+
+    has_hash = df["audio_hash"].notna() & (df["audio_hash"].astype(str) != "")
+    without_hash = df.loc[~has_hash]
+    with_hash = df.loc[has_hash]
+    if with_hash.empty or not with_hash["audio_hash"].duplicated().any():
+        return df.copy()
+
+    best_indices: list[object] = []
+    for _, grp in with_hash.groupby("audio_hash", sort=False):
+        if len(grp) == 1:
+            best_indices.append(grp.index[0])
+            continue
+        best_idx = max(grp.index, key=lambda idx: _row_preference_score(grp.loc[idx]))
+        best_indices.append(best_idx)
+
+    deduped = df.loc[list(without_hash.index) + best_indices].copy()
+    return deduped.reset_index(drop=True)
+
+
 def export_features(
     df: pd.DataFrame,
     output_path: Path | str,
@@ -291,6 +340,7 @@ def export_features(
     model_version: str = RECIPE_VERSION,
 ) -> dict[str, Any]:
     """Export feature store to a compact gzipped JSON format for the phone/server."""
+    df = deduplicate_features_by_audio_hash(df)
     if baker is None:
         baker = VectorBaker()
         baker.fit_scalars(df)

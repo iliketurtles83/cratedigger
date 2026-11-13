@@ -221,6 +221,10 @@ class FeedbackStandardsTests(unittest.TestCase):
         self.assertIsNone(validate_year(""))
         self.assertIsNone(validate_year(None))
 
+        # Dynamic ceiling accepts current_year + 1 and rejects current_year + 2
+        self.assertEqual(validate_year("2028", current_year=2027), "2028")
+        self.assertIsNone(validate_year("2029", current_year=2027))
+
     def test_artist_comparison_key(self):
         from lib.parsers import artist_comparison_key
         self.assertEqual(artist_comparison_key("The Prodigy"), "prodigy")

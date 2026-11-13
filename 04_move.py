@@ -664,7 +664,7 @@ def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
         # Check for compilation releases first (routes to 0compilations/)
         is_comp = False
         prefix = child.name.split(" - ")[0].strip().lower() if " - " in child.name else ""
-        if prefix in {"various artists", "various", "va", "erinevad esitajad"}:
+        if prefix in {"various artists", "various", "va", "v.a."}:
             is_comp = True
         else:
             subdirs = [s for s in child.iterdir() if s.is_dir()]
@@ -672,7 +672,7 @@ def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
                 # Multi-directory release: only route to 0compilations if >= 75% of subdirs are compilations AND not a solo artist folder
                 comp_count = sum(1 for s in subdirs if infer_compilation_folder(s))
                 if comp_count > 0 and comp_count >= len(subdirs) * 0.75:
-                    comp_keywords = ("compilation", "collection", "various", "sampler", "top 10", "top 100", "radio latina", "ever!", "classics")
+                    comp_keywords = ("compilation", "collection", "various", "sampler", "top 10", "top 100", "classics")
                     sample = _first_audio_file(child)
                     sample_tags = read_tags(sample) if sample else {}
                     sample_aa = (sample_tags.get("albumartist") or "").strip().lower() if sample_tags else ""
@@ -831,7 +831,6 @@ _COMPILATION_ALBUMARTISTS = {
     "various",
     "va",
     "v.a.",
-    "erinevad esitajad",
 }
 
 

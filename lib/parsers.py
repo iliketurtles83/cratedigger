@@ -1,5 +1,6 @@
 """Filename and folder name pattern parsing."""
 
+from datetime import datetime
 import re
 import unicodedata
 from pathlib import Path
@@ -219,12 +220,12 @@ def validate_albumartist(
     return val
 
 
-def validate_year(year: str | int | None) -> str | None:
+def validate_year(year: str | int | None, *, current_year: int | None = None) -> str | None:
     """Validate and canonicalise release year tag.
 
-    - Accepts 4-digit years in range 1880..2026 (or ISO dates like '1998-05-12').
+    - Accepts 4-digit years in range 1880..(current_year + 1) (or ISO dates like '1998-05-12').
     - Expands 2-digit years ('98' → '1998', '04' → '2004').
-    - Rejects 1-digit ('8'), 3-digit ('198'), future (>2026), and bogus years, returning None.
+    - Rejects 1-digit ('8'), 3-digit ('198'), future (> current_year + 1), and bogus years, returning None.
     """
     if year is None:
         return None
@@ -232,11 +233,13 @@ def validate_year(year: str | int | None) -> str | None:
     if not val:
         return None
 
+    max_year = (current_year if current_year is not None else datetime.now().year) + 1
+
     # Match 4-digit year (standalone or prefix of ISO date YYYY-MM-DD)
     m4 = re.match(r"^(\d{4})(?:-\d{1,2})?(?:-\d{1,2})?$", val)
     if m4:
         y = int(m4.group(1))
-        if 1880 <= y <= 2026:
+        if 1880 <= y <= max_year:
             return str(y)
         return None
 
@@ -246,7 +249,7 @@ def validate_year(year: str | int | None) -> str | None:
         y = int(m2.group(1))
         if y >= 20:   # 1920..1999
             return str(1900 + y)
-        elif y <= 26: # 2000..2026
+        elif 2000 + y <= max_year:  # 2000..2019
             return str(2000 + y)
         return None
 

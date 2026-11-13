@@ -181,6 +181,49 @@ class TestRecommenderEvaluationAndExport(unittest.TestCase):
         self.assertIn("bpm", track)
         self.assertIn("energy", track)
 
+    def test_export_features_deduplicates_audio_hash_preferring_tier1(self):
+        from lib.recommender import deduplicate_features_by_audio_hash
+
+        dup_df = pd.DataFrame([
+            {
+                "audio_hash": "a1:dup",
+                "path": "/music/0compilations/Best Hits/01 - Song.mp3",
+                "embedding": np.ones(400, dtype=np.float32),
+                "bpm": 120.0,
+                "key": "C",
+                "mode": "major",
+                "energy": 0.5,
+                "valence": 0.5,
+                "danceability": 0.5,
+                "acousticness": 0.2,
+                "speechiness": 0.1,
+                "artist_tag": "Compilation Copy",
+                "error": None,
+            },
+            {
+                "audio_hash": "a1:dup",
+                "path": "/music/A/Artist/Artist - Album (2020)/01 - Artist - Song.mp3",
+                "embedding": np.ones(400, dtype=np.float32),
+                "bpm": 120.0,
+                "key": "C",
+                "mode": "major",
+                "energy": 0.5,
+                "valence": 0.5,
+                "danceability": 0.5,
+                "acousticness": 0.2,
+                "speechiness": 0.1,
+                "artist_tag": "Canonical Copy",
+                "error": None,
+            },
+        ])
+        deduped = deduplicate_features_by_audio_hash(dup_df)
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped.iloc[0]["artist_tag"], "Canonical Copy")
+
+        out_file = self.root / "dedup_export.json.gz"
+        res = export_features(dup_df, out_file)
+        self.assertEqual(res["track_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

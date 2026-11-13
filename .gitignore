@@ -14,3 +14,9 @@ features_export.json.gz
 library_clusters.*
 logs/
 reports/
+cratedigger.db
+cratedigger.db-wal
+cratedigger.db-shm
+*.egg-info/
+build/
+dist/
