@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Library Health — Cratedigger{% endblock %}
+
+{% block content %}
+{% set current_url = '/health?status=' ~ (status|urlencode) ~ ('&reason=' ~ (reason|urlencode) if reason else '') ~ ('&q=' ~ (q|urlencode) if q else '') ~ '&page=' ~ page %}
+
+<div class="toolbar">
+  <div class="pills" style="margin-bottom: 0;">
+    {% for st in ["pending", "dismissed", "resolved"] %}
+      <a class="pill {% if status == st %}active{% endif %}"
+         href="/health?status={{ st }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}{% if q %}&q={{ q|urlencode }}{% endif %}">
+        {{ st }} <span class="badge">{{ status_counts.get(st, 0) }}</span>
+      </a>
+    {% endfor %}
+  </div>
+
+  <form method="get" action="/health" class="inline-form" style="margin-top: 0;">
+    <input type="hidden" name="status" value="{{ status }}">
+    {% if reason %}<input type="hidden" name="reason" value="{{ reason }}">{% endif %}
+    <input type="text" name="q" value="{{ q }}" placeholder="Filter path or notice...">
+    <button type="submit">Filter</button>
+    {% if q %}<a class="btn" href="/health?status={{ status }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}">Clear</a>{% endif %}
+  </form>
+</div>
+
+<div class="pills">
+  <a class="pill {% if not reason %}active{% endif %}" href="/health?status={{ status }}{% if q %}&q={{ q|urlencode }}{% endif %}">
+    All notices <span class="badge">{{ status_counts.get(status, 0) }}</span>
+  </a>
+  {% for rc in reason_counts %}
+    <a class="pill {% if reason == rc.reason %}active{% endif %}"
+       href="/health?status={{ status }}&reason={{ rc.reason|urlencode }}{% if q %}&q={{ q|urlencode }}{% endif %}">
+      {{ rc.reason }} <span class="badge">{{ rc.count }}</span>
+    </a>
+  {% endfor %}
+</div>
+
+<form id="bulk-form" method="post" action="/review/bulk">
+  <input type="hidden" name="return_url" value="{{ current_url }}">
+  {% if items %}
+    <div class="toolbar">
+      <label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
+        <input type="checkbox" id="select-all"> Select all on page ({{ items|length }} of {{ total }})
+      </label>
+      <span class="mono">Passive telemetry notices (API misses, fallbacks)</span>
+    </div>
+  {% else %}
+    <div class="card">No library health notices match this filter.</div>
+  {% endif %}
+
+  {% if items %}
+    <div class="card" style="padding: 0;">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 32px;"></th>
+            <th>Notice</th>
+            <th>Path</th>
+            <th style="width: 110px;">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+            <tr>
+              <td><input type="checkbox" class="bulk-checkbox" name="item_ids" value="{{ item.id }}"></td>
+              <td><span class="badge">{{ item.reason }}</span></td>
+              <td class="mono">{{ item.path }}</td>
+              <td>
+                {% if item.status == "pending" %}
+                  <button type="submit" form="h-dismiss-{{ item.id }}">Dismiss</button>
+                {% else %}
+                  <button type="submit" form="h-reopen-{{ item.id }}">Reopen</button>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
+  <div id="bulk-bar" class="bulk-bar">
+    <div><strong><span id="bulk-count">0</span></strong> notice(s) selected</div>
+    <div class="inline-form" style="margin-top: 0;">
+      <button type="submit" name="action" value="dismiss">Dismiss Selected</button>
+      <button type="submit" name="action" value="reopen">Reopen Selected</button>
+    </div>
+  </div>
+</form>
+
+{% for item in items %}
+  <form id="h-dismiss-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+    <input type="hidden" name="status" value="dismissed">
+    <input type="hidden" name="return_url" value="{{ current_url }}">
+  </form>
+  <form id="h-reopen-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+    <input type="hidden" name="status" value="pending">
+    <input type="hidden" name="return_url" value="{{ current_url }}">
+  </form>
+{% endfor %}
+
+{% if total_pages > 1 %}
+  <div class="pagination">
+    {% if page > 1 %}
+      <a class="btn" href="/health?status={{ status }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}{% if q %}&q={{ q|urlencode }}{% endif %}&page={{ page - 1 }}">Prev</a>
+    {% endif %}
+    <span class="mono">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+      <a class="btn" href="/health?status={{ status }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}{% if q %}&q={{ q|urlencode }}{% endif %}&page={{ page + 1 }}">Next</a>
+    {% endif %}
+  </div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Cratedigger{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Cratedigger</div>
+    <nav class="nav">
+      <a href="/review" class="{% if active_nav == 'review' %}active{% endif %}">
+        Review Queue
+        <span class="badge {% if badges.actionable %}accent{% endif %}">{{ badges.actionable }}</span>
+      </a>
+      <a href="/health" class="{% if active_nav == 'health' %}active{% endif %}">
+        Library Health
+        <span class="badge">{{ badges.health }}</span>
+      </a>
+      <a href="/quarantine" class="{% if active_nav == 'quarantine' %}active{% endif %}">
+        Quarantine &amp; Dups
+        <span class="badge {% if badges.duplicates or badges.quarantine %}warn{% endif %}">{{ badges.duplicates }} / {{ badges.quarantine }}</span>
+      </a>
+      <a href="/undo" class="{% if active_nav == 'undo' %}active{% endif %}">
+        Undo
+        <span class="badge {% if badges.undoable %}ok{% endif %}">{{ badges.undoable }}</span>
+      </a>
+    </nav>
+  </header>
+
+  <main class="container">
+    {% if msg %}
+      <div class="flash">{{ msg }}</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

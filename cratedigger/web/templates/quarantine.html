@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Quarantine &amp; Duplicates — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div class="pills" style="margin-bottom: 0;">
+    <a class="pill {% if tab == 'duplicates' %}active{% endif %}" href="/quarantine?tab=duplicates">
+      Duplicate Audio Hashes <span class="badge">{{ total_dups }}</span>
+    </a>
+    <a class="pill {% if tab == 'files' %}active{% endif %}" href="/quarantine?tab=files">
+      Quarantined Files <span class="badge">{{ q_files|length }}</span>
+    </a>
+  </div>
+  {% if tab == 'files' and q_files %}
+    <form method="post" action="/quarantine/empty" onsubmit="return confirm('Permanently delete all {{ q_files|length }} file(s) inside 0quarantine?');">
+      <button type="submit" class="danger">Empty Quarantine ({{ q_files|length }})</button>
+    </form>
+  {% endif %}
+</div>
+
+{% if tab == "duplicates" %}
+  {% if not dup_groups %}
+    <div class="card">No duplicate <code>audio_hash</code> paths recorded in <code>track_paths</code>.</div>
+  {% endif %}
+  {% for grp in dup_groups %}
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">{{ grp.audio_hash }}</div>
+          <div class="mono">{{ grp.locations|length }} path(s) share this audio hash</div>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Path</th>
+            <th>Size</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set default_keep = grp.locations[0].path %}
+          {% set alt_keep = grp.locations[1].path if grp.locations|length > 1 else grp.locations[0].path %}
+          {% for loc in grp.locations %}
+            <tr>
+              <td class="mono">{{ loc.path }}</td>
+              <td>{{ loc.size_kb }} KB</td>
+              <td>
+                {% if loc.is_canonical %}<span class="badge ok">canonical</span>{% endif %}
+                {% if not loc.exists %}<span class="badge warn">missing</span>{% endif %}
+              </td>
+              <td>
+                {% if loc.exists and grp.locations|length > 1 %}
+                  {% set keep_target = alt_keep if loop.index0 == 0 else default_keep %}
+                  <form method="post" action="/quarantine/dedup">
+                    <input type="hidden" name="audio_hash_val" value="{{ grp.audio_hash }}">
+                    <input type="hidden" name="keep_path" value="{{ keep_target }}">
+                    <input type="hidden" name="quarantine_path" value="{{ loc.path }}">
+                    <button type="submit" class="danger">Quarantine Redundant &amp; Relink Playlists</button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endfor %}
+
+  {% if total_pages > 1 %}
+    <div class="pagination">
+      {% if page > 1 %}<a class="btn" href="/quarantine?tab=duplicates&page={{ page - 1 }}">Prev</a>{% endif %}
+      <span class="mono">Page {{ page }} of {{ total_pages }}</span>
+      {% if page < total_pages %}<a class="btn" href="/quarantine?tab=duplicates&page={{ page + 1 }}">Next</a>{% endif %}
+    </div>
+  {% endif %}
+
+{% else %}
+  {% if not q_files %}
+    <div class="card">Quarantine folder (<code>0quarantine/</code>) is empty.</div>
+  {% else %}
+    <div class="card" style="padding: 0;">
+      <table>
+        <thead>
+          <tr>
+            <th>Quarantined File</th>
+            <th>Original Location</th>
+            <th>Size</th>
+            <th>Preview</th>
+            <th>Restore</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in q_files %}
+            <tr>
+              <td class="mono">{{ f.rel_path }}</td>
+              <td class="mono">{{ f.original_guess }}</td>
+              <td>{{ f.size_kb }} KB</td>
+              <td style="min-width: 220px;">
+                {% if f.is_audio %}
+                  <audio controls preload="none" src="/media/audio?path={{ f.path|urlencode }}"></audio>
+                {% endif %}
+              </td>
+              <td>
+                <form method="post" action="/quarantine/restore">
+                  <input type="hidden" name="quarantined_path" value="{{ f.path }}">
+                  <button type="submit" class="ok">Restore</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+{% endif %}
+{% endblock %}

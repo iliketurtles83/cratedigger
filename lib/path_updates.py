@@ -29,6 +29,7 @@ def update_downstream_paths(
     *,
     music_root: Path,
     logger: logging.Logger,
+    features_path: Path | None = None,
 ) -> None:
     """Update playlists and features.pkl after path changes."""
     if not path_map:
@@ -54,7 +55,8 @@ def update_downstream_paths(
         if updated_playlists:
             logger.info("Updated %d playlist(s) with changed paths", updated_playlists)
 
-    features_path = Path("features.pkl")
+    if features_path is None:
+        features_path = Path("features.pkl")
     if features_path.exists():
         try:
             with features_path.open("rb") as handle:

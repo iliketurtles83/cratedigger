@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Undo History — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <h2 style="margin: 0; font-size: 16px;">Reversible Operations Journal</h2>
+  <span class="mono">Showing recent {{ runs|length }} run(s)</span>
+</div>
+
+{% if not runs %}
+  <div class="card">No journaled file operations yet.</div>
+{% else %}
+  <div class="card" style="padding: 0;">
+    <table>
+      <thead>
+        <tr>
+          <th>Run ID</th>
+          <th>Op</th>
+          <th>Count</th>
+          <th>Sample</th>
+          <th>Time (UTC)</th>
+          <th>Status / Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for run in runs %}
+          <tr>
+            <td class="mono">{{ run.run_id }}</td>
+            <td><span class="badge">{{ run.op_type }}</span></td>
+            <td>{{ run.ops }}</td>
+            <td class="mono">{{ run.sample_src }} &rarr; {{ run.sample_dst }}</td>
+            <td class="mono">{{ run.created_at }}</td>
+            <td>
+              {% if run.any_pending == 0 %}
+                <form method="post" action="/undo/{{ run.run_id }}">
+                  <button type="submit" class="primary">Undo Run</button>
+                </form>
+              {% else %}
+                <span class="badge ok">reverted</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

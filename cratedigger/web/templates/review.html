@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}Review Queue — Cratedigger{% endblock %}
+
+{% block content %}
+{% set current_url = '/review?status=' ~ (status|urlencode) ~ ('&reason=' ~ (reason|urlencode) if reason else '') ~ ('&q=' ~ (q|urlencode) if q else '') ~ ('&group=' ~ (group|urlencode) if group else '') ~ '&page=' ~ page %}
+
+<div class="toolbar">
+  <div class="pills" style="margin-bottom: 0;">
+    {% for st in ["pending", "resolved", "auto_resolved", "dismissed"] %}
+      <a class="pill {% if status == st %}active{% endif %}"
+         href="/review?status={{ st }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}{% if q %}&q={{ q|urlencode }}{% endif %}{% if group %}&group={{ group|urlencode }}{% endif %}">
+        {{ st }} <span class="badge">{{ status_counts.get(st, 0) }}</span>
+      </a>
+    {% endfor %}
+  </div>
+
+  <form method="get" action="/review" class="inline-form" style="margin-top: 0;">
+    <input type="hidden" name="status" value="{{ status }}">
+    {% if reason %}<input type="hidden" name="reason" value="{{ reason }}">{% endif %}
+    {% if group %}<input type="hidden" name="group" value="{{ group }}">{% endif %}
+    <input type="text" name="q" value="{{ q }}" placeholder="Filter path or reason...">
+    <button type="submit">Filter</button>
+    {% if q %}<a class="btn" href="/review?status={{ status }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}">Clear</a>{% endif %}
+  </form>
+</div>
+
+<div class="pills">
+  <a class="pill {% if not reason %}active{% endif %}" href="/review?status={{ status }}{% if q %}&q={{ q|urlencode }}{% endif %}">
+    All reasons <span class="badge">{{ status_counts.get(status, 0) }}</span>
+  </a>
+  {% for rc in reason_counts %}
+    <a class="pill {% if reason == rc.reason %}active{% endif %}"
+       href="/review?status={{ status }}&reason={{ rc.reason|urlencode }}{% if q %}&q={{ q|urlencode }}{% endif %}{% if rc.reason == 'no_genre' %}&group=folder{% endif %}">
+      {{ rc.reason }} <span class="badge">{{ rc.count }}</span>
+    </a>
+  {% endfor %}
+</div>
+
+{% if reason == "no_genre" %}
+  <div class="toolbar">
+    <span class="mono">Showing {{ total }} {% if group == "folder" %}folder group(s){% else %}item(s){% endif %}</span>
+    <div>
+      {% if group == "folder" %}
+        <a class="btn" href="/review?status={{ status }}&reason=no_genre&group=flat{% if q %}&q={{ q|urlencode }}{% endif %}">Ungroup (flat list)</a>
+      {% else %}
+        <a class="btn" href="/review?status={{ status }}&reason=no_genre&group=folder{% if q %}&q={{ q|urlencode }}{% endif %}">Group by folder</a>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+
+{% if reason == "no_genre" and group == "folder" %}
+  {% if not groups %}
+    <div class="card">No grouped <code>no_genre</code> items match this filter.</div>
+  {% endif %}
+  {% for grp in groups %}
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">{{ grp.folder_name }} <span class="badge accent">{{ grp.count }} track(s)</span></div>
+          <div class="mono">{{ grp.folder }}</div>
+        </div>
+      </div>
+      <form method="post" action="/review/group-genre" class="inline-form">
+        <input type="hidden" name="item_ids_csv" value="{{ grp['items'] | map(attribute='id') | join(',') }}">
+        <input type="hidden" name="return_url" value="{{ current_url }}">
+        <input type="text" name="genre_value" placeholder="Genre (e.g. Rock / Post-Punk)" required style="min-width: 260px;">
+        <button type="submit" class="primary">Apply Genre to {{ grp.count }} Track(s)</button>
+      </form>
+      <details style="margin-top: 8px;">
+        <summary class="mono" style="cursor: pointer;">Show tracks ({{ grp.count }})</summary>
+        <ul class="mono" style="margin: 6px 0 0 16px;">
+          {% for it in grp['items'] %}
+            <li>#{{ it.id }} — {{ it.path }}</li>
+          {% endfor %}
+        </ul>
+      </details>
+    </div>
+  {% endfor %}
+{% else %}
+  <form id="bulk-form" method="post" action="/review/bulk">
+    <input type="hidden" name="return_url" value="{{ current_url }}">
+    {% if items %}
+      <div class="toolbar">
+        <label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
+          <input type="checkbox" id="select-all"> Select all on page ({{ items|length }} of {{ total }})
+        </label>
+        <span class="mono">Page {{ page }} / {{ total_pages }}</span>
+      </div>
+    {% endif %}
+
+    {% if not items %}
+      <div class="card">No review items match this filter.</div>
+    {% endif %}
+
+    {% for item in items %}
+      <div class="card">
+        <div class="card-head">
+          <div style="display: flex; gap: 10px; align-items: flex-start;">
+            <input type="checkbox" class="bulk-checkbox" name="item_ids" value="{{ item.id }}" form="bulk-form" style="margin-top: 4px;">
+            <div>
+              <div class="card-title">
+                <span class="badge accent">{{ item.reason }}</span>
+                #{{ item.id }} — {{ item.ctx.rel_path }}
+                {% if not item.ctx.exists %}<span class="badge warn">missing on disk</span>{% endif %}
+              </div>
+              <div class="mono">{{ item.path }}</div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            {% if item.status == "pending" %}
+              <button type="submit" form="status-resolve-{{ item.id }}" class="ok">Resolve</button>
+              <button type="submit" form="status-dismiss-{{ item.id }}">Dismiss</button>
+            {% else %}
+              <button type="submit" form="status-reopen-{{ item.id }}">Reopen</button>
+            {% endif %}
+          </div>
+        </div>
+
+        {% if item.reason == "ambiguous_cover_art" and item.ctx.image_candidates %}
+          <div class="cover-grid">
+            {% for cand in item.ctx.image_candidates %}
+              <div class="cover-card">
+                <img src="/media/image?path={{ cand.path|urlencode }}" alt="{{ cand.name }}" loading="lazy">
+                <div class="mono">{{ cand.name }}</div>
+                <div class="mono">{{ cand.dims or "?" }} · {{ cand.size_kb }} KB</div>
+                <form method="post" action="/review/{{ item.id }}/pick-cover">
+                  <input type="hidden" name="selected_path" value="{{ cand.path }}">
+                  <input type="hidden" name="return_url" value="{{ current_url }}">
+                  <button type="submit" class="primary" style="width: 100%;">Select as cover.jpg</button>
+                </form>
+              </div>
+            {% endfor %}
+          </div>
+
+        {% elif item.reason == "rename_conflict" %}
+          <div class="mono" style="margin-bottom: 6px;">
+            {% if item.ctx.same_audio %}
+              <span class="badge warn">identical audio_hash</span> Both files contain the exact same audio stream.
+            {% else %}
+              <span class="badge accent">different audio</span> Listen and compare metadata before resolving.
+            {% endif %}
+          </div>
+          <div class="split-grid">
+            <div class="subpanel">
+              <div><strong>Source</strong> <span class="mono">({{ item.ctx.source_size_kb }} KB)</span></div>
+              <div class="mono">{{ item.path }}</div>
+              {% if item.ctx.source_tags %}
+                <div class="mono" style="margin-top: 4px;">
+                  {{ item.ctx.source_tags.get('artist', '') }} — {{ item.ctx.source_tags.get('title', '') }}
+                  ({{ item.ctx.source_tags.get('album', '') }} {{ item.ctx.source_tags.get('year', '') }})
+                </div>
+              {% endif %}
+              {% if item.ctx.exists %}
+                <audio controls preload="none" src="/media/audio?path={{ item.path|urlencode }}"></audio>
+              {% endif %}
+            </div>
+            <div class="subpanel">
+              <div><strong>Target</strong> <span class="mono">({{ item.ctx.target_size_kb }} KB)</span></div>
+              <div class="mono">{{ item.ctx.target_path or "(none)" }}</div>
+              {% if item.ctx.target_tags %}
+                <div class="mono" style="margin-top: 4px;">
+                  {{ item.ctx.target_tags.get('artist', '') }} — {{ item.ctx.target_tags.get('title', '') }}
+                  ({{ item.ctx.target_tags.get('album', '') }} {{ item.ctx.target_tags.get('year', '') }})
+                </div>
+              {% endif %}
+              {% if item.ctx.target_exists %}
+                <audio controls preload="none" src="/media/audio?path={{ item.ctx.target_path|urlencode }}"></audio>
+              {% endif %}
+            </div>
+          </div>
+          <div class="inline-form">
+            <form method="post" action="/review/{{ item.id }}/resolve-conflict">
+              <input type="hidden" name="decision" value="quarantine_source">
+              <input type="hidden" name="return_url" value="{{ current_url }}">
+              <button type="submit">Quarantine Source (Keep Target)</button>
+            </form>
+            <form method="post" action="/review/{{ item.id }}/resolve-conflict">
+              <input type="hidden" name="decision" value="replace_target">
+              <input type="hidden" name="return_url" value="{{ current_url }}">
+              <button type="submit" class="danger">Replace Target (Quarantine Target)</button>
+            </form>
+            <form method="post" action="/review/{{ item.id }}/resolve-conflict">
+              <input type="hidden" name="decision" value="keep_both">
+              <input type="hidden" name="return_url" value="{{ current_url }}">
+              <button type="submit" class="primary">Keep Both ([alternate])</button>
+            </form>
+          </div>
+
+        {% elif item.reason in ["mixed_tags", "inconsistent_tags", "artist_flat_mixed", "incomplete_metadata", "artist_flat_incomplete"] and item.ctx.is_dir %}
+          <div class="mono">
+            Folder has {{ item.ctx.track_count }} track(s). Field: <strong>{{ item.ctx.inspect_field }}</strong>
+            {% if item.ctx.value_distribution %}
+              — Values:
+              {% for val, cnt in item.ctx.value_distribution %}
+                <span class="badge">{{ val }} ({{ cnt }})</span>
+              {% endfor %}
+            {% endif %}
+          </div>
+          {% set top_val = item.ctx.value_distribution[0][0] if item.ctx.value_distribution and item.ctx.value_distribution[0][0] != '<empty>' else '' %}
+          <form method="post" action="/review/{{ item.id }}/apply-folder-tag" class="inline-form">
+            <input type="hidden" name="return_url" value="{{ current_url }}">
+            <select name="field">
+              {% for fname in ["album", "albumartist", "artist", "year", "genre"] %}
+                <option value="{{ fname }}" {% if item.ctx.inspect_field == fname %}selected{% endif %}>{{ fname }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="value" value="{{ top_val }}" placeholder="Consistent value..." required style="min-width: 240px;">
+            <button type="submit" class="primary">Apply to All Tracks</button>
+          </form>
+
+        {% elif item.ctx.is_file %}
+          {% set tags = item.ctx.tags or {} %}
+          <form method="post" action="/review/{{ item.id }}/write-tags" class="inline-form">
+            <input type="hidden" name="return_url" value="{{ current_url }}">
+            <input type="text" name="artist" value="{{ tags.get('artist', '') }}" placeholder="Artist">
+            <input type="text" name="album" value="{{ tags.get('album', '') }}" placeholder="Album">
+            <input type="text" name="title" value="{{ tags.get('title', '') }}" placeholder="Title">
+            <input type="text" name="year" value="{{ tags.get('year', '') }}" placeholder="Year" style="width: 80px;">
+            <input type="text" name="genre" value="{{ tags.get('genre', '') }}" placeholder="Genre">
+            <button type="submit" class="primary">Save Tags &amp; Resolve</button>
+          </form>
+          {% if item.ctx.exists %}
+            <audio controls preload="none" src="/media/audio?path={{ item.path|urlencode }}"></audio>
+          {% endif %}
+        {% else %}
+          <pre class="mono" style="white-space: pre-wrap; margin: 6px 0 0;">{{ item.payload }}</pre>
+        {% endif %}
+      </div>
+
+      <form id="status-resolve-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+        <input type="hidden" name="status" value="resolved">
+        <input type="hidden" name="return_url" value="{{ current_url }}">
+      </form>
+      <form id="status-dismiss-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+        <input type="hidden" name="status" value="dismissed">
+        <input type="hidden" name="return_url" value="{{ current_url }}">
+      </form>
+      <form id="status-reopen-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+        <input type="hidden" name="status" value="pending">
+        <input type="hidden" name="return_url" value="{{ current_url }}">
+      </form>
+    {% endfor %}
+
+    <div id="bulk-bar" class="bulk-bar">
+      <div><strong><span id="bulk-count">0</span></strong> item(s) selected</div>
+      <div class="inline-form" style="margin-top: 0;">
+        <input type="text" name="genre_value" placeholder="Genre for selected...">
+        <button type="submit" name="action" value="apply_genre" class="primary">Apply Genre</button>
+        <button type="submit" name="action" value="resolve" class="ok">Mark Resolved</button>
+        <button type="submit" name="action" value="dismiss">Dismiss</button>
+        <button type="submit" name="action" value="reopen">Reopen</button>
+      </div>
+    </div>
+  </form>
+{% endif %}
+
+{% if total_pages > 1 %}
+  <div class="pagination">
+    {% if page > 1 %}
+      <a class="btn" href="/review?status={{ status }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}{% if q %}&q={{ q|urlencode }}{% endif %}{% if group %}&group={{ group|urlencode }}{% endif %}&page={{ page - 1 }}">Prev</a>
+    {% endif %}
+    <span class="mono">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+      <a class="btn" href="/review?status={{ status }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}{% if q %}&q={{ q|urlencode }}{% endif %}{% if group %}&group={{ group|urlencode }}{% endif %}&page={{ page + 1 }}">Next</a>
+    {% endif %}
+  </div>
+{% endif %}
+{% endblock %}

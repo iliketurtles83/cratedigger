@@ -33,6 +33,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="Show SQLite store counts")
 
+    ui_p = sub.add_parser("ui", help="Launch local review & quarantine web UI")
+    ui_p.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    ui_p.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
+    ui_p.add_argument("--music-root", type=Path, default=None, help="Override MUSIC_ROOT directory")
+
     args = parser.parse_args(argv)
 
     if args.command == "db-init":
@@ -66,6 +71,15 @@ def main(argv: list[str] | None = None) -> int:
             paths = conn.execute("SELECT COUNT(*) FROM track_paths").fetchone()[0]
             counts = review_counts(conn)
         print(json.dumps({"tracks": tracks, "track_paths": paths, "review_items": counts}, indent=2))
+        return 0
+
+    if args.command == "ui":
+        import uvicorn
+        from cratedigger.web.app import create_app
+
+        app = create_app(db_path=args.db, music_root=args.music_root)
+        log.info("Starting Cratedigger web UI at http://%s:%d/review", args.host, args.port)
+        uvicorn.run(app, host=args.host, port=args.port)
         return 0
 
     return 1
