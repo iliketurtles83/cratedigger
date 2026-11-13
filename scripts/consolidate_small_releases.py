@@ -131,6 +131,32 @@ def _unique_alternate_path(path: Path, digest: str) -> Path:
     return candidate
 
 
+def _resolve_artist_folder(music_root: Path, artist: str) -> str:
+    """Return existing valid Tier 1 artist folder name if unambiguous, else sanitized name."""
+    fallback = sanitise_component(sanitise_name(artist))
+    bucket_dir = music_root / artist_letter_bucket(fallback)
+    if not bucket_dir.is_dir():
+        return fallback
+    for child in bucket_dir.iterdir():
+        if (
+            child.is_dir()
+            and child.name.casefold() == fallback.casefold()
+            and sanitise_component(child.name) == child.name
+        ):
+            return child.name
+    key = artist_comparison_key(artist)
+    matches = [
+        child.name
+        for child in bucket_dir.iterdir()
+        if child.is_dir()
+        and sanitise_component(child.name) == child.name
+        and artist_comparison_key(child.name) == key
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return fallback
+
+
 def _remove_empty_directory(folder: Path, *, dry_run: bool) -> None:
     """Recursively remove empty directory, discarding leftover artwork if only scans/artwork remain."""
     if not folder.exists() or not folder.is_dir():
@@ -279,11 +305,12 @@ def consolidate_small_releases(
 
             if not primary_artist:
                 dest_dir = music_root / config.ROOT_SINGLES_FOLDER
-                dest_name = f"{sanitise_component(title)}{audio_path.suffix.lower()}"
+                dest_name = build_filename(None, None, title, ext=audio_path.suffix.lower())
             else:
-                bucket = artist_letter_bucket(primary_artist)
-                dest_dir = music_root / bucket / primary_artist / config.ARTIST_SINGLES_FOLDER
-                dest_name = f"{sanitise_component(primary_artist)} - {sanitise_component(title)}{audio_path.suffix.lower()}"
+                artist_dir = _resolve_artist_folder(music_root, primary_artist)
+                bucket = artist_letter_bucket(artist_dir)
+                dest_dir = music_root / bucket / artist_dir / config.ARTIST_SINGLES_FOLDER
+                dest_name = build_filename(None, primary_artist, title, ext=audio_path.suffix.lower())
 
             dest_path = dest_dir / dest_name
 

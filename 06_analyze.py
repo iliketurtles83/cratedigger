@@ -307,6 +307,22 @@ def extract_features(path: Path) -> dict:
         base["error"] = "librosa_not_installed"
         return base
 
+    # Quick pre-check using mutagen for long files (> 20 min) to avoid decoding
+    try:
+        import mutagen
+        mf = mutagen.File(str(path))
+        if mf is not None and getattr(mf, "info", None) and getattr(mf.info, "length", 0) > 1200:
+            stat = path.stat()
+            base["mtime"] = stat.st_mtime
+            base["size"] = stat.st_size
+            base["schema_version"] = FEATURE_SCHEMA_VERSION
+            base["duration_ms"] = int(round(mf.info.length * 1000))
+            base["error"] = "duration_exceeds_20min"
+            base["analyzed_at"] = datetime.now(timezone.utc).isoformat()
+            return base
+    except Exception:
+        pass
+
     # Load audio at standard analysis rate (22,050 Hz) for 3x faster decoding
     # and lower memory usage while fully preserving musical pitch/tonality.
     ANALYSIS_SR = 22050
@@ -503,11 +519,13 @@ def _needs_analysis(row, path: Path) -> bool:
         stat = path.stat()
     except OSError:
         return False
-    if _has_error(row.get("error")):
-        return True
     if row.get("schema_version") != FEATURE_SCHEMA_VERSION:
         return True
     if not row.get("audio_hash"):
+        return True
+    if row.get("error") == "duration_exceeds_20min" and row.get("size") == stat.st_size:
+        return False
+    if _has_error(row.get("error")):
         return True
     if row.get("mtime") != stat.st_mtime:
         return True
@@ -578,7 +596,10 @@ def analyze_folder(
                 and ah
                 and ah in existing_by_hash
                 and existing_by_hash[ah].get("schema_version") == FEATURE_SCHEMA_VERSION
-                and not _has_error(existing_by_hash[ah].get("error"))
+                and (
+                    not _has_error(existing_by_hash[ah].get("error"))
+                    or existing_by_hash[ah].get("error") == "duration_exceeds_20min"
+                )
             ):
                 matched_row = dict(existing_by_hash[ah])
                 stat = path.stat()

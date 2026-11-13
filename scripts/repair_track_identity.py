@@ -368,8 +368,8 @@ def _album_relocations(
 def _relocated_album_name(source: Path, old_artist: str, new_artist: str) -> str:
     prefix = f"{old_artist} - "
     if source.name.casefold().startswith(prefix.casefold()):
-        return f"{sanitise_name(new_artist)} - {source.name[len(prefix):]}"
-    return source.name
+        return sanitise_component(f"{sanitise_name(new_artist)} - {source.name[len(prefix):]}")
+    return sanitise_component(source.name)
 
 
 def _unique_path(path: Path) -> Path:
@@ -462,7 +462,7 @@ def relocate_track(
     singles = config.MUSIC_ROOT / config.ROOT_SINGLES_FOLDER
     artist = decision.fingerprint_artist
     title = decision.fingerprint_title or decision.candidate.title
-    name = f"{sanitise_name(artist)} - {sanitise_name(title)}{decision.candidate.path.suffix}"
+    name = sanitise_component(f"{sanitise_name(artist)} - {sanitise_name(title)}{decision.candidate.path.suffix}")
     destination = singles / name
     if dry_run:
         return destination

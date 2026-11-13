@@ -340,8 +340,8 @@ def _canonical_name(
 def _destination_name(source: Path, canonical: str) -> str:
     prefix = f"{source.parent.name} - "
     if source.name.casefold().startswith(prefix.casefold()):
-        return f"{sanitise_name(canonical)} - {source.name[len(prefix):]}"
-    return source.name
+        return sanitise_component(f"{sanitise_name(canonical)} - {source.name[len(prefix):]}")
+    return sanitise_component(source.name)
 
 
 def _find_collisions(

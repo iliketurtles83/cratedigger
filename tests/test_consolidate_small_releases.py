@@ -52,6 +52,29 @@ class TestConsolidateSmallReleases(unittest.TestCase):
         self.assertTrue(is_comp)
         self.assertEqual(reason, "ep_keyword_in_album_tag")
 
+    def test_consolidate_strips_trailing_dot_from_artist_folder(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            comp_dir = root / "0compilations" / "Some Sampler (2000)"
+            comp_dir.mkdir(parents=True)
+            track_path = comp_dir / "01 - A.P.E. - No. 5.mp3"
+            track_path.write_bytes(b"fake")
+
+            with patch.object(config, "MUSIC_ROOT", root), patch(
+                "scripts.consolidate_small_releases.read_tags",
+                return_value={"artist": "A.P.E.", "title": "No. 5", "track": "1/12"},
+            ), patch("scripts.consolidate_small_releases.write_tags"), patch(
+                "scripts.consolidate_small_releases.update_downstream_paths"
+            ):
+                consolidate_small_releases(
+                    dry_run=False,
+                    folder="0compilations",
+                )
+
+            expected = root / "A" / "A.P.E" / "0singles" / "A.P.E. - No. 5.mp3"
+            self.assertTrue(expected.exists())
+            self.assertFalse((root / "A" / "A.P.E.").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -115,6 +115,31 @@ class WindowsPathTests(unittest.TestCase):
             )
             update_paths.assert_called_once()
 
+    def test_repair_merges_case_insensitive_cover_art_keeping_higher_quality(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            album = root / "Artist - Album"
+            album.mkdir()
+            low_res = album / "Cover.jpg"
+            high_res = album / "cover.jpg"
+            # Simulate low-res vs high-res sizes
+            low_res.write_bytes(b"small")
+            high_res.write_bytes(b"large_high_resolution_image_data")
+
+            with patch.object(config, "MUSIC_ROOT", root), patch(
+                "scripts.repair_windows_paths.update_downstream_paths"
+            ):
+                repair_windows_paths(dry_run=False, fix=True)
+
+            self.assertEqual(
+                [p.name for p in album.iterdir()],
+                ["cover.jpg"],
+            )
+            self.assertEqual(
+                (album / "cover.jpg").read_bytes(),
+                b"large_high_resolution_image_data",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

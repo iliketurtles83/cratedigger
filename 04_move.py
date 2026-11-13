@@ -610,8 +610,10 @@ def _migrate_album_to_artist_root(
         review_items.append({"path": str(folder), "reason": "no_artist_tag"})
         return
 
-    bucket = _artist_letter_bucket(artist)
-    dest = config.MUSIC_ROOT / bucket / artist / folder.name
+    artist_dir, _ = _canonical_artist_folder_name(artist)
+    artist_dir = artist_dir or sanitise_component(sanitise_name(artist))
+    bucket = _artist_letter_bucket(artist_dir)
+    dest = config.MUSIC_ROOT / bucket / artist_dir / sanitise_component(folder.name)
 
     if dest.exists():
         log.warning("Target exists, skipping: %s → %s", folder, dest)
@@ -638,10 +640,12 @@ def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
                     if not re.match(r"^\d+(?:-\d+)?$", cand):
                         artist = cand or None
                 if artist:
-                    bucket = _artist_letter_bucket(artist)
-                    dest_single = config.MUSIC_ROOT / bucket / artist / "0singles" / child.name
+                    artist_dir, _ = _canonical_artist_folder_name(artist)
+                    artist_dir = artist_dir or sanitise_component(sanitise_name(artist))
+                    bucket = _artist_letter_bucket(artist_dir)
+                    dest_single = config.MUSIC_ROOT / bucket / artist_dir / "0singles" / sanitise_component(child.name)
                 else:
-                    dest_single = config.MUSIC_ROOT / "0singles" / child.name
+                    dest_single = config.MUSIC_ROOT / "0singles" / sanitise_component(child.name)
 
                 if dest_single.exists():
                     log.warning("Target single exists, skipping: %s → %s", child, dest_single)
@@ -703,10 +707,12 @@ def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
                     if not re.match(r"^\d+(?:-\d+)?$", cand):
                         artist = cand or None
                 if artist:
-                    bucket = _artist_letter_bucket(artist)
-                    dest_single = config.MUSIC_ROOT / bucket / artist / "0singles" / s.name
+                    artist_dir, _ = _canonical_artist_folder_name(artist)
+                    artist_dir = artist_dir or sanitise_component(sanitise_name(artist))
+                    bucket = _artist_letter_bucket(artist_dir)
+                    dest_single = config.MUSIC_ROOT / bucket / artist_dir / "0singles" / sanitise_component(s.name)
                 else:
-                    dest_single = config.MUSIC_ROOT / "0singles" / s.name
+                    dest_single = config.MUSIC_ROOT / "0singles" / sanitise_component(s.name)
 
                 if dest_single.exists():
                     log.warning("Target single exists, skipping: %s → %s", s, dest_single)
@@ -756,7 +762,7 @@ def _walk_genre_to_artist_root(genre_dir: Path, *, dry_run: bool) -> list[dict]:
 
         elif kind in ("artist", "artist_flat", "artist_mixed"):
             # genre/Artist/ → bucket/Artist/  (move the whole artist folder)
-            artist_name = child.name
+            artist_name = sanitise_component(sanitise_name(child.name))
             bucket = _artist_letter_bucket(artist_name)
             dest = config.MUSIC_ROOT / bucket / artist_name
 
@@ -861,7 +867,8 @@ def _explicit_compilation_name(folder: Path) -> str | None:
         return sanitise_component(name)
 
     prefix = folder.name.split(" - ", 1)
-    return prefix[1] if len(prefix) == 2 and prefix[0].casefold() in _COMPILATION_ALBUMARTISTS else folder.name
+    raw = prefix[1] if len(prefix) == 2 and prefix[0].casefold() in _COMPILATION_ALBUMARTISTS else folder.name
+    return sanitise_component(raw)
 
 
 def _primary_track_artist(artist: str) -> str:
@@ -881,6 +888,7 @@ def _canonical_artist_folder_name(artist: str) -> tuple[str | None, str | None]:
         path.name
         for path in bucket.iterdir()
         if path.is_dir()
+        and sanitise_component(path.name) == path.name
         and artist_comparison_key(path.name) == artist_comparison_key(artist)
     ] if bucket.is_dir() else []
     if len(matches) > 1:
