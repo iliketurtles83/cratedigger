@@ -217,8 +217,10 @@ below −80 dBFS) and tracks over 20 minutes are not embedded.
 
 `loudness_lufs` is ITU-R BS.1770 integrated loudness of the original channels
 at the native sample rate (schema 11). Earlier schemas measured the mono
-downmix, which read 3–6 dB low for stereo files. It describes the file's
-mastered level; use it for playback leveling rather than rewriting audio.
+downmix, which read 3–6 dB low for stereo files. `native_peak_dbfs` is the
+sample peak of the original channels and can exceed 0 dBFS for decoded overs.
+Together they describe the file's mastered level; use them for clipping-safe
+playback leveling rather than rewriting audio.
 
 ### intake.py — Full intake in one command
 

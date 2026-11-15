@@ -1,8 +1,8 @@
 # Feature extraction and player export plan
 
 Status: v10 extraction committed (`ee9bba2`) and validated by a 240-track
-pilot; schema 11 corrects stereo loudness; production migration ready to run;
-export versioning not started.
+pilot; schema 11 corrects stereo loudness and adds native peak; production
+migration ready to run; export versioning not started.
 Date: 2026-11-15.
 Reviewed baseline: `884ae83`.
 
@@ -122,26 +122,31 @@ revisits this.
 Through schema 10, `loudness_lufs` was measured on the mono 22.05 kHz analysis
 downmix. BS.1770 sums channel power, so that underestimated stereo files by 3
 dB (identical channels) to 6 dB (uncorrelated channels). Schema 11 decodes once
-at the native rate, measures the original channels with pyloudnorm, then
-derives the analysis buffer exactly as `librosa.load` does (downmix, then
-`soxr_hq`). On the pilot (240 tracks plus fixtures):
+at the native rate, measures the original channels with pyloudnorm, records
+their sample peak as `native_peak_dbfs`, then derives the analysis buffer
+exactly as `librosa.load` does (downmix, then `soxr_hq`). On the pilot (240
+tracks plus fixtures):
 
 - Embeddings were bit-identical to v10. DSP matched apart from the known
-  `bpm_confidence` jitter (4 tracks) and one danceability value (0.0005).
+  `bpm_confidence` jitter (6 tracks) and one danceability value (0.0005).
 - Stereo loudness rose by a median of 3.5 dB (5th-95th percentile 3.0-5.0,
   maximum 6.9); mono files were unchanged. Pilot median: -12.7 LUFS.
-- Wall time was 0.72 s/file (v10: 0.63) and peak RSS 3.1 GB. On a 19.5-minute
+- `native_peak_dbfs` was a median 0.7 dB (95th percentile 2.9, maximum 5.9)
+  above the mono `peak_dbfs`; 105/240 tracks decode above 0 dBFS. Overs up to
+  +6 dBFS are kept, while larger decoder spikes are ignored.
+- Wall time was 0.75 s/file (v10: 0.63) and peak RSS 3.0 GB. On a 19.5-minute
   stereo file, peak RSS rose from 2.0 to 2.3 GB.
-- Out-of-phase stereo now has a finite loudness, but it still skips embedding
-  because its mono analysis signal is silent.
+- Out-of-phase stereo now has a finite loudness and peak, but it still skips
+  embedding because its mono analysis signal is silent.
 
 A vectorized BS.1770 implementation matched pyloudnorm exactly but saved only
 about 15 minutes over the full run, so v11 keeps pyloudnorm.
 
-Only `loudness_lufs` changes meaning. `energy`, `rms_dbfs`, `peak_dbfs`,
-valence (through its energy term), and the embeddings still follow file level.
+Only `loudness_lufs` changes meaning, and `native_peak_dbfs` is new. `energy`,
+`rms_dbfs`, `peak_dbfs`, valence (through its energy term), and the embeddings
+still follow file level.
 
-Estimated production migration: about 8.7 hours for 43,882 files at the
+Estimated production migration: about 9 hours for 43,882 files at the
 measured rate.
 
 ## 1. Correct preprocessing and retain reusable model outputs
@@ -297,8 +302,8 @@ Main surfaces:
   incompatible component recipes in one declared export vector space.
 - Write exports atomically. Keep the deployed export until the replacement
   meets coverage and client-compatibility requirements.
-- Consider exporting schema 11 `loudness_lufs` and `peak_dbfs` so the player
-  can level playback volume without rewriting audio.
+- Consider exporting schema 11 `loudness_lufs` and `native_peak_dbfs` so the
+  player can level playback volume without rewriting audio or clipping.
 
 Measure payload size and player-facing dimensional/memory costs before choosing
 any larger recipe. The current saved gzip export is about 34.3 MiB, so the older

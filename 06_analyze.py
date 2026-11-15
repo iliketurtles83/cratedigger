@@ -38,7 +38,8 @@ Output schema (one row per audio file):
     dynamic_complexity  : float (raw Essentia DynamicComplexity, dB)
     danceability_raw    : float (raw Essentia DFA danceability)
     mfcc_delta_std      : float (mean std of lower MFCC deltas; vocal-activity proxy input)
-    peak_dbfs           : float (sanitized peak level)
+    peak_dbfs           : float (sanitized peak level of the mono 22.05 kHz analysis signal)
+    native_peak_dbfs    : float (sample peak of the original channels at native rate; may exceed 0 for decoded overs)
     rms_dbfs            : float (sanitized RMS level)
     sanitized_fraction  : float (fraction of samples zeroed as non-finite/decoder spikes)
     signal_status       : str  (ok | silent; silent when peak <= SILENT_PEAK_DBFS)
@@ -113,7 +114,8 @@ from lib.tempo import estimate_tempo, sanitize_bpm_tag
 # 10: HQ model resampling, raw 400+1280 model outputs, embedding/tempo/key status
 # and provenance, signal quality, and raw Essentia/MFCC summaries.
 # 11: loudness_lufs measured on the original channels at the native rate instead
-# of the mono 22.05 kHz downmix (stereo tracks read 3-6 dB low before).
+# of the mono 22.05 kHz downmix (stereo tracks read 3-6 dB low before), plus
+# native_peak_dbfs for clipping-safe playback gain.
 FEATURE_SCHEMA_VERSION = 11
 SILENT_PEAK_DBFS = -80.0
 DEFAULT_CHECKPOINT_SECONDS = 300.0
@@ -176,7 +178,7 @@ FEATURE_COLUMNS: list[str] = [
     "speechiness", "acousticness", "instrumentalness", "liveness", "valence",
     "bpm_method", "bpm_status", "key_method", "key_strength",
     "dynamic_complexity", "danceability_raw", "mfcc_delta_std",
-    "peak_dbfs", "rms_dbfs", "sanitized_fraction", "signal_status",
+    "peak_dbfs", "native_peak_dbfs", "rms_dbfs", "sanitized_fraction", "signal_status",
     *EMBEDDING_COLUMNS,
     "schema_version", "analyzed_at", "error",
 ]
@@ -499,7 +501,7 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
     # Decode once at the native rate for loudness, then analyze a mono 22,050 Hz
     # buffer (identical to librosa.load(sr=22050)) to keep DSP fast and stable.
     try:
-        y, sr, native_lufs = _load_analysis_audio_with_loudness(path, librosa)
+        y, sr, native_lufs, native_peak = _load_analysis_audio_with_levels(path, librosa)
     except Exception as exc:
         base["error"] = f"load_failed: {exc}"
         return base
@@ -510,6 +512,7 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
 
     y, zeroed = sanitize_audio(y)
     base.update(_signal_quality(y, zeroed, y.size))
+    base["native_peak_dbfs"] = native_peak
 
     try:
         duration_s = float(librosa.get_duration(y=y, sr=sr))
@@ -707,9 +710,22 @@ def _integrated_loudness(native: np.ndarray, native_sr: int) -> float | None:
     return round(lufs, 2) if np.isfinite(lufs) and lufs <= 0.0 else None
 
 
-def _load_analysis_audio_with_loudness(path: Path, librosa) -> tuple[np.ndarray, int, float | None]:
-    """Decode once at the native rate, measure loudness on the original channels,
-    then derive the same mono buffer ``_load_analysis_audio`` returns
+def _native_peak_dbfs(native: np.ndarray) -> float | None:
+    """Sample peak of the original channels; decoder spikes beyond +/-2.0 are
+    ignored but overs up to that bound are kept (unlike ``peak_dbfs``)."""
+    if native.size == 0:
+        return None
+    mag = np.abs(native)
+    with np.errstate(invalid="ignore"):
+        peak = float(np.max(np.where(mag <= 2.0, mag, np.float32(0.0))))
+    return _level_dbfs(peak)
+
+
+def _load_analysis_audio_with_levels(
+    path: Path, librosa
+) -> tuple[np.ndarray, int, float | None, float | None]:
+    """Decode once at the native rate, measure loudness and peak on the original
+    channels, then derive the same mono buffer ``_load_analysis_audio`` returns
     (``librosa.load`` downmixes and resamples in this order)."""
     with warnings.catch_warnings(), _suppress_c_stderr():
         warnings.filterwarnings("ignore", category=UserWarning)
@@ -717,12 +733,13 @@ def _load_analysis_audio_with_loudness(path: Path, librosa) -> tuple[np.ndarray,
         native, native_sr = librosa.load(str(path), sr=None, mono=False)
     native_sr = int(native_sr)
     lufs = _integrated_loudness(native, native_sr)
+    native_peak = _native_peak_dbfs(native)
     y = librosa.to_mono(native)
     del native
     target_sr = embedding_lib.DECODE_SAMPLE_RATE
     if native_sr != target_sr:
         y = librosa.resample(y, orig_sr=native_sr, target_sr=target_sr, res_type="soxr_hq")
-    return y, target_sr, lufs
+    return y, target_sr, lufs, native_peak
 
 
 def _embedding_for(

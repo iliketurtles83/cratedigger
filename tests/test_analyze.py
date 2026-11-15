@@ -53,7 +53,7 @@ class TestAnalyzeSchema(unittest.TestCase):
             "speechiness", "acousticness", "instrumentalness", "liveness", "valence",
             "bpm_method", "bpm_status", "key_method", "key_strength",
             "dynamic_complexity", "danceability_raw", "mfcc_delta_std",
-            "peak_dbfs", "rms_dbfs", "sanitized_fraction", "signal_status",
+            "peak_dbfs", "native_peak_dbfs", "rms_dbfs", "sanitized_fraction", "signal_status",
             "embedding", "style_activations", "audio_embedding", "embedding_patches",
             "embedding_status", "embedding_error", "embedding_recipe",
             "embedding_model_sha256", "style_labels_sha256",
@@ -284,7 +284,7 @@ class TestNativeLoudness(unittest.TestCase):
         n = 44100 * 3
         path = self._write_stereo("wide.flac", 0.2 * rng.standard_normal(n), 0.2 * rng.standard_normal(n))
         y_ref, sr_ref = analyze._load_analysis_audio(path, self.librosa)
-        y, sr, lufs = analyze._load_analysis_audio_with_loudness(path, self.librosa)
+        y, sr, lufs, _ = analyze._load_analysis_audio_with_levels(path, self.librosa)
         self.assertEqual(sr, sr_ref)
         self.assertTrue(np.array_equal(y, y_ref))
         self.assertIsNotNone(lufs)
@@ -293,12 +293,26 @@ class TestNativeLoudness(unittest.TestCase):
         t = np.arange(44100 * 3) / 44100
         tone = 0.25 * np.sin(2 * np.pi * 1000 * t)
         path = self._write_stereo("dual_mono.flac", tone, tone)
-        y, sr, lufs = analyze._load_analysis_audio_with_loudness(path, self.librosa)
+        y, sr, lufs, _ = analyze._load_analysis_audio_with_levels(path, self.librosa)
         mono_lufs = float(self.pln.Meter(sr).integrated_loudness(y))
         self.assertAlmostEqual(lufs, mono_lufs + 3.01, delta=0.1)
 
         row = analyze.extract_features(path)
         self.assertEqual(row["loudness_lufs"], lufs)
+
+    def test_native_peak_uses_loudest_original_channel(self):
+        t = np.arange(44100 * 3) / 44100
+        tone = np.sin(2 * np.pi * 440 * t)
+        path = self._write_stereo("opposed.flac", 0.9 * tone, -0.5 * tone)
+        row = analyze.extract_features(path)
+        self.assertAlmostEqual(row["native_peak_dbfs"], 20 * np.log10(0.9), delta=0.05)
+        self.assertLess(row["peak_dbfs"], row["native_peak_dbfs"] - 10.0)
+
+    def test_native_peak_keeps_overs_and_ignores_decoder_spikes(self):
+        x = np.array([[0.1, -1.12, np.nan], [5.0, np.inf, 0.3]], dtype=np.float32)
+        self.assertAlmostEqual(analyze._native_peak_dbfs(x), 20 * np.log10(1.12), places=2)
+        self.assertEqual(analyze._native_peak_dbfs(np.zeros((2, 10), dtype=np.float32)), -200.0)
+        self.assertIsNone(analyze._native_peak_dbfs(np.zeros((2, 0), dtype=np.float32)))
 
     def test_short_or_silent_audio_has_no_loudness(self):
         self.assertIsNone(analyze._integrated_loudness(np.zeros((2, 44100), dtype=np.float32), 44100))
