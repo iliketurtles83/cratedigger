@@ -2,7 +2,10 @@
 
 ## Current Status
 
-**Pipeline is stable for core operations**: tagging, renaming, folder normalization, and intake routing all work well in `--dry-run` and production modes. Testing is ongoing; use with caution and always validate with `--dry-run` first.
+**Core pipeline, SQLite operational store, unified engine, and initial FastAPI Web UI are implemented**:
+- Legacy scripts (`01_tag.py`–`07_recommend.py`, `intake.py`, and repair utilities in `scripts/`) handle tagging, renaming, normalization, cover enrichment, duplicate quarantine, playlist generation, feature extraction (`features.pkl`), and recommendation export (`features_export.json.gz`).
+- The `cratedigger` package adds a SQLite operational database (`cratedigger.db`), `cratedigger` CLI (`db-init`, `sync-features`, `migrate-review`, `status`, `ui`, `index-artists`, `scan`, `plan`, `apply`, `undo`), a local FastAPI review/health/quarantine/undo Web UI, and the Phase 3 unified scan/plan/apply/undo engine.
+- Always validate with `--dry-run` first; see [ui_plan.md](ui_plan.md) for the remaining Web UI work.
 
 ---
 
@@ -47,14 +50,14 @@ Pipeline Phase 1 will formalize `classify_folder()` against the Tier 1 contract 
 - **Rate limiting is basic** — single global 1.1s delay per MB request; no adaptive backoff or queue.
 
 ### Testing and CI
-- **No automated test suite** — unit tests exist for helper logic only (`test_parsers.py`, `test_context.py`). Integration tests are manual.
-- **No linting or type checking** — code is written for readability and correctness but not validated by mypy, pylint, or black.
-- **No GitHub Actions** — no CI pipeline, no automated validation on PR or commit.
-- **Real audio tests are read-only smoke tests** — they depend on your local library and do not write anything.
+- **Automated unit & integration tests** — `tests/` currently covers parsers, context, tags/artwork, MusicBrainz fallbacks, recommender, SQLite migration, Web UI routes, and the Phase 3 unified engine (`python -m unittest discover -s tests`).
+- **No linting or type checking in CI** — code is not yet gated by `mypy` or `ruff` in automation.
+- **No GitHub Actions** — no automated CI pipeline on PR or commit.
+- **Real audio tests are opt-in smoke tests** — gated by `CRATEDIGGER_RUN_REAL_AUDIO_TESTS=1`; they depend on the local library and do not mutate files.
 
 ### User Experience
-- **Logging is console + file only** — no structured logging, metrics collection, or audit trail.
-- **No undo mechanism** — file moves and renames are performed directly; no rollback on error.
+- **Web UI covers triage & rollback, not planning/settings yet** — `/review`, `/health`, `/quarantine`, and `/undo` are live in `cratedigger ui`, while `scan`/`plan`/`apply`, `settings`, `intake`, and `artists` currently require the CLI (tracked in [ui_plan.md](ui_plan.md)).
+- **Undo coverage** — operations executed through the Web UI and `cratedigger` engine (`execute_plan`) are recorded in `undo_journal` and reversible via `undo` / `/undo`; standalone legacy scripts still mutate directly after `--dry-run`.
 
 ---
 
@@ -79,7 +82,7 @@ Letter bucketing: articles stripped for bucketing only (`The Cure` → `C/`); sy
 
 ## Planned Features
 
-### Phase 1: Folder Contract and Classification Rules — **ACTIVE**
+### Phase 1: Folder Contract and Classification Rules — **COMPLETE**
 
 Folder contract is defined (see Architecture — Folder Contract). Implementation tasks in order:
 
@@ -189,22 +192,41 @@ Post-tagging pass to detect and resolve files with identical ISRC tags (physical
 - Merge proposal scoring is deterministic and reviewable.
 - Ambiguous merges are routed to review with enough context to decide quickly.
 
-### Phase 8: Fixes found by using music-player (2026-10-13)
+### Phase 8: Fixes found by using music-player (2026-10-13) — **COMPLETE**
 
-Found while browsing the library in music-player; details and counts are in music-player's `docs/cratedigger-feedback.md`, section 9.
+Found while browsing the library in music-player; details and counts are in [cratedigger-feedback.md](cratedigger-feedback.md).
 
-1. **Cover art under other names → `cover.jpg`.** The same rename process as `02_rename.py`, applied to images. music-player (like most players) only finds embedded art, `cover.jpg` or `folder.jpg`; e.g. *More Songs About Buildings and Food* has its cover as `0413. Talking Heads - More Songs About Buildings And Food.jpg` and shows no art. Per album folder:
-   - already has `cover.jpg` or `folder.jpg`, or embedded front-cover art in every track → leave it;
-   - exactly one image (`.jpg`/`.jpeg`/`.png`) → rename it to `cover.jpg` (`cover.png` for a PNG);
-   - several images → pick by name (`front`, `cover`, `folder`, the album's name) and then by size; if it's still ambiguous, flag it for review rather than guess;
-   - never overwrite, and never touch images in disc subfolders or `0random/`-style special folders without the same rules.
-   Renaming an image doesn't change any track's audio hash, so it's free for the player (no new track IDs, no re-downloads).
-2. **Placeholder tags are empty tags.** CD-ripper defaults (`Album Title`: 137 tracks, artist `New Artist`: 83; also `Album`, `Unknown`, `Untitled`, `title`, `Unknown Album`; 542 titles like `Track 01` / `Audio Track …`; artist `Unknown Artist`, `Artist`) should be treated as missing in `01_tag.py`: look the release up, or leave the field empty. Never keep a placeholder, since players group by it.
-3. **The Pitchfork 500 is a list, not a release.** 412 of its 500 tracks have no album artist, so every artist on it gets a "The Pitchfork 500" album in the player. Tag each song with its real release and turn the folder into a playlist (feedback section 1).
+1. ✅ **Cover art under other names → `cover.jpg`** — `scripts/normalize_covers.py` and `scripts/enrich_covers.py` normalize/enrich album cover art and embed single-track covers without altering audio hashes.
+2. ✅ **Placeholder tags are empty tags** — `01_tag.py` and `02_rename.py` treat CD-ripper placeholders (`New Artist`, `Track 01`, `Album Title`, `Unknown`, etc.) as missing and refuse to write placeholder filenames.
+3. ✅ **Curated lists converted to `.m3u8` playlists** — `scripts/convert_lists.py` and `scripts/retag_lists.py` retag list tracks to their real releases and emit relative `.m3u8` playlists.
 
 **Phase 8 Exit Criteria**
-- A dry run lists every cover rename and every ambiguous folder; a live run leaves no album folder with a lone, differently named image.
-- No track in the library keeps a placeholder album, artist or title.
+- ✅ A dry run lists every cover rename and every ambiguous folder; a live run leaves no album folder with a lone, differently named image.
+- ✅ No track in the library keeps a placeholder album, artist or title.
+
+---
+
+## Cratedigger 2.0: Operational Store, Unified Engine & Web UI
+
+### Engine Phase 1: SQLite Store & Core Package — **COMPLETE**
+- ✅ Added `cratedigger` package (`pyproject.toml`, `cratedigger/db.py`, `cratedigger/cli.py`, `cratedigger/review_migration.py`).
+- ✅ Added WAL-mode SQLite schema (`tracks`, `track_paths`, `artists`, `review_items`, `plans`, `plan_actions`, `undo_journal`, `mb_cache`, `settings`).
+- ✅ Added `db-init`, `sync-features` (`features.pkl` import), `migrate-review` (with >=75% consensus auto-triage), and `status` CLI commands.
+
+### Engine Phase 2: Web UI Foundation (Review, Health, Quarantine & Undo) — **COMPLETE**
+- ✅ Added FastAPI + Jinja2 Web UI (`cratedigger ui`) in `cratedigger/web/`.
+- ✅ Implemented `/review` (status/reason filters, folder-grouped `no_genre`, cover-art picker, rename-conflict resolver, inline tag edits, bulk actions), `/health`, `/quarantine` (`audio_hash` dedup + playlist relink, restore, empty), `/undo`, and guarded `/media/image` & `/media/audio` endpoints.
+- ✅ Added read-only `music_root` mount warning banner and flash `err`/`msg` redirect handling.
+
+### Engine Phase 3: Unified Scan / Plan / Apply / Undo Engine & Settings Schema — **COMPLETE**
+- ✅ Added SQLite-backed `Settings` and layout presets (`cratedigger/config_schema.py`).
+- ✅ Added `cratedigger/core/artists.py` for featured-credit splitting and canonical Tier 1 artist index snapping.
+- ✅ Added `cratedigger/engine/` (`scanner.py`, `metadata.py`, `artwork.py`, `transcoder.py`, `playlists.py`, `planner.py`, `executor.py`) supporting deterministic plan persistence, `ffmpeg` transcoding with tag/rating preservation, and journaled undo (`undo_plan_run`).
+- ✅ Exposed `index-artists`, `scan`, `plan`, `apply`, and `undo` CLI subcommands and delegated Web UI `/undo` to `undo_plan_run`.
+
+### Engine Phase 4: Web UI Completion (Plans, Intake, Settings & Library Workflows) — **PLANNED**
+- Expose the Phase 3 engine, settings presets, artist index, intake workbench, catalog/playlist browsers, and background job tracking in the browser.
+- **Detailed task checklist:** see [docs/ui_plan.md](ui_plan.md).
 
 ---
 
@@ -224,16 +246,13 @@ None yet. All code follows current conventions.
 ## Testing Strategy
 
 ### Current
-- `test_parsers.py` — filename and folder name parsing
-- `test_context.py` — folder classification and context inference
-- `test_real_audio.py` — read-only smoke test using real library (opt-in)
+- `tests/` contains 40 test files covering helpers (`test_parsers.py`, `test_context.py`, `test_genres.py`, `test_audiohash.py`), tagging/artwork/pipeline (`test_tag_pipeline.py`, `test_tags_artwork.py`, `test_mb_phase3.py`), repair/curation scripts, recommender (`test_recommender.py`), SQLite/migration (`test_db_and_migration.py`), Web UI (`test_web_ui.py`), and Phase 3 engine (`test_engine_phase3.py`).
+- `test_real_audio.py` — opt-in read-only smoke tests using real library (`CRATEDIGGER_RUN_REAL_AUDIO_TESTS=1`).
 
 ### Planned
-- **Integration test suite** — safe, repeatable tests on test folders with synthetic audio
-- **Mock MB/AcoustID** — test tagging logic without external API calls
-- **Regression tests** — snapshots of known-good metadata for specific albums
-- **Linting** — ruff or pylint for code quality
-- **Type checking** — mypy with strict mode
+- **Web UI Phase 4 tests** — `TestClient` coverage for `/plans`, `/intake`, `/settings`, `/artists`, `/library`, `/playlists`, and background jobs (see [ui_plan.md](ui_plan.md)).
+- **Regression tests** — snapshots of known-good metadata for specific albums.
+- **Linting & CI** — `ruff` and `mypy` checks in automated CI.
 
 ---
 
@@ -270,9 +289,7 @@ For contributors:
 ## Future Possibilities (Not Committed)
 
 - **Streaming sync** — export playlist suggestions to Spotify/Apple Music
-- **Web UI** — lightweight Flask/FastAPI server for browsing and reviewing
 - **Mobile client** — companion app for mobile playback and preference sync
 - **Collaborative recommendations** — share taste with friends, blend playlists
-- **Real-time watcher** — auto-process new files as they arrive in INCOMING_FOLDER
-- **Format migration** — detect and alert on obsolete/lossy formats
+- **Real-time watcher** — auto-process new files as they arrive in `INCOMING_FOLDER`
 - **Audio quality metrics** — bitrate, sample rate normalization, codec efficiency

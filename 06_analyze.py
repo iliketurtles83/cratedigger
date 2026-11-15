@@ -16,7 +16,9 @@ Output schema (one row per audio file):
     year_tag            : str  (raw year/date tag read from file metadata)
     genre_tag           : str  (raw genre tag read from file metadata)
     duration_ms         : int
-    bpm                 : float (from file BPM tag when present)
+    bpm_tag             : float (sanitized file BPM tag when present)
+    bpm                 : float (audio-estimated tempo in BPM, None if beatless)
+    bpm_confidence      : float (Essentia RhythmExtractor2013 confidence)
     key                 : str  (e.g. "C", "F#")
     mode                : str  ("major" | "minor")
     energy              : float (mean RMS, 0..1)
@@ -64,13 +66,15 @@ from lib.audiohash import audio_hash
 from lib.embeddings import extract_embedding
 from lib.logger import setup_logger
 from lib.tags import read_tags
+from lib.tempo import estimate_tempo, sanitize_bpm_tag
 
-FEATURE_SCHEMA_VERSION = 8  # added audio_hash (a1:hex tag-invariant key) and Discogs-EffNet embedding
+FEATURE_SCHEMA_VERSION = 9  # Essentia Tempo/Key/Danceability/DynamicComplexity, speechiness v2, audio spike sanitization, shared STFT
 
 log: logging.Logger = logging.getLogger("06_analyze")
 
 _librosa = None
 _pyloudnorm = None
+_essentia_std = None
 
 
 def _load_librosa():
@@ -95,6 +99,20 @@ def _load_pyloudnorm():
     return _pyloudnorm or None
 
 
+def _load_essentia():
+    global _essentia_std
+    if _essentia_std is None:
+        try:
+            import essentia
+            essentia.log.infoActive = False
+            essentia.log.warningActive = False
+            import essentia.standard as es_std
+            _essentia_std = es_std
+        except ImportError:
+            _essentia_std = False
+    return _essentia_std or None
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -103,7 +121,7 @@ FEATURE_COLUMNS: list[str] = [
     "audio_hash", "path", "mtime", "size",
     "artist_tag", "album_tag", "track_tag", "year_tag", "genre_tag",
     "rating_tag", "rating",
-    "duration_ms", "bpm_tag", "bpm", "key", "mode",
+    "duration_ms", "bpm_tag", "bpm", "bpm_confidence", "key", "mode",
     "energy", "loudness_lufs",
     "spectral_centroid", "zero_crossing_rate",
     "danceability",
@@ -122,6 +140,27 @@ _KS_MINOR = np.array([
     2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
 ])
 _PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+_ENHARMONIC_SHARP_MAP = {
+    "Db": "C#",
+    "Eb": "D#",
+    "Gb": "F#",
+    "Ab": "G#",
+    "Bb": "A#",
+}
+
+
+def _normalize_key_name(key: str | None) -> str | None:
+    """Normalize enharmonic flats returned by Essentia to sharp names."""
+    if not key:
+        return None
+    return _ENHARMONIC_SHARP_MAP.get(key, key)
+
+
+def _sanitize_audio(y: np.ndarray) -> np.ndarray:
+    """Scrub non-finite samples and corrupt decoder spikes (e.g. libmpg123 > 2.0)."""
+    clean = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    clean = np.where(np.abs(clean) > 2.0, 0.0, np.clip(clean, -1.0, 1.0))
+    return clean.astype(np.float32, copy=False)
 
 
 def _estimate_key(chroma_mean: np.ndarray) -> tuple[str, str]:
@@ -158,69 +197,138 @@ def _suppress_c_stderr():
         os.close(saved_fd)
 
 
-def _danceability_proxy(bpm: float, beat_strength: float) -> float:
-    """Heuristic 0..1 danceability from tempo (peaked at 120 BPM) + beat strength."""
+def _danceability_proxy(
+    bpm: float | None,
+    beat_strength: float,
+    *,
+    dance_raw: float | None = None,
+    bpm_confidence: float | None = None,
+    duration_s: float | None = None,
+) -> float:
+    """0..1 danceability gated on detected tempo, preferring Essentia DFA when valid."""
     if not bpm or bpm <= 0:
         return 0.0
+    if (
+        dance_raw is not None
+        and np.isfinite(dance_raw)
+        and (duration_s is None or duration_s >= 5.0)
+    ):
+        score = float(np.clip((dance_raw - 0.6) / 2.0, 0.0, 1.0))
+        if bpm_confidence is not None and bpm_confidence < 1.0:
+            score *= float(np.clip(bpm_confidence, 0.25, 1.0))
+        return round(score, 4)
     tempo_score = float(np.exp(-((bpm - 120.0) ** 2) / (2 * 30.0 ** 2)))
     strength_score = float(min(max(beat_strength, 0.0), 1.0))
     return round(tempo_score * 0.6 + strength_score * 0.4, 4)
 
 
-def _speechiness_proxy(y: np.ndarray, librosa) -> float:
-    """Spectral flatness × ZCR proxy.
+def _speechiness_proxy(
+    y: np.ndarray,
+    librosa,
+    *,
+    dmfcc: float | None = None,
+    S_pow: np.ndarray | None = None,
+    sr: int = 22050,
+    rms_frames: np.ndarray | None = None,
+) -> float:
+    """Speech likelihood via syllabic MFCC modulation, pause dynamics, and HF penalty.
 
-    Speech is noise-like (higher flatness) with moderate-to-high ZCR.
-    Tonal music has very low flatness.  Output is 0..1.
-
-    Calibration: typical tonal music → 0.05-0.25; rap/spoken word → 0.50-0.90.
+    Combines lower-MFCC delta spread (vocal articulation), RMS frame coefficient
+    of variation and silence fraction (speech pauses), while penalizing >4 kHz
+    cymbal/distortion fizz that misclassified Metal and EDM in the flat/ZCR proxy.
     """
-    flatness = librosa.feature.spectral_flatness(y=y)
-    # Flatness for tonal music ≈ 0.01-0.10; scale ×5 so 0.20 maps to 1.0.
-    flatness_norm = float(np.clip(np.mean(flatness) * 5.0, 0.0, 1.0))
-    zcr = librosa.feature.zero_crossing_rate(y=y)
-    # ZCR for speech ≈ 0.05-0.15; normalize with 0.15 ceiling.
-    zcr_norm = float(np.clip(np.mean(zcr) / 0.15, 0.0, 1.0))
-    return round(0.5 * flatness_norm + 0.5 * zcr_norm, 4)
+    if S_pow is None:
+        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
+        S_pow = S ** 2
+    if rms_frames is None:
+        rms_frames = librosa.feature.rms(S=np.sqrt(S_pow))[0]
+    if dmfcc is None:
+        mel = librosa.feature.melspectrogram(S=S_pow, sr=sr)
+        mfccs = librosa.feature.mfcc(S=librosa.power_to_db(mel + 1e-12), n_mfcc=13)
+        delta = librosa.feature.delta(mfccs)
+        dmfcc = float(np.mean(np.std(delta[:5], axis=1)))
+
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    tot_e = np.sum(S_pow, axis=0) + 1e-12
+    hf_ratio = float(np.mean(np.sum(S_pow[freqs >= 4000], axis=0) / tot_e))
+
+    mean_rms = float(np.mean(rms_frames)) + 1e-9
+    sil = float(np.mean(rms_frames < (0.15 * mean_rms)))
+    cv = float(np.std(rms_frames) / mean_rms)
+
+    vocal_mod = 1.0 / (1.0 + float(np.exp(-(dmfcc - 3.5) / 1.5)))
+    pause_dyn = float(np.clip((cv - 0.25) / 0.9, 0.0, 1.0))
+    sil_score = float(np.clip(sil / 0.35, 0.0, 1.0))
+    hf_pen = float(np.clip(1.0 - hf_ratio * 3.0, 0.2, 1.0))
+    score = (0.40 * vocal_mod + 0.35 * pause_dyn + 0.25 * sil_score) * hf_pen
+    return round(float(np.clip(score, 0.0, 1.0)), 4)
 
 
-def _acousticness_proxy(y: np.ndarray, y_harm: np.ndarray, sr: int, librosa) -> float:
+def _acousticness_proxy(
+    y: np.ndarray | None,
+    y_harm: np.ndarray | None,
+    sr: int,
+    librosa,
+    *,
+    S_win: np.ndarray | None = None,
+    S_harm: np.ndarray | None = None,
+) -> float:
     """Harmonic-to-total energy ratio, penalized by high-frequency spectral rolloff.
 
     Acoustic instruments → high harmonic ratio + moderate rolloff → high score.
     Distorted electric / synthesizers → high rolloff or low harmonic ratio → lower score.
     """
-    harm_energy = float(np.mean(y_harm ** 2))
-    total_energy = float(np.mean(y ** 2)) + 1e-9
-    harm_ratio = float(np.clip(harm_energy / total_energy, 0.0, 1.0))
-    rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85)
+    if S_win is not None and S_harm is not None:
+        harm_energy = float(np.sum(S_harm ** 2))
+        total_energy = float(np.sum(S_win ** 2)) + 1e-9
+        harm_ratio = float(np.clip(harm_energy / total_energy, 0.0, 1.0))
+        rolloff = librosa.feature.spectral_rolloff(S=S_win, sr=sr, roll_percent=0.85)
+    else:
+        harm_energy = float(np.mean(y_harm ** 2))
+        total_energy = float(np.mean(y ** 2)) + 1e-9
+        harm_ratio = float(np.clip(harm_energy / total_energy, 0.0, 1.0))
+        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85)
     rolloff_norm = float(np.clip(np.mean(rolloff) / (sr / 2.0), 0.0, 1.0))
     return round(harm_ratio * (1.0 - rolloff_norm * 0.5), 4)
 
 
-def _instrumentalness_proxy(y: np.ndarray, sr: int, librosa) -> float:
+def _instrumentalness_proxy(
+    y: np.ndarray,
+    sr: int,
+    librosa,
+    *,
+    dmfcc: float | None = None,
+) -> float:
     """Inverse vocal activity estimated via lower MFCC delta variance.
 
     Vocals produce rapid spectral modulation captured in lower MFCC deltas.
     Sigmoid centred at 3.0 (empirical: instruments ≈ 1-2, vocals ≈ 4-8).
     """
-    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    delta = librosa.feature.delta(mfccs)
-    vocal_activity = float(np.mean(np.std(delta[:5], axis=1)))
-    vocal_norm = 1.0 / (1.0 + float(np.exp(-(vocal_activity - 3.0) / 2.0)))
+    if dmfcc is None:
+        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        delta = librosa.feature.delta(mfccs)
+        dmfcc = float(np.mean(np.std(delta[:5], axis=1)))
+    vocal_norm = 1.0 / (1.0 + float(np.exp(-(dmfcc - 3.0) / 2.0)))
     return round(1.0 - vocal_norm, 4)
 
 
-def _liveness_proxy(y: np.ndarray, sr: int, librosa) -> float:
-    """Inverse dynamic range proxy.
+def _liveness_proxy(
+    y: np.ndarray | None,
+    sr: int,
+    librosa,
+    *,
+    dynamic_complexity: float | None = None,
+    rms_frames: np.ndarray | None = None,
+) -> float:
+    """Dynamic-range / loudness-compression indicator (0=wide dynamics, 1=compressed).
 
-    NOTE: this responds to *any* loudness compression, not just live
-    recordings.  Brick-wall-mastered studio EDM/pop scores high; a
-    well-mastered live recording with genuine quiet passages scores low.
-    Treat as a compression/noise-floor indicator more than a true
-    liveness signal.
+    Prefers Essentia's ``DynamicComplexity`` (dB loudness spread, scaled by
+    ``1 - dc / 12``) when available, falling back to the RMS p90/p10 ratio.
     """
-    rms_frames = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
+    if dynamic_complexity is not None and np.isfinite(dynamic_complexity):
+        return round(float(np.clip(1.0 - dynamic_complexity / 12.0, 0.0, 1.0)), 4)
+    if rms_frames is None:
+        rms_frames = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
     if len(rms_frames) < 4:
         return 0.0
     noise_floor = float(np.percentile(rms_frames, 10))
@@ -285,13 +393,7 @@ def extract_features(path: Path) -> dict:
             if tags.get("genre"):
                 base["genre_tag"] = tags.get("genre")
             if tags.get("bpm"):
-                try:
-                    bpm_tag = float(tags["bpm"])
-                    if bpm_tag > 0:
-                        base["bpm_tag"] = round(bpm_tag, 2)
-                        base["bpm"] = round(bpm_tag, 2)
-                except (TypeError, ValueError):
-                    base["bpm_tag"] = None
+                base["bpm_tag"] = sanitize_bpm_tag(tags.get("bpm"))
             if tags.get("rating"):
                 try:
                     r_val = float(tags["rating"])
@@ -339,6 +441,8 @@ def extract_features(path: Path) -> dict:
         base["error"] = "empty_audio"
         return base
 
+    y = _sanitize_audio(y)
+
     try:
         duration_s = float(librosa.get_duration(y=y, sr=sr))
         base["duration_ms"] = int(round(duration_s * 1000))
@@ -347,86 +451,154 @@ def extract_features(path: Path) -> dict:
             base["error"] = "duration_exceeds_20min"
             return base
 
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-        bpm = base.get("bpm")
+        tempo_res = estimate_tempo(
+            path,
+            audio=y,
+            sr=sr,
+            genre=base.get("genre_tag"),
+        )
+        base["bpm"] = tempo_res.bpm
+        base["bpm_confidence"] = tempo_res.confidence
+        bpm = base["bpm"]
 
-        # Fallback to estimated tempo if tag was not present
-        if bpm is None or bpm <= 0:
-            try:
-                detected_tempo = librosa.feature.tempo(onset_envelope=onset_env, sr=sr)
-                bpm_val = float(detected_tempo[0] if hasattr(detected_tempo, "__len__") else detected_tempo)
-                if bpm_val > 0:
-                    base["bpm"] = round(bpm_val, 2)
-                    bpm = base["bpm"]
-            except Exception as exc:
-                log.debug("tempo detection fallback failed for %s: %s", path.name, exc)
+        # Shared STFT + spectral/mel intermediates so proxies avoid redundant STFTs.
+        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
+        S_pow = S ** 2
 
-        beat_strength = float(np.mean(onset_env) / (np.max(onset_env) + 1e-9))
-        base["danceability"] = _danceability_proxy(bpm, beat_strength)
+        rms_frames = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
+        base["energy"] = round(float(np.mean(rms_frames)), 6)
 
-        rms = librosa.feature.rms(y=y)
-        base["energy"] = round(float(np.mean(rms)), 6)
-
-        centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+        centroid = librosa.feature.spectral_centroid(S=S, sr=sr)
         base["spectral_centroid"] = round(float(np.mean(centroid)), 2)
 
         zcr = librosa.feature.zero_crossing_rate(y=y)
         base["zero_crossing_rate"] = round(float(np.mean(zcr)), 6)
 
-        # For harmonic separation & key estimation, analyze a central window
-        # (up to 90 seconds) to avoid massive memory/compute while retaining
-        # full musical key and harmonic profile.
+        mel = librosa.feature.melspectrogram(S=S_pow, sr=sr)
+        mfccs = librosa.feature.mfcc(S=librosa.power_to_db(mel + 1e-12), n_mfcc=13)
+        dmfcc = float(np.mean(np.std(librosa.feature.delta(mfccs)[:5], axis=1)))
+
+        # Central 90s window for tonal/rhythmic Essentia extractors.
         if duration_s > 90.0:
             start_s = max(0.0, (duration_s / 2.0) - 45.0)
             end_s = start_s + 90.0
-            y_harm_window = y[int(start_s * sr) : int(end_s * sr)]
+            y_win = y[int(start_s * sr) : int(end_s * sr)]
         else:
-            y_harm_window = y
+            y_win = y
 
-        try:
-            y_harm, _ = librosa.effects.hpss(y_harm_window, kernel_size=15)
-        except Exception:
-            y_harm = y_harm_window
+        dance_raw: float | None = None
+        dyn_comp: float | None = None
+        es_std = _load_essentia()
+        if es_std is not None and y_win.size > 0:
+            try:
+                y44 = librosa.resample(
+                    y_win, orig_sr=sr, target_sr=44100, res_type="soxr_qq"
+                ).astype(np.float32, copy=False)
+                key_raw, mode_raw, _ = es_std.KeyExtractor()(y44)
+                base["key"] = _normalize_key_name(key_raw)
+                base["mode"] = mode_raw
+                try:
+                    d_val, _ = es_std.Danceability()(y44)
+                    dance_raw = float(d_val)
+                except Exception as exc:
+                    log.debug("Essentia Danceability failed for %s: %s", path.name, exc)
+                try:
+                    dc_val, _ = es_std.DynamicComplexity()(y44)
+                    dyn_comp = float(dc_val)
+                except Exception as exc:
+                    log.debug("Essentia DynamicComplexity failed for %s: %s", path.name, exc)
+            except Exception as exc:
+                log.debug("Essentia key/rhythm extractors failed for %s: %s", path.name, exc)
 
-        chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr)
-        chroma_mean = chroma.mean(axis=1)
-        key, mode = _estimate_key(chroma_mean)
-        base["key"] = key
-        base["mode"] = mode
+        if base["key"] is None or base["mode"] is None:
+            try:
+                y_harm_fallback, _ = librosa.effects.hpss(y_win, kernel_size=15)
+            except Exception:
+                y_harm_fallback = y_win
+            chroma = librosa.feature.chroma_cqt(y=y_harm_fallback, sr=sr)
+            key, mode = _estimate_key(chroma.mean(axis=1))
+            base["key"] = key
+            base["mode"] = mode
+
+        beat_strength = 0.0
+        if bpm is not None and (dance_raw is None or duration_s < 5.0):
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+            beat_strength = float(np.mean(onset_env) / (np.max(onset_env) + 1e-9))
+        base["danceability"] = _danceability_proxy(
+            bpm,
+            beat_strength,
+            dance_raw=dance_raw,
+            bpm_confidence=tempo_res.confidence,
+            duration_s=duration_s,
+        )
 
         pln = _load_pyloudnorm()
         if pln is not None and duration_s >= 0.5:
             try:
                 meter = pln.Meter(sr)
                 lufs = float(meter.integrated_loudness(y))
-                base["loudness_lufs"] = round(lufs, 2) if np.isfinite(lufs) else None
+                if np.isfinite(lufs) and lufs <= 0.0:
+                    base["loudness_lufs"] = round(lufs, 2)
             except Exception as exc:
                 log.debug("LUFS failed for %s: %s", path.name, exc)
 
-        # DIY proxy features — no trained model required.
         try:
-            base["speechiness"] = _speechiness_proxy(y, librosa)
+            base["speechiness"] = _speechiness_proxy(
+                y,
+                librosa,
+                dmfcc=dmfcc,
+                S_pow=S_pow,
+                sr=sr,
+                rms_frames=rms_frames,
+            )
         except Exception as exc:
             log.debug("speechiness proxy failed for %s: %s", path.name, exc)
 
         try:
-            base["acousticness"] = _acousticness_proxy(y_harm_window, y_harm, sr, librosa)
+            if duration_s > 30.0:
+                start_f = int(librosa.time_to_frames((duration_s / 2.0) - 15.0, sr=sr, hop_length=512))
+                end_f = int(librosa.time_to_frames((duration_s / 2.0) + 15.0, sr=sr, hop_length=512))
+                end_f = min(end_f, S.shape[1])
+                start_f = max(0, min(start_f, end_f))
+                S_win = S[:, start_f:end_f] if (end_f - start_f) >= 16 else S
+            else:
+                S_win = S
+            try:
+                S_harm, _ = librosa.decompose.hpss(S_win, kernel_size=15)
+            except Exception:
+                S_harm = S_win
+            base["acousticness"] = _acousticness_proxy(
+                None,
+                None,
+                sr,
+                librosa,
+                S_win=S_win,
+                S_harm=S_harm,
+            )
         except Exception as exc:
             log.debug("acousticness proxy failed for %s: %s", path.name, exc)
 
         try:
-            base["instrumentalness"] = _instrumentalness_proxy(y, sr, librosa)
+            base["instrumentalness"] = _instrumentalness_proxy(
+                y, sr, librosa, dmfcc=dmfcc
+            )
         except Exception as exc:
             log.debug("instrumentalness proxy failed for %s: %s", path.name, exc)
 
         try:
-            base["liveness"] = _liveness_proxy(y, sr, librosa)
+            base["liveness"] = _liveness_proxy(
+                y,
+                sr,
+                librosa,
+                dynamic_complexity=dyn_comp,
+                rms_frames=rms_frames,
+            )
         except Exception as exc:
             log.debug("liveness proxy failed for %s: %s", path.name, exc)
 
         try:
             base["valence"] = _valence_proxy(
-                mode, bpm, base.get("spectral_centroid"), base.get("energy")
+                base["mode"], bpm, base.get("spectral_centroid"), base.get("energy")
             )
         except Exception as exc:
             log.debug("valence proxy failed for %s: %s", path.name, exc)
@@ -585,7 +757,7 @@ def analyze_folder(
         else:
             # Check if this file is a renamed/moved file whose audio_hash already exists
             ah = None
-            if not force and existing_by_hash:
+            if not force and current is None and existing_by_hash:
                 try:
                     ah = audio_hash(str(path))
                 except Exception:

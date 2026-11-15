@@ -16,7 +16,6 @@ import argparse
 import json
 import logging
 import re
-import warnings
 from collections import Counter
 from pathlib import Path
 
@@ -36,46 +35,21 @@ from lib.parsers import (
 )
 from lib.preferences import remap_genre_value, resolve_preference_labels, write_preference_labels
 from lib.tags import read_tags, write_tags
+from lib.tempo import estimate_tempo, sanitize_bpm_tag
 
 log: logging.Logger = logging.getLogger("01_tag")
 
 # ---------------------------------------------------------------------------
-# BPM detection (optional — librosa may not be installed)
+# BPM detection (delegates to shared lib.tempo estimator)
 # ---------------------------------------------------------------------------
 
-_librosa = None  # module-level sentinel
 
-def detect_bpm(path: Path) -> int | None:
-    """Return estimated BPM (rounded int) or None."""
-    global _librosa
-
-    if _librosa is None:
-        try:
-            import librosa as lib
-            _librosa = lib
-        except ImportError:
-            _librosa = False
-            log.debug("librosa not installed — BPM detection unavailable")
-
-    if _librosa is False:
+def detect_bpm(path: Path, genre: str | None = None) -> int | None:
+    """Return estimated BPM (rounded int) or None when beatless/uncertain."""
+    res = estimate_tempo(path, genre=genre, octave_fold=True)
+    if res.bpm is None or res.bpm <= 0:
         return None
-
-    try:
-        with warnings.catch_warnings():
-            # libsndfile (soundfile) can't decode M4A/AAC natively; librosa
-            # falls back to audioread which is deprecated as of 0.10.0 but
-            # still functional.  Suppress both noisy warnings.
-            warnings.filterwarnings("ignore", message="PySoundFile failed",
-                                    category=UserWarning)
-            warnings.filterwarnings("ignore", message=".*audioread.*",
-                                    category=FutureWarning)
-            y, sr = _librosa.load(str(path), sr=None, duration=60)
-        tempo, _ = _librosa.beat.beat_track(y=y, sr=sr)
-        bpm = round(float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo))
-        return bpm if bpm > 0 else None
-    except Exception as exc:
-        log.warning("BPM detection failed for %s: %s", path.name, exc)
-        return None
+    return round(res.bpm)
 
 
 # ---------------------------------------------------------------------------
@@ -586,8 +560,9 @@ def tag_file(
         new_tags["isrc"] = mb_meta["isrc"]
 
     # --- BPM -----------------------------------------------------------------
-    if not no_bpm and not existing.get("bpm") and ctx.needs_bpm:
-        bpm = detect_bpm(path)
+    if not no_bpm and sanitize_bpm_tag(existing.get("bpm")) is None and ctx.needs_bpm:
+        bpm_genre = new_tags.get("genre") or existing.get("genre")
+        bpm = detect_bpm(path, genre=bpm_genre)
         if bpm is not None:
             new_tags["bpm"] = str(bpm)
 

@@ -306,9 +306,14 @@ def run_query(df: pd.DataFrame, query: str, top_n: int = 5) -> None:
         r = df.loc[idx]
         title = Path(r["path"]).stem
         score = sims[idx]
-        bpm_delta = abs(r.get("bpm", 0) - seed_row.get("bpm", 0))
+        r_bpm = r.get("bpm")
+        s_bpm = seed_row.get("bpm")
+        if pd.notna(r_bpm) and pd.notna(s_bpm):
+            delta_str = f"Δ{abs(float(r_bpm) - float(s_bpm)):.1f}"
+        else:
+            delta_str = "ΔN/A"
         print(f" {rank}. [{score*100:.1f}% match] {title}")
-        print(f"    Genre: {r.get('genre_tag')} | BPM: {r.get('bpm')} (Δ{bpm_delta:.1f}) | Key: {r.get('key')} {r.get('mode')}")
+        print(f"    Genre: {r.get('genre_tag')} | BPM: {r_bpm} ({delta_str}) | Key: {r.get('key')} {r.get('mode')}")
 
 
 def run_visualization(
