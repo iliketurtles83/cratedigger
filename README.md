@@ -17,7 +17,7 @@ Personal music collection management pipeline. Tags audio files with genre and m
 | `03_folders.py` | Rename folders to canonical `Artist - Album (Year)/` format. Classifies each folder (album, artist, compilation, subgenre, etc.) to determine the right naming pattern and what to flag for review. |
 | `04_move.py` | Legacy staging router and promotion utility. |
 | `05_review.py` | Interactive resolution of files and folders flagged during earlier pipeline steps. |
-| `06_analyze.py` | Audio feature extraction (librosa + pyloudnorm) into a pickled pandas DataFrame. *(Outside standard ingestion scope)*. |
+| `06_analyze.py` | Audio feature extraction (librosa, pyloudnorm, Essentia, Discogs-EffNet) into a pickled pandas DataFrame. *(Outside standard ingestion scope)*. |
 
 Run new arrivals through `intake.py --dry-run`. Run tag hygiene/audits with `scripts/audit_repair.py`.
 
@@ -170,34 +170,50 @@ Interactively resolves files and folders flagged in `review.json` during earlier
 ### 06_analyze.py — Audio feature extraction
 
 Walks a folder of songs/albums and extracts audio features (BPM, key, mode,
-energy, LUFS loudness, spectral centroid, ZCR, danceability, duration) into a
-pickled `pandas.DataFrame`. Runs independently of tagging and never mutates
-audio tags.
+energy, LUFS loudness, spectral centroid, ZCR, danceability, duration, signal
+level) plus both Discogs-EffNet outputs into a pickled `pandas.DataFrame`. Runs
+independently of tagging and never mutates audio tags.
 
 ```bash
 # First run: full analysis
 .venv/bin/python 06_analyze.py --folder rock
 
-# Re-run: incremental, only new/changed files are re-analyzed
+# Re-run: incremental, only new/changed/stale files are analyzed
 .venv/bin/python 06_analyze.py --folder rock
 
-# Re-analyze everything (e.g. after a schema bump)
-.venv/bin/python 06_analyze.py --folder rock --force
+# Preview what would be analyzed (no extraction, no writes)
+.venv/bin/python 06_analyze.py --dry-run
 ```
 
 Unlike the tagging/movement scripts, analysis writes its feature store by
 default; use `--dry-run` to preview without extracting or saving. Omit
-`--folder` to scan the entire configured music root. Progress is checkpointed
-every 50 completed files; restart the same command to resume from saved rows.
-Use the same Python environment when resuming: pandas pickle files may not be
-readable by older pandas versions. An unreadable existing store stops the run
-rather than discarding saved progress.
+`--folder` to scan the entire configured music root; `--folder` runs only prune
+rows inside that folder. A preflight check stops the run before scheduling any
+work if Essentia, ONNX Runtime, or the Discogs-EffNet model is unusable.
+
+Progress is saved atomically at most every `--checkpoint-seconds` (default 300)
+and on completion. Ctrl+C saves completed results, stops all workers, and exits
+with status 130; re-run the same command to resume. Use the same Python
+environment when resuming: pandas pickle files may not be readable by older
+pandas versions. An unreadable existing store stops the run rather than
+discarding saved progress. `--model-threads` sets ONNX Runtime threads per
+worker (default: `cpu_count // workers`).
 
 The output path defaults to `config.FEATURES_STORE_PATH` (`features.pkl`).
 The DataFrame is keyed by absolute file path with incremental detection via
 `(mtime, size, schema_version)`. To migrate the schema, bump
 `FEATURE_SCHEMA_VERSION` in `06_analyze.py`; rows with an older version are
-re-analyzed automatically on the next run.
+re-analyzed automatically on the next run, and a failed re-analysis keeps the
+previous row for a later retry.
+
+Embeddings are versioned separately by `EMBEDDING_RECIPE` and the model
+checksum. Each row stores the normalized 400-dim `embedding` (compatibility),
+raw `style_activations` (400) and `audio_embedding` (1280), and
+`embedding_status` (`ok`, `failed`, `unavailable`, `skipped_too_short`,
+`skipped_silent`, `skipped_duration`). Failed, unavailable, or stale embeddings
+are recomputed without repeating DSP analysis, and a full re-analysis reuses a
+current embedding when the audio hash is unchanged. Silent audio (peak at or
+below −80 dBFS) and tracks over 20 minutes are not embedded.
 
 ### intake.py — Full intake in one command
 

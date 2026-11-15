@@ -159,6 +159,8 @@ Extract audio features for a personal recommender model. Runs independently of `
 
 **Storage:** pickled pandas DataFrame at `config.FEATURES_STORE_PATH`. Primary key: absolute file path. Incremental key: `(mtime, size, schema_version)`. Schema migration: bump `FEATURE_SCHEMA_VERSION` in `06_analyze.py` and rerun — rows with an older version are automatically re-analyzed.
 
+**Schema v10 (feature-extraction plan, `docs/feature-extraction-plan.md`):** anti-aliased (`soxr_hq`) 16 kHz model input; raw Discogs-EffNet style activations (400) and latent embedding (1280) stored beside the normalized compatibility `embedding`; embedding status, recipe, and model/label checksums; tempo/key provenance; signal level and sanitation summaries. Failed or stale embeddings retry without repeating DSP, unchanged audio reuses its embedding, scoped runs only prune inside the scanned folder, a preflight check blocks runs with an unusable model, and checkpoints are time-based and interrupt-safe. The production store migration and a versioned export recipe are pending the pilot results.
+
 **Phase 5 Exit Criteria**
 - ✅ Feature extraction is incremental (skips files whose `mtime`, `size`, and `schema_version` are unchanged).
 - ✅ Storage schema is finalized with migration guidance (`FEATURE_SCHEMA_VERSION` + auto-reanalyze on mismatch).
@@ -168,7 +170,7 @@ Extract audio features for a personal recommender model. Runs independently of `
 
 Build a content-based feature export and offline similarity model consumed by the mobile music player app (offline dot product) and home sync server (`GET /library/features?model=<version>`):
 - ✅ **Audio hash identity** — `lib/audiohash.py` (`a1:hex`) hashes head/tail audio bitstreams, ignoring tags. Moves and renames never orphan features.
-- ✅ **Deep music embeddings** — Discogs-EffNet ONNX model extracts 400-dim style/genre activations, providing semantic musical representation far beyond heuristic proxies.
+- ✅ **Deep music embeddings** — Discogs-EffNet ONNX model extracts 400-dim style/genre activations and (from schema v10) the 1280-dim latent embedding, providing semantic musical representation far beyond heuristic proxies.
 - ✅ **Baked hybrid vector** — standardizes and scales components ($w_{\text{emb}} \cdot \hat{e} + w_{\text{tempo}} \cdot \hat{t} + w_{\text{harm}} \cdot \hat{h} + w_{\text{scalar}} \cdot \hat{s}$) into an L2-normalized unit vector so phone dot product computes exact weighted similarity offline.
 - ✅ **Offline evaluation harness** — `07_recommend.py` provides 20% holdout recall/ranking benchmarks on `0faves`.
 - ✅ **Feature export** — `export_features()` serializes tracks, unit vectors, and readable filter scalars to compact `features_export.json.gz`.

@@ -14,3 +14,6 @@ librosa>=0.10
 # Phase 5 — audio analysis (06_analyze.py)
 pandas>=2.0
 pyloudnorm>=0.1
+# Discogs-EffNet embeddings, key, tempo, and dynamics; preflight blocks without them
+essentia>=2.1b6.dev1389
+onnxruntime>=1.16

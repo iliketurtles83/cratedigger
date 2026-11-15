@@ -36,13 +36,25 @@ DNB_GENRE_KEYWORDS = (
 )
 
 
+TEMPO_OK = "ok"
+TEMPO_LOW_CONFIDENCE = "low_confidence"
+TEMPO_OUT_OF_RANGE = "out_of_range"
+TEMPO_TOO_SHORT = "too_short"
+TEMPO_FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class TempoResult:
-    """Result of tempo estimation for a single audio track."""
+    """Result of tempo estimation for a single audio track.
+
+    ``status`` separates beatless/uncertain audio (``low_confidence``) from
+    extraction failure (``failed``); it is None only for legacy callers.
+    """
 
     bpm: Optional[float]
     confidence: Optional[float]
     method: str
+    status: Optional[str] = None
 
 
 def is_valid_bpm(bpm: object) -> bool:
@@ -166,8 +178,9 @@ def _estimate_with_essentia(
     essentia.log.warningActive = False
 
     signal = _prepare_essentia_signal(path, audio, sr, max_analysis_seconds, es)
+    method = "essentia_rhythm2013_mf"
     if signal.size < int(MIN_AUDIO_SECONDS * ESSENTIA_SAMPLE_RATE):
-        return TempoResult(bpm=None, confidence=0.0, method="essentia_rhythm2013_mf")
+        return TempoResult(bpm=None, confidence=0.0, method=method, status=TEMPO_TOO_SHORT)
 
     extractor = es.RhythmExtractor2013(method="multifeature")
     bpm_raw, _ticks, conf_raw, _estimates, _intervals = extractor(signal)
@@ -176,14 +189,16 @@ def _estimate_with_essentia(
     conf_val = round(float(conf_raw), 3)
     threshold = required_confidence_for_genre(genre, min_confidence)
 
-    if conf_val < threshold or not is_valid_bpm(bpm_val):
-        return TempoResult(bpm=None, confidence=conf_val, method="essentia_rhythm2013_mf")
+    if conf_val < threshold:
+        return TempoResult(bpm=None, confidence=conf_val, method=method, status=TEMPO_LOW_CONFIDENCE)
+    if not is_valid_bpm(bpm_val):
+        return TempoResult(bpm=None, confidence=conf_val, method=method, status=TEMPO_OUT_OF_RANGE)
 
     bpm_out = round(bpm_val, 2)
     if octave_fold:
         bpm_out = apply_genre_octave_fold(bpm_out, genre)
 
-    return TempoResult(bpm=bpm_out, confidence=conf_val, method="essentia_rhythm2013_mf")
+    return TempoResult(bpm=bpm_out, confidence=conf_val, method=method, status=TEMPO_OK)
 
 
 def _estimate_with_librosa_fallback(
@@ -207,21 +222,22 @@ def _estimate_with_librosa_fallback(
             y = np.asarray(audio, dtype=np.float32)
             actual_sr = sr or 22050
 
+    method = "librosa_fallback"
     y = _slice_central_window(y, actual_sr, max_analysis_seconds)
     if y.size < int(MIN_AUDIO_SECONDS * actual_sr):
-        return TempoResult(bpm=None, confidence=None, method="librosa_fallback")
+        return TempoResult(bpm=None, confidence=None, method=method, status=TEMPO_TOO_SHORT)
 
     onset_env = librosa.onset.onset_strength(y=y, sr=actual_sr)
     detected = librosa.feature.tempo(onset_envelope=onset_env, sr=actual_sr)
     bpm_val = float(detected[0] if hasattr(detected, "__len__") else detected)
     if not is_valid_bpm(bpm_val):
-        return TempoResult(bpm=None, confidence=None, method="librosa_fallback")
+        return TempoResult(bpm=None, confidence=None, method=method, status=TEMPO_OUT_OF_RANGE)
 
     bpm_out = round(bpm_val, 2)
     if octave_fold:
         bpm_out = apply_genre_octave_fold(bpm_out, genre)
 
-    return TempoResult(bpm=bpm_out, confidence=None, method="librosa_fallback")
+    return TempoResult(bpm=bpm_out, confidence=None, method=method, status=TEMPO_OK)
 
 
 def estimate_tempo(
@@ -256,7 +272,7 @@ def estimate_tempo(
     except Exception as exc:
         name = Path(path).name if path is not None else "<buffer>"
         log.warning("Tempo detection failed for %s: %s", name, exc)
-        return TempoResult(bpm=None, confidence=None, method="error")
+        return TempoResult(bpm=None, confidence=None, method="error", status=TEMPO_FAILED)
 
     try:
         return _estimate_with_librosa_fallback(
@@ -270,4 +286,4 @@ def estimate_tempo(
     except Exception as exc:
         name = Path(path).name if path is not None else "<buffer>"
         log.warning("Librosa tempo fallback failed for %s: %s", name, exc)
-        return TempoResult(bpm=None, confidence=None, method="error")
+        return TempoResult(bpm=None, confidence=None, method="error", status=TEMPO_FAILED)

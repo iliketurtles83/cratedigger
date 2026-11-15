@@ -33,7 +33,15 @@ from sklearn.preprocessing import StandardScaler
 
 import config
 from lib.audiohash import audio_hash
-from lib.embeddings import extract_embedding, get_style_classes
+from lib.embeddings import (
+    EMBEDDING_COLUMNS,
+    EMBEDDING_OK,
+    RETRYABLE_EMBEDDING_STATUSES,
+    embedding_fields,
+    embedding_needs_refresh,
+    extract_embeddings,
+    get_style_classes,
+)
 from lib.logger import setup_logger
 from lib.recommender import (
     DEFAULT_WEIGHTS,
@@ -55,8 +63,18 @@ def _load_features(store_path: Path) -> pd.DataFrame:
     return df
 
 
+def _save_store_atomic(df: pd.DataFrame, store_path: Path) -> None:
+    """Replace *store_path* atomically so an interrupted save never truncates the store."""
+    tmp_path = store_path.with_name(f".{store_path.name}.tmp")
+    df.to_pickle(tmp_path)
+    tmp_path.replace(store_path)
+
+
 def backfill_audio_hashes(store_path: Path) -> pd.DataFrame:
-    """Ensure all rows in features.pkl have audio_hash populated."""
+    """Ensure all rows in features.pkl have audio_hash populated.
+
+    Extraction versions are left untouched: a hash is identity, not a feature recomputation.
+    """
     df = _load_features(store_path)
     log.info("Checking audio_hash for %d tracks in %s...", len(df), store_path)
 
@@ -73,10 +91,9 @@ def backfill_audio_hashes(store_path: Path) -> pd.DataFrame:
                 log.warning("Could not hash %s: %s", Path(path_str).name, exc)
 
     df["audio_hash"] = hashes
-    df["schema_version"] = 8
 
     if updated > 0:
-        df.to_pickle(store_path)
+        _save_store_atomic(df, store_path)
         log.info("Backfilled %d audio_hash(es) and saved to %s", updated, store_path)
     else:
         log.info("All tracks already have audio_hash populated.")
@@ -85,31 +102,45 @@ def backfill_audio_hashes(store_path: Path) -> pd.DataFrame:
 
 
 def backfill_embeddings(df: pd.DataFrame, store_path: Path, max_tracks: Optional[int] = None) -> pd.DataFrame:
-    """Compute and attach Discogs-EffNet embeddings for tracks missing them."""
-    if "embedding" not in df.columns:
-        df["embedding"] = None
+    """Compute Discogs-EffNet outputs for rows whose embedding is missing, failed, or stale.
 
-    missing_mask = df["embedding"].apply(lambda v: v is None or not isinstance(v, np.ndarray))
-    missing_indices = df[missing_mask].index.tolist()
+    Uses the same recipe, provenance, and refresh rules as 06_analyze.py, which
+    reuses these results when it later re-analyzes unchanged audio.
+    """
+    for col in EMBEDDING_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+        df[col] = df[col].astype(object)
+
+    def _wanted(row: pd.Series) -> bool:
+        if row.get("error") == "duration_exceeds_20min":
+            return False
+        record = {str(key): value for key, value in row.items()}
+        return embedding_needs_refresh(record) and Path(str(row.get("path"))).exists()
+
+    missing_indices = df[df.apply(_wanted, axis=1)].index.tolist()
 
     if not missing_indices:
-        log.info("All tracks already have embeddings.")
+        log.info("All tracks already have current embeddings.")
         return df
 
     target_indices = missing_indices[:max_tracks] if max_tracks else missing_indices
     log.info("Extracting embeddings for %d track(s)...", len(target_indices))
 
-    for idx, i in enumerate(target_indices, start=1):
-        path = df.at[i, "path"]
-        try:
-            emb = extract_embedding(path)
-            df.at[i, "embedding"] = emb
-            log.info("[%d/%d] Extracted embedding for %s", idx, len(target_indices), Path(path).name)
-        except Exception as exc:
-            log.warning("[%d/%d] Embedding failed for %s: %s", idx, len(target_indices), Path(path).name, exc)
-
-    df.to_pickle(store_path)
-    log.info("Saved updated embeddings to %s", store_path)
+    try:
+        for idx, i in enumerate(target_indices, start=1):
+            path = str(df.at[i, "path"])
+            name = Path(path).name
+            fields = embedding_fields(extract_embeddings(path))
+            if fields["embedding_status"] in RETRYABLE_EMBEDDING_STATUSES and df.at[i, "embedding_status"] == EMBEDDING_OK:
+                log.warning("[%d/%d] Keeping previous embedding for %s: %s", idx, len(target_indices), name, fields["embedding_error"])
+                continue
+            for col, value in fields.items():
+                df.at[i, col] = value
+            log.info("[%d/%d] %s -> %s", idx, len(target_indices), name, fields["embedding_status"])
+    finally:
+        _save_store_atomic(df, store_path)
+        log.info("Saved updated embeddings to %s", store_path)
     return df
 
 

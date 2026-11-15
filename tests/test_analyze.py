@@ -1,6 +1,8 @@
 """Tests for 06_analyze.py (Phase 5 audio analysis)."""
 
 import importlib.util
+import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -10,6 +12,18 @@ from unittest.mock import patch
 
 import numpy as np
 
+from lib.embeddings import (
+    EMBEDDING_FAILED,
+    EMBEDDING_OK,
+    EMBEDDING_RECIPE,
+    EMBEDDING_SKIPPED_SILENT,
+    EMBEDDING_SKIPPED_TOO_SHORT,
+    EMBEDDING_UNAVAILABLE,
+    LATENT_DIM,
+    STYLE_DIM,
+    EmbeddingResult,
+)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("analyze", REPO_ROOT / "06_analyze.py")
 analyze = importlib.util.module_from_spec(spec)
@@ -17,9 +31,9 @@ sys.modules["analyze"] = analyze
 spec.loader.exec_module(analyze)
 
 
-def _write_sine_wav(path: Path, freq: float = 440.0, duration_s: float = 2.0, sr: int = 22050) -> None:
+def _write_sine_wav(path: Path, freq: float = 440.0, duration_s: float = 2.0, sr: int = 22050, amp: float = 0.5) -> None:
     t = np.linspace(0, duration_s, int(sr * duration_s), endpoint=False)
-    samples = (0.5 * np.sin(2 * np.pi * freq * t) * 32767).astype(np.int16)
+    samples = (amp * np.sin(2 * np.pi * freq * t) * 32767).astype(np.int16)
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -37,10 +51,27 @@ class TestAnalyzeSchema(unittest.TestCase):
             "energy", "loudness_lufs", "spectral_centroid",
             "zero_crossing_rate", "danceability",
             "speechiness", "acousticness", "instrumentalness", "liveness", "valence",
-            "embedding",
+            "bpm_method", "bpm_status", "key_method", "key_strength",
+            "dynamic_complexity", "danceability_raw", "mfcc_delta_std",
+            "peak_dbfs", "rms_dbfs", "sanitized_fraction", "signal_status",
+            "embedding", "style_activations", "audio_embedding", "embedding_patches",
+            "embedding_status", "embedding_error", "embedding_recipe",
+            "embedding_model_sha256", "style_labels_sha256",
             "schema_version", "analyzed_at", "error",
         }
         self.assertEqual(set(analyze.FEATURE_COLUMNS), expected)
+        self.assertEqual(len(analyze.FEATURE_COLUMNS), len(expected))
+
+    def test_signal_quality_flags_silence(self):
+        silent = analyze._signal_quality(np.zeros(1000, dtype=np.float32), 0, 1000)
+        self.assertEqual(silent["signal_status"], "silent")
+        self.assertEqual(silent["sanitized_fraction"], 0.0)
+        tone = 0.5 * np.sin(np.linspace(0, 100, 1000)).astype(np.float32)
+        audible = analyze._signal_quality(tone, 10, 1000)
+        self.assertEqual(audible["signal_status"], "ok")
+        self.assertAlmostEqual(audible["peak_dbfs"], -6.02, places=1)
+        self.assertAlmostEqual(audible["rms_dbfs"], -9.03, places=0)
+        self.assertEqual(audible["sanitized_fraction"], 0.01)
 
     def test_danceability_proxy_range(self):
         self.assertEqual(analyze._danceability_proxy(0, 1.0), 0.0)
@@ -207,11 +238,16 @@ class TestAnalyzeIncremental(unittest.TestCase):
 
     def test_corrupt_decoder_spikes_clamped_in_extract_features(self):
         spike = np.full(22050, 5000.0, dtype=np.float32)
-        with patch("librosa.load", return_value=(spike, 22050)):
+        with patch("librosa.load", return_value=(spike, 22050)), \
+             patch.object(analyze, "extract_embeddings") as extract:
             row = analyze.extract_features(self.audio)
         self.assertEqual(row["energy"], 0.0)
         if row["loudness_lufs"] is not None:
             self.assertLessEqual(row["loudness_lufs"], 0.0)
+        self.assertEqual(row["sanitized_fraction"], 1.0)
+        self.assertEqual(row["signal_status"], "silent")
+        self.assertEqual(row["embedding_status"], EMBEDDING_SKIPPED_SILENT)
+        extract.assert_not_called()
 
     def test_dry_run_preserves_cached_rows(self):
         analyze.analyze_folder(self.root, self.output, force=False, dry_run=False)
@@ -223,6 +259,276 @@ class TestAnalyzeIncremental(unittest.TestCase):
         self.audio.unlink()
         df = analyze.analyze_folder(self.root, self.output, force=False, dry_run=False)
         self.assertEqual(len(df), 0)
+
+
+def _ok_embedding(scale: float = 1.0) -> EmbeddingResult:
+    return EmbeddingResult(
+        EMBEDDING_OK,
+        style_activations=np.full(STYLE_DIM, 0.5 * scale, dtype=np.float32),
+        audio_embedding=np.full(LATENT_DIM, 0.1 * scale, dtype=np.float32),
+        patches=3,
+    )
+
+
+class TestAnalyzeV10(unittest.TestCase):
+    """Embedding status/reuse, scoped pruning, preflight, and interrupt safety."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        import config
+        self._orig_exts = config.AUDIO_EXTENSIONS
+        config.AUDIO_EXTENSIONS = self._orig_exts | {".wav"}
+        self.music = self.root / "music"
+        self.music.mkdir()
+        self.audio = self.music / "song.wav"
+        _write_sine_wav(self.audio)
+        self.output = self.root / "features.pkl"
+
+    def tearDown(self):
+        import config
+        config.AUDIO_EXTENSIONS = self._orig_exts
+        self.tmp.cleanup()
+
+    def run_analysis(self, folder: Path | None = None, **kwargs):
+        return analyze.analyze_folder(folder or self.music, self.output, **kwargs)
+
+    def stored(self):
+        df = analyze.pd.read_pickle(self.output)
+        return {row["path"]: row for row in df.to_dict("records")}
+
+    def write_store(self, rows: dict) -> None:
+        analyze.pd.DataFrame(list(rows.values()), columns=analyze.FEATURE_COLUMNS).to_pickle(self.output)
+
+    def bump_mtime(self, path: Path) -> None:
+        stat = path.stat()
+        os.utime(path, (stat.st_atime + 100, stat.st_mtime + 100))
+
+    def test_first_run_records_status_and_provenance(self):
+        self.run_analysis()
+        row = self.stored()[str(self.audio)]
+        self.assertIsNone(row["error"])
+        self.assertEqual(row["embedding_status"], EMBEDDING_SKIPPED_TOO_SHORT)
+        self.assertIsNone(row["embedding"])
+        self.assertEqual(row["embedding_recipe"], EMBEDDING_RECIPE)
+        self.assertEqual(len(row["embedding_model_sha256"]), 64)
+        self.assertEqual(row["signal_status"], "ok")
+        self.assertAlmostEqual(row["peak_dbfs"], -6.02, places=1)
+        self.assertEqual(row["sanitized_fraction"], 0.0)
+        self.assertIsNotNone(row["bpm_status"])
+        self.assertIn(row["key_method"], ("essentia_key_extractor", "librosa_ks_chroma"))
+
+        before = self.output.stat().st_mtime_ns
+        with patch.object(analyze, "extract_embeddings") as extract:
+            self.run_analysis()
+        extract.assert_not_called()
+        self.assertEqual(self.output.stat().st_mtime_ns, before)
+
+    def test_duration_skip_is_not_retried(self):
+        class LongInfo:
+            length = 1300.0
+
+        class LongFile:
+            info = LongInfo()
+
+        with patch("mutagen.File", return_value=LongFile()):
+            self.run_analysis()
+        row = self.stored()[str(self.audio)]
+        self.assertEqual(row["error"], "duration_exceeds_20min")
+        self.assertEqual(row["embedding_status"], "skipped_duration")
+        with patch.object(analyze, "_run_task") as run:
+            self.run_analysis()
+        run.assert_not_called()
+
+    def test_failed_embedding_retried_without_full_analysis(self):
+        for status in (EMBEDDING_FAILED, EMBEDDING_UNAVAILABLE):
+            with self.subTest(status=status):
+                self.output.unlink(missing_ok=True)
+                with patch.object(analyze, "extract_embeddings", return_value=EmbeddingResult(status, error="boom")):
+                    self.run_analysis()
+                first = self.stored()[str(self.audio)]
+                self.assertIsNone(first["error"])
+                self.assertEqual(first["embedding_status"], status)
+
+                with patch.object(analyze, "extract_embeddings", return_value=_ok_embedding()) as extract, \
+                     patch.object(analyze, "extract_features") as full:
+                    self.run_analysis()
+                full.assert_not_called()
+                extract.assert_called_once()
+                row = self.stored()[str(self.audio)]
+                self.assertEqual(row["embedding_status"], EMBEDDING_OK)
+                self.assertEqual(row["analyzed_at"], first["analyzed_at"])
+                self.assertEqual(row["audio_embedding"].shape, (LATENT_DIM,))
+                self.assertAlmostEqual(float(np.linalg.norm(row["embedding"])), 1.0, places=5)
+
+    def test_stale_recipe_refreshes_embedding_only(self):
+        with patch.object(analyze, "extract_embeddings", return_value=_ok_embedding()):
+            self.run_analysis()
+        rows = self.stored()
+        rows[str(self.audio)]["embedding_recipe"] = "old-recipe"
+        self.write_store(rows)
+
+        with patch.object(analyze, "extract_embeddings", return_value=_ok_embedding(2.0)) as extract, \
+             patch.object(analyze, "extract_features") as full:
+            self.run_analysis()
+        full.assert_not_called()
+        extract.assert_called_once()
+        row = self.stored()[str(self.audio)]
+        self.assertEqual(row["embedding_recipe"], EMBEDDING_RECIPE)
+        self.assertAlmostEqual(float(row["audio_embedding"][0]), 0.2, places=6)
+
+    def test_failed_refresh_keeps_previous_embedding(self):
+        with patch.object(analyze, "extract_embeddings", return_value=_ok_embedding()):
+            self.run_analysis()
+        rows = self.stored()
+        rows[str(self.audio)]["embedding_recipe"] = "old-recipe"
+        self.write_store(rows)
+
+        with patch.object(analyze, "extract_embeddings", return_value=EmbeddingResult(EMBEDDING_FAILED, error="boom")):
+            self.run_analysis()
+        row = self.stored()[str(self.audio)]
+        self.assertEqual(row["embedding_status"], EMBEDDING_OK)
+        self.assertEqual(row["embedding_recipe"], "old-recipe")
+        self.assertIsNotNone(row["audio_embedding"])
+
+        # A definitive result under the new recipe replaces the stale embedding.
+        with patch.object(analyze, "extract_embeddings", return_value=EmbeddingResult(EMBEDDING_SKIPPED_TOO_SHORT)):
+            self.run_analysis()
+        row = self.stored()[str(self.audio)]
+        self.assertEqual(row["embedding_status"], EMBEDDING_SKIPPED_TOO_SHORT)
+        self.assertIsNone(row["audio_embedding"])
+
+    def test_full_reanalysis_reuses_embedding_for_unchanged_audio(self):
+        with patch.object(analyze, "extract_embeddings", return_value=_ok_embedding()):
+            self.run_analysis()
+        first = self.stored()[str(self.audio)]
+        self.bump_mtime(self.audio)
+
+        with patch.object(analyze, "extract_embeddings") as extract:
+            self.run_analysis()
+        extract.assert_not_called()
+        row = self.stored()[str(self.audio)]
+        self.assertNotEqual(row["analyzed_at"], first["analyzed_at"])
+        self.assertEqual(row["embedding_status"], EMBEDDING_OK)
+        np.testing.assert_array_equal(row["audio_embedding"], first["audio_embedding"])
+
+    def test_changed_audio_recomputes_embedding(self):
+        with patch.object(analyze, "extract_embeddings", return_value=_ok_embedding()):
+            self.run_analysis()
+        _write_sine_wav(self.audio, freq=880.0)
+        self.bump_mtime(self.audio)
+        with patch.object(analyze, "extract_embeddings", return_value=_ok_embedding(2.0)) as extract:
+            self.run_analysis()
+        extract.assert_called_once()
+        self.assertAlmostEqual(float(self.stored()[str(self.audio)]["audio_embedding"][0]), 0.2, places=6)
+
+    def test_scoped_run_preserves_rows_outside_folder(self):
+        a, b = self.music / "a", self.music / "b"
+        a.mkdir()
+        b.mkdir()
+        self.audio.unlink()
+        one, two, three = a / "one.wav", a / "two.wav", b / "three.wav"
+        _write_sine_wav(one, freq=330.0)
+        _write_sine_wav(two, freq=440.0)
+        _write_sine_wav(three, freq=550.0)
+        self.run_analysis()
+        two.unlink()
+        three.unlink()
+
+        self.run_analysis(a)
+        self.assertEqual(set(self.stored()), {str(one), str(three)})
+        self.run_analysis()
+        self.assertEqual(set(self.stored()), {str(one)})
+
+    def test_moved_file_outside_scope_drops_source_row(self):
+        a, b = self.music / "a", self.music / "b"
+        a.mkdir()
+        b.mkdir()
+        source = a / "song.wav"
+        self.audio.rename(source)
+        self.run_analysis()
+        target = b / "song.wav"
+        shutil.move(source, target)
+
+        with patch.object(analyze, "_run_task") as run:
+            self.run_analysis(b)
+        run.assert_not_called()
+        rows = self.stored()
+        self.assertEqual(set(rows), {str(target)})
+        self.assertEqual(rows[str(target)]["embedding_status"], EMBEDDING_SKIPPED_TOO_SHORT)
+
+    def test_preflight_failure_leaves_store_unchanged(self):
+        self.run_analysis()
+        original = self.output.read_bytes()
+        self.bump_mtime(self.audio)
+        with patch("lib.embeddings.preflight", return_value=["model broken"]), \
+             patch.object(analyze, "_run_task") as run:
+            with self.assertRaisesRegex(analyze.PreflightError, "model broken"):
+                self.run_analysis()
+            self.run_analysis(dry_run=True)
+        run.assert_not_called()
+        self.assertEqual(self.output.read_bytes(), original)
+
+    def test_interrupt_saves_progress_and_resumes(self):
+        second = self.music / "z_second.wav"
+        _write_sine_wav(second, freq=660.0)
+        real_run = analyze._run_task
+        calls = []
+
+        def interrupt_on_second(task):
+            calls.append(task)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            return real_run(task)
+
+        with patch.object(analyze, "_run_task", side_effect=interrupt_on_second):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_analysis(checkpoint_seconds=3600)
+        saved = self.stored()
+        self.assertEqual(set(saved), {str(self.audio)})
+
+        with patch.object(analyze, "_run_task", wraps=real_run) as run:
+            self.run_analysis()
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1], second)
+        resumed = self.stored()
+        self.assertEqual(set(resumed), {str(self.audio), str(second)})
+        self.assertEqual(resumed[str(self.audio)]["analyzed_at"], saved[str(self.audio)]["analyzed_at"])
+
+    def test_checkpoints_follow_interval(self):
+        _write_sine_wav(self.music / "second.wav", freq=660.0)
+        for seconds, expected_saves in ((0, 3), (3600, 1)):
+            with self.subTest(checkpoint_seconds=seconds):
+                self.output.unlink(missing_ok=True)
+                with patch.object(analyze, "_save_dataframe", wraps=analyze._save_dataframe) as save:
+                    self.run_analysis(checkpoint_seconds=seconds)
+                self.assertEqual(save.call_count, expected_saves)
+
+    def test_parallel_run_matches_serial(self):
+        _write_sine_wav(self.music / "second.wav", freq=660.0)
+        self.run_analysis(workers=2)
+        rows = self.stored()
+        self.assertEqual(len(rows), 2)
+        for row in rows.values():
+            self.assertIsNone(row["error"])
+            self.assertEqual(row["embedding_status"], EMBEDDING_SKIPPED_TOO_SHORT)
+
+    def test_worker_failure_results(self):
+        embedding = analyze._worker_failure_result((analyze.EMBEDDING_ONLY, self.audio, None), RuntimeError("x"))
+        self.assertEqual(embedding["embedding_status"], EMBEDDING_FAILED)
+        self.assertIn("worker_error", embedding["embedding_error"])
+        full = analyze._worker_failure_result((analyze.FULL_ANALYSIS, self.audio, None), RuntimeError("x"))
+        self.assertIn("worker_error", full["error"])
+        self.assertEqual(full["schema_version"], analyze.FEATURE_SCHEMA_VERSION)
+
+    def test_failed_full_recompute_keeps_previous_row(self):
+        good = {"path": "p", "error": None, "schema_version": 9}
+        rows = {"p": good}
+        self.assertTrue(analyze._merge_full_result(rows, "p", {"path": "p", "error": "load_failed: x"}))
+        self.assertIs(rows["p"], good)
+        rows = {}
+        self.assertTrue(analyze._merge_full_result(rows, "p", {"path": "p", "error": "load_failed: x"}))
+        self.assertEqual(rows["p"]["error"], "load_failed: x")
 
 
 if __name__ == "__main__":

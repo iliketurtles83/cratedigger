@@ -31,13 +31,35 @@ Output schema (one row per audio file):
     instrumentalness    : float  (inverse vocal activity via MFCC delta variance)
     liveness            : float  (inverse dynamic range; high noise floor ≈ live)
     valence             : float  (mode + tempo + brightness + energy heuristic)
+    bpm_method          : str  (tempo estimator used)
+    bpm_status          : str  (ok | low_confidence | out_of_range | too_short | failed)
+    key_method          : str  (essentia_key_extractor | librosa_ks_chroma)
+    key_strength        : float (raw Essentia key strength; None for the fallback)
+    dynamic_complexity  : float (raw Essentia DynamicComplexity, dB)
+    danceability_raw    : float (raw Essentia DFA danceability)
+    mfcc_delta_std      : float (mean std of lower MFCC deltas; vocal-activity proxy input)
+    peak_dbfs           : float (sanitized peak level)
+    rms_dbfs            : float (sanitized RMS level)
+    sanitized_fraction  : float (fraction of samples zeroed as non-finite/decoder spikes)
+    signal_status       : str  (ok | silent; silent when peak <= SILENT_PEAK_DBFS)
+    embedding           : ndarray(400) float32 (L2-normalized style activations; compatibility)
+    style_activations   : ndarray(400) float32 (raw mean Discogs-EffNet style activations)
+    audio_embedding     : ndarray(1280) float32 (raw mean Discogs-EffNet latent embedding)
+    embedding_patches   : int  (model patches pooled)
+    embedding_status    : str  (ok | failed | unavailable | skipped_too_short | skipped_silent | skipped_duration)
+    embedding_error     : str | None
+    embedding_recipe    : str  (lib.embeddings.EMBEDDING_RECIPE at extraction time)
+    embedding_model_sha256 / style_labels_sha256 : str (model and class-label identity)
     schema_version      : int  (FEATURE_SCHEMA_VERSION at extraction time)
     analyzed_at         : str  (ISO 8601 UTC timestamp)
     error               : str | None  (extraction error message, if any)
 
 Migration guidance: bump ``FEATURE_SCHEMA_VERSION`` whenever a feature's
 meaning or computation changes.  Rows with an older ``schema_version``
-are re-analyzed automatically on the next run.
+are re-analyzed automatically on the next run.  Embedding columns are
+versioned separately by ``EMBEDDING_RECIPE`` and model checksum: failed,
+unavailable, or stale embeddings are recomputed without repeating DSP, and a
+full re-analysis reuses a current embedding for unchanged audio.
 
 Usage:
     python 06_analyze.py --folder rock
@@ -51,24 +73,48 @@ import argparse
 import contextlib
 import logging
 import os
+import signal
 import threading
+import time
 import warnings
+from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from multiprocessing import Queue as MPQueue
+from multiprocessing import get_context
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 import config
+from lib import embeddings as embedding_lib
 from lib.audiohash import audio_hash
-from lib.embeddings import extract_embedding
+from lib.embeddings import (
+    EMBEDDING_COLUMNS,
+    EMBEDDING_FAILED,
+    EMBEDDING_OK,
+    EMBEDDING_SKIPPED_DURATION,
+    EMBEDDING_SKIPPED_SILENT,
+    EMBEDDING_UNAVAILABLE,
+    RETRYABLE_EMBEDDING_STATUSES,
+    EmbeddingResult,
+    embedding_fields,
+    embedding_needs_refresh,
+    extract_embeddings,
+    reusable_embedding_fields,
+    sanitize_audio,
+)
 from lib.logger import setup_logger
 from lib.tags import read_tags
 from lib.tempo import estimate_tempo, sanitize_bpm_tag
 
-FEATURE_SCHEMA_VERSION = 9  # Essentia Tempo/Key/Danceability/DynamicComplexity, speechiness v2, audio spike sanitization, shared STFT
+# 10: HQ model resampling, raw 400+1280 model outputs, embedding/tempo/key status
+# and provenance, signal quality, and raw Essentia/MFCC summaries.
+FEATURE_SCHEMA_VERSION = 10
+SILENT_PEAK_DBFS = -80.0
+DEFAULT_CHECKPOINT_SECONDS = 300.0
 
 log: logging.Logger = logging.getLogger("06_analyze")
 
@@ -126,7 +172,10 @@ FEATURE_COLUMNS: list[str] = [
     "spectral_centroid", "zero_crossing_rate",
     "danceability",
     "speechiness", "acousticness", "instrumentalness", "liveness", "valence",
-    "embedding",
+    "bpm_method", "bpm_status", "key_method", "key_strength",
+    "dynamic_complexity", "danceability_raw", "mfcc_delta_std",
+    "peak_dbfs", "rms_dbfs", "sanitized_fraction", "signal_status",
+    *EMBEDDING_COLUMNS,
     "schema_version", "analyzed_at", "error",
 ]
 
@@ -158,9 +207,24 @@ def _normalize_key_name(key: str | None) -> str | None:
 
 def _sanitize_audio(y: np.ndarray) -> np.ndarray:
     """Scrub non-finite samples and corrupt decoder spikes (e.g. libmpg123 > 2.0)."""
-    clean = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-    clean = np.where(np.abs(clean) > 2.0, 0.0, np.clip(clean, -1.0, 1.0))
-    return clean.astype(np.float32, copy=False)
+    return sanitize_audio(y)[0]
+
+
+def _level_dbfs(value: float) -> float:
+    return round(float(20.0 * np.log10(max(value, 1e-10))), 2)
+
+
+def _signal_quality(y: np.ndarray, zeroed: int, total: int) -> dict[str, Any]:
+    """Peak/RMS level and sanitation summary for a sanitized signal."""
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    rms = float(np.sqrt(np.mean(np.square(y, dtype=np.float64)))) if y.size else 0.0
+    peak_dbfs = _level_dbfs(peak)
+    return {
+        "peak_dbfs": peak_dbfs,
+        "rms_dbfs": _level_dbfs(rms),
+        "sanitized_fraction": round(zeroed / total, 8) if total else None,
+        "signal_status": "silent" if peak_dbfs <= SILENT_PEAK_DBFS else "ok",
+    }
 
 
 def _estimate_key(chroma_mean: np.ndarray) -> tuple[str, str]:
@@ -364,8 +428,12 @@ def _valence_proxy(
 # Per-file extraction
 # ---------------------------------------------------------------------------
 
-def extract_features(path: Path) -> dict:
-    """Extract audio features for a single file."""
+def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict:
+    """Extract audio features for a single file.
+
+    *prior* is the stored row for this path; its embedding is reused when it is
+    current and the audio hash is unchanged.
+    """
     stat = path.stat()
     base: dict = {col: None for col in FEATURE_COLUMNS}
     base["path"] = str(path)
@@ -420,6 +488,7 @@ def extract_features(path: Path) -> dict:
             base["schema_version"] = FEATURE_SCHEMA_VERSION
             base["duration_ms"] = int(round(mf.info.length * 1000))
             base["error"] = "duration_exceeds_20min"
+            base.update(embedding_fields(EmbeddingResult(EMBEDDING_SKIPPED_DURATION)))
             base["analyzed_at"] = datetime.now(timezone.utc).isoformat()
             return base
     except Exception:
@@ -427,12 +496,8 @@ def extract_features(path: Path) -> dict:
 
     # Load audio at standard analysis rate (22,050 Hz) for 3x faster decoding
     # and lower memory usage while fully preserving musical pitch/tonality.
-    ANALYSIS_SR = 22050
     try:
-        with warnings.catch_warnings(), _suppress_c_stderr():
-            warnings.filterwarnings("ignore", category=UserWarning)
-            warnings.filterwarnings("ignore", category=FutureWarning)
-            y, sr = librosa.load(str(path), sr=ANALYSIS_SR, mono=True)
+        y, sr = _load_analysis_audio(path, librosa)
     except Exception as exc:
         base["error"] = f"load_failed: {exc}"
         return base
@@ -441,7 +506,8 @@ def extract_features(path: Path) -> dict:
         base["error"] = "empty_audio"
         return base
 
-    y = _sanitize_audio(y)
+    y, zeroed = sanitize_audio(y)
+    base.update(_signal_quality(y, zeroed, y.size))
 
     try:
         duration_s = float(librosa.get_duration(y=y, sr=sr))
@@ -449,6 +515,7 @@ def extract_features(path: Path) -> dict:
 
         if duration_s > 1200:  # Skip continuous mixes/podcasts longer than 20 minutes
             base["error"] = "duration_exceeds_20min"
+            base.update(embedding_fields(EmbeddingResult(EMBEDDING_SKIPPED_DURATION)))
             return base
 
         tempo_res = estimate_tempo(
@@ -459,6 +526,8 @@ def extract_features(path: Path) -> dict:
         )
         base["bpm"] = tempo_res.bpm
         base["bpm_confidence"] = tempo_res.confidence
+        base["bpm_method"] = tempo_res.method
+        base["bpm_status"] = tempo_res.status
         bpm = base["bpm"]
 
         # Shared STFT + spectral/mel intermediates so proxies avoid redundant STFTs.
@@ -477,6 +546,7 @@ def extract_features(path: Path) -> dict:
         mel = librosa.feature.melspectrogram(S=S_pow, sr=sr)
         mfccs = librosa.feature.mfcc(S=librosa.power_to_db(mel + 1e-12), n_mfcc=13)
         dmfcc = float(np.mean(np.std(librosa.feature.delta(mfccs)[:5], axis=1)))
+        base["mfcc_delta_std"] = round(dmfcc, 6)
 
         # Central 90s window for tonal/rhythmic Essentia extractors.
         if duration_s > 90.0:
@@ -494,17 +564,21 @@ def extract_features(path: Path) -> dict:
                 y44 = librosa.resample(
                     y_win, orig_sr=sr, target_sr=44100, res_type="soxr_qq"
                 ).astype(np.float32, copy=False)
-                key_raw, mode_raw, _ = es_std.KeyExtractor()(y44)
+                key_raw, mode_raw, key_strength = es_std.KeyExtractor()(y44)
                 base["key"] = _normalize_key_name(key_raw)
                 base["mode"] = mode_raw
+                base["key_method"] = "essentia_key_extractor"
+                base["key_strength"] = round(float(key_strength), 6)
                 try:
                     d_val, _ = es_std.Danceability()(y44)
                     dance_raw = float(d_val)
+                    base["danceability_raw"] = round(dance_raw, 6)
                 except Exception as exc:
                     log.debug("Essentia Danceability failed for %s: %s", path.name, exc)
                 try:
                     dc_val, _ = es_std.DynamicComplexity()(y44)
                     dyn_comp = float(dc_val)
+                    base["dynamic_complexity"] = round(dyn_comp, 6)
                 except Exception as exc:
                     log.debug("Essentia DynamicComplexity failed for %s: %s", path.name, exc)
             except Exception as exc:
@@ -519,6 +593,8 @@ def extract_features(path: Path) -> dict:
             key, mode = _estimate_key(chroma.mean(axis=1))
             base["key"] = key
             base["mode"] = mode
+            base["key_method"] = "librosa_ks_chroma"
+            base["key_strength"] = None
 
         beat_strength = 0.0
         if bpm is not None and (dance_raw is None or duration_s < 5.0):
@@ -603,10 +679,7 @@ def extract_features(path: Path) -> dict:
         except Exception as exc:
             log.debug("valence proxy failed for %s: %s", path.name, exc)
 
-        try:
-            base["embedding"] = extract_embedding(path, audio=y, sr=sr)
-        except Exception as exc:
-            log.debug("embedding extraction failed for %s: %s", path.name, exc)
+        base.update(_embedding_for(path, y, sr, base, prior))
 
     except Exception as exc:
         base["error"] = f"feature_failed: {exc}"
@@ -614,24 +687,76 @@ def extract_features(path: Path) -> dict:
     return base
 
 
+def _load_analysis_audio(path: Path, librosa) -> tuple[np.ndarray, int]:
+    """Decode *path* exactly as ``lib.embeddings.decode_audio`` does, muting decoder noise."""
+    with warnings.catch_warnings(), _suppress_c_stderr():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        y, sr = librosa.load(str(path), sr=embedding_lib.DECODE_SAMPLE_RATE, mono=True)
+    return y, int(sr)
+
+
+def _embedding_for(
+    path: Path,
+    y: np.ndarray,
+    sr: int,
+    base: Mapping[str, Any],
+    prior: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if base.get("signal_status") == "silent":
+        return embedding_fields(EmbeddingResult(EMBEDDING_SKIPPED_SILENT, error="silent_signal"))
+    reused = reusable_embedding_fields(prior, base.get("audio_hash"))
+    if reused is not None:
+        log.debug("Reusing current embedding for %s", path.name)
+        return reused
+    return embedding_fields(extract_embeddings(path, audio=y, sr=sr))
+
+
+def extract_embedding_update(path: Path) -> dict[str, Any]:
+    """Recompute only embedding columns for a row whose DSP features are current."""
+    librosa = _load_librosa()
+    if librosa is None:
+        return embedding_fields(EmbeddingResult(EMBEDDING_UNAVAILABLE, error="librosa_not_installed"))
+    try:
+        y, sr = _load_analysis_audio(path, librosa)
+    except Exception as exc:
+        return embedding_fields(EmbeddingResult(EMBEDDING_FAILED, error=f"load_failed: {exc}"[:500]))
+    y, _ = sanitize_audio(y)
+    return embedding_fields(extract_embeddings(path, audio=y, sr=sr))
+
+
 # Module-level slot set by _worker_init in each worker process.
 _worker_start_q: MPQueue | None = None
 
+FULL_ANALYSIS = "full"
+EMBEDDING_ONLY = "embedding"
 
-def _worker_init(q: MPQueue) -> None:
-    """ProcessPoolExecutor initializer: store the shared queue in the worker global."""
+AnalysisTask = tuple[str, Path, Mapping[str, Any] | None]
+
+
+def _worker_init(q: MPQueue, model_threads: int | None = None) -> None:
+    """ProcessPoolExecutor initializer; Ctrl+C is handled by the parent, which stops workers."""
     global _worker_start_q
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     _worker_start_q = q
+    embedding_lib.set_inference_threads(model_threads)
 
 
-def _worker_extract(path: Path) -> dict:
-    """Worker wrapper: signals the main process when extraction starts, then delegates."""
+def _run_task(task: AnalysisTask) -> dict:
+    mode, path, prior = task
+    if mode == EMBEDDING_ONLY:
+        return extract_embedding_update(path)
+    return extract_features(path, prior)
+
+
+def _worker_run(task: AnalysisTask) -> dict:
+    """Worker wrapper: signals the main process when it starts a file."""
     try:
         if _worker_start_q is not None:
-            _worker_start_q.put(str(path), block=False)
+            _worker_start_q.put(str(task[1]), block=False)
     except Exception:
         pass
-    return extract_features(path)
+    return _run_task(task)
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +840,91 @@ def _save_dataframe(rows: dict[str, dict], output_path: Path) -> pd.DataFrame:
     return df
 
 
+class PreflightError(RuntimeError):
+    """Extraction dependencies or model are unusable; nothing was scheduled."""
+
+
+def _within(scope: Path, path_str: str) -> bool:
+    candidate = Path(path_str)
+    return candidate == scope or scope in candidate.parents
+
+
+def _prior_embedding(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Embedding columns (plus hash) worth reusing if a full re-analysis finds unchanged audio."""
+    if row is None or row.get("embedding_status") != EMBEDDING_OK or embedding_needs_refresh(row):
+        return None
+    return {"audio_hash": row.get("audio_hash"), **{col: row.get(col) for col in EMBEDDING_COLUMNS}}
+
+
+def _error_row(path: Path, message: str) -> dict[str, Any]:
+    features: dict[str, Any] = {col: None for col in FEATURE_COLUMNS}
+    features["path"] = str(path)
+    try:
+        stat = path.stat()
+        features["mtime"] = stat.st_mtime
+        features["size"] = stat.st_size
+    except OSError:
+        pass
+    features["schema_version"] = FEATURE_SCHEMA_VERSION
+    features["analyzed_at"] = datetime.now(timezone.utc).isoformat()
+    features["error"] = message
+    return features
+
+
+def _worker_failure_result(task: AnalysisTask, exc: BaseException) -> dict[str, Any]:
+    message = f"worker_error: {exc}"[:500]
+    if task[0] == EMBEDDING_ONLY:
+        return embedding_fields(EmbeddingResult(EMBEDDING_FAILED, error=message))
+    return _error_row(task[1], message)
+
+
+def _merge_full_result(rows: dict[str, dict], key: str, features: dict) -> bool:
+    """Store a full-analysis row; return True if it failed.
+
+    A failed recomputation keeps an existing error-free row unchanged, so old
+    evidence keeps its old version and is retried on the next run.
+    """
+    err = features.get("error")
+    failed = _has_error(err) and err != "duration_exceeds_20min"
+    previous = rows.get(key)
+    if failed and previous is not None and not _has_error(previous.get("error")):
+        return True
+    rows[key] = features
+    return failed
+
+
+def _merge_embedding_result(rows: dict[str, dict], key: str, fields: dict) -> None:
+    """Update embedding columns, keeping a previous successful embedding if this attempt failed."""
+    previous = rows.get(key)
+    if previous is None:
+        return
+    if (
+        fields.get("embedding_status") in RETRYABLE_EMBEDDING_STATUSES
+        and previous.get("embedding_status") == EMBEDDING_OK
+    ):
+        return
+    rows[key] = {**previous, **fields}
+
+
+def _run_preflight(parallel: bool) -> list[str]:
+    if not parallel:
+        return embedding_lib.preflight()
+    # Probe in a spawned process so forked workers never inherit ONNX Runtime threads.
+    with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as probe:
+        return probe.submit(embedding_lib.preflight).result()
+
+
+def _stop_executor(executor: ProcessPoolExecutor) -> None:
+    """Cancel queued work and terminate workers without waiting for in-flight files."""
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    executor.shutdown(wait=False, cancel_futures=True)
+    for proc in processes:
+        if proc.is_alive():
+            proc.terminate()
+    for proc in processes:
+        proc.join(timeout=5.0)
+
+
 def analyze_folder(
     folder: Path,
     output_path: Path,
@@ -722,12 +932,16 @@ def analyze_folder(
     force: bool = False,
     dry_run: bool = False,
     workers: int = 1,
+    checkpoint_seconds: float = DEFAULT_CHECKPOINT_SECONDS,
+    model_threads: int | None = None,
 ) -> pd.DataFrame:
     """Run feature extraction on *folder*, persisting to *output_path*.
 
-    ``workers`` controls the number of parallel worker processes.  Set to 1
-    (the default) for sequential execution.  The CLI defaults to
-    ``os.cpu_count()``.
+    ``workers`` controls the number of parallel worker processes (1 runs
+    sequentially).  Rows outside *folder* are preserved.  Progress is saved at
+    most every ``checkpoint_seconds`` and on Ctrl+C, which stops all workers.
+    ``model_threads`` sets ONNX Runtime threads per worker (default:
+    ``cpu_count // workers`` when parallel, runtime default when sequential).
     """
     audio_files = _iter_audio_files(folder)
     log.info("Found %d audio files under %s", len(audio_files), folder)
@@ -745,88 +959,167 @@ def analyze_folder(
     rows: dict[str, dict] = dict(existing_by_path)
 
     # Separate skip determination from extraction so parallelism is clean.
-    to_analyze: list[Path] = []
+    tasks: list[AnalysisTask] = []
     skipped = 0
+    moved = 0
     claimed_paths: set[str] = set()
+    relocated_from: set[str] = set()
 
     for path in audio_files:
-        current = existing_by_path.get(str(path))
+        key = str(path)
+        current = existing_by_path.get(key)
         if not force and current is not None and not _needs_analysis(current, path):
-            skipped += 1
-            claimed_paths.add(str(path))
-        else:
-            # Check if this file is a renamed/moved file whose audio_hash already exists
-            ah = None
-            if not force and current is None and existing_by_hash:
-                try:
-                    ah = audio_hash(str(path))
-                except Exception:
-                    ah = None
-
-            if (
-                not force
-                and ah
-                and ah in existing_by_hash
-                and existing_by_hash[ah].get("schema_version") == FEATURE_SCHEMA_VERSION
-                and (
-                    not _has_error(existing_by_hash[ah].get("error"))
-                    or existing_by_hash[ah].get("error") == "duration_exceeds_20min"
-                )
-            ):
-                matched_row = dict(existing_by_hash[ah])
-                stat = path.stat()
-                matched_row["path"] = str(path)
-                matched_row["mtime"] = stat.st_mtime
-                matched_row["size"] = stat.st_size
-                try:
-                    tags = read_tags(path)
-                    if tags:
-                        for field, tag_key in [
-                            ("artist_tag", "artist"),
-                            ("album_tag", "album"),
-                            ("track_tag", "track"),
-                            ("year_tag", "year"),
-                            ("genre_tag", "genre"),
-                        ]:
-                            if tags.get(tag_key):
-                                matched_row[field] = tags[tag_key]
-                except Exception:
-                    pass
-                rows[str(path)] = matched_row
-                claimed_paths.add(str(path))
-                skipped += 1
-                log.info("Recognized moved/renamed file by audio_hash: %s", path.name)
+            claimed_paths.add(key)
+            if embedding_needs_refresh(current):
+                tasks.append((EMBEDDING_ONLY, path, None))
             else:
-                to_analyze.append(path)
+                skipped += 1
+            continue
 
-    # Prune rows whose audio file no longer exists and wasn't claimed
+        # Check if this file is a renamed/moved file whose audio_hash already exists
+        ah = None
+        if not force and current is None and existing_by_hash:
+            try:
+                ah = audio_hash(key)
+            except Exception:
+                ah = None
+        source = existing_by_hash.get(ah) if ah else None
+
+        if (
+            source is not None
+            and source.get("schema_version") == FEATURE_SCHEMA_VERSION
+            and (
+                not _has_error(source.get("error"))
+                or source.get("error") == "duration_exceeds_20min"
+            )
+        ):
+            matched_row = dict(source)
+            stat = path.stat()
+            matched_row["path"] = key
+            matched_row["mtime"] = stat.st_mtime
+            matched_row["size"] = stat.st_size
+            try:
+                tags = read_tags(path)
+                if tags:
+                    for field, tag_key in [
+                        ("artist_tag", "artist"),
+                        ("album_tag", "album"),
+                        ("track_tag", "track"),
+                        ("year_tag", "year"),
+                        ("genre_tag", "genre"),
+                    ]:
+                        if tags.get(tag_key):
+                            matched_row[field] = tags[tag_key]
+            except Exception:
+                pass
+            rows[key] = matched_row
+            claimed_paths.add(key)
+            source_path = str(source.get("path"))
+            if source_path != key and not Path(source_path).exists():
+                relocated_from.add(source_path)
+            moved += 1
+            log.info("Recognized moved/renamed file by audio_hash: %s", path.name)
+            if embedding_needs_refresh(matched_row):
+                tasks.append((EMBEDDING_ONLY, path, None))
+            else:
+                skipped += 1
+        else:
+            tasks.append((FULL_ANALYSIS, path, None if force else _prior_embedding(current)))
+
+    # Prune rows for files missing from the scanned scope (or moved away from
+    # anywhere); rows elsewhere survive unmounted media and subset runs.
     pruned = 0
     for path_str in list(rows.keys()):
-        if not Path(path_str).exists() and path_str not in claimed_paths:
+        if path_str in claimed_paths:
+            continue
+        if path_str in relocated_from or (_within(folder, path_str) and not Path(path_str).exists()):
             del rows[path_str]
             pruned += 1
     if pruned:
         log.info("Pruned %d row(s) for files no longer on disk", pruned)
 
+    n_full = sum(1 for task in tasks if task[0] == FULL_ANALYSIS)
+    n_embedding = len(tasks) - n_full
+    parallel = workers > 1 and len(tasks) > 1
+
+    if tasks:
+        problems = _run_preflight(parallel and not dry_run)
+        if problems:
+            message = "Extraction preflight failed: " + "; ".join(problems)
+            if not dry_run:
+                raise PreflightError(f"{message}. No files were analyzed; {output_path} is unchanged.")
+            log.warning("[DRY-RUN] %s", message)
+
     if dry_run:
         log.info(
-            "[DRY-RUN] Would analyze %d file(s); skip %d unchanged; prune %d orphan(s); output %s",
-            len(to_analyze), skipped, pruned, output_path,
+            "[DRY-RUN] Would analyze %d file(s) (%d full, %d embedding-only); skip %d current; "
+            "prune %d orphan(s); output %s",
+            len(tasks), n_full, n_embedding, skipped, pruned, output_path,
         )
-        for path in to_analyze[:20]:
-            log.info("[DRY-RUN]   %s", path)
-        if len(to_analyze) > 20:
-            log.info("[DRY-RUN]   ... and %d more", len(to_analyze) - 20)
+        for mode, path, _ in tasks[:20]:
+            log.info("[DRY-RUN]   %-9s %s", mode, path)
+        if len(tasks) > 20:
+            log.info("[DRY-RUN]   ... and %d more", len(tasks) - 20)
         return pd.DataFrame(list(rows.values()), columns=FEATURE_COLUMNS)
 
+    threads = model_threads or (max(1, (os.cpu_count() or 1) // workers) if parallel else None)
     log.info(
-        "Skipping %d unchanged file(s); analyzing %d file(s) with %d worker(s)",
-        skipped, len(to_analyze), workers,
+        "Skipping %d current file(s); analyzing %d (%d full, %d embedding-only) with %d worker(s)%s",
+        skipped, len(tasks), n_full, n_embedding, workers if parallel else 1,
+        f", {threads} model thread(s) each" if threads else "",
     )
 
     failed = 0
+    embedding_issues = 0
+    done = 0
+    recorded = 0
+    unsaved = 0
+    last_save = time.monotonic()
 
-    if workers > 1 and len(to_analyze) > 1:
+    def record(task: AnalysisTask, result: dict[str, Any]) -> None:
+        nonlocal failed, embedding_issues, recorded, unsaved
+        mode, path, _ = task
+        key = str(path)
+        if mode == EMBEDDING_ONLY:
+            _merge_embedding_result(rows, key, result)
+            status = result.get("embedding_status")
+            if status in RETRYABLE_EMBEDDING_STATUSES:
+                embedding_issues += 1
+            log.info("[%d/%d] Embedding %s -> %s", done, len(tasks), path.name, status)
+        elif _merge_full_result(rows, key, result):
+            failed += 1
+            log.warning("[%d/%d] %s -> %s", done, len(tasks), path.name, result.get("error"))
+        else:
+            if result.get("embedding_status") in RETRYABLE_EMBEDDING_STATUSES:
+                embedding_issues += 1
+                log.warning(
+                    "[%d/%d] %s embedding %s: %s", done, len(tasks), path.name,
+                    result.get("embedding_status"), result.get("embedding_error"),
+                )
+            log.info("[%d/%d] Done  %s", done, len(tasks), path.name)
+        recorded += 1
+        unsaved += 1
+
+    def maybe_checkpoint() -> None:
+        nonlocal unsaved, last_save
+        if unsaved and time.monotonic() - last_save >= checkpoint_seconds:
+            started = time.perf_counter()
+            _save_dataframe(rows, output_path)
+            log.info(
+                "Checkpoint: saved %d rows to %s in %.1fs",
+                len(rows), output_path, time.perf_counter() - started,
+            )
+            unsaved = 0
+            last_save = time.monotonic()
+
+    def save_interrupted() -> None:
+        _save_dataframe(rows, output_path)
+        log.warning(
+            "Interrupted after %d/%d completed file(s); saved %d rows to %s. Re-run the same command to resume.",
+            recorded, len(tasks), len(rows), output_path,
+        )
+
+    if parallel:
         # Each worker signals the main process when it starts a file so progress
         # is visible immediately, not only on completion.
         start_q: MPQueue = MPQueue()
@@ -841,62 +1134,64 @@ def analyze_folder(
         drain_thread = threading.Thread(target=_drain_start_queue, daemon=True)
         drain_thread.start()
 
+        # Forked workers must never inherit a live ONNX Runtime thread pool.
+        embedding_lib.release_inference_session()
+        executor = ProcessPoolExecutor(
+            max_workers=workers, initializer=_worker_init, initargs=(start_q, threads)
+        )
+        completed = False
         try:
-            with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(start_q,)) as executor:
-                futures = {
-                    executor.submit(_worker_extract, path): path
-                    for path in to_analyze
-                }
-                done = 0
-                for future in as_completed(futures):
-                    path = futures[future]
-                    done += 1
-                    try:
-                        features = future.result()
-                    except Exception as exc:
-                        if type(exc).__name__ in ("BrokenProcessPool", "BrokenExecutor"):
-                            log.error("Process pool broke (%s) at [%d/%d]; halting batch to protect store integrity", exc, done, len(to_analyze))
-                            break
-                        log.warning("[%d/%d] Worker error for %s: %s", done, len(to_analyze), path.name, exc)
-                        stat = path.stat()
-                        features = {col: None for col in FEATURE_COLUMNS}
-                        features["path"] = str(path)
-                        features["mtime"] = stat.st_mtime
-                        features["size"] = stat.st_size
-                        features["schema_version"] = FEATURE_SCHEMA_VERSION
-                        features["analyzed_at"] = datetime.now(timezone.utc).isoformat()
-                        features["error"] = f"worker_error: {exc}"
-                        failed += 1
-                        rows[str(path)] = features
-                    else:
-                        if features.get("error"):
-                            failed += 1
-                            log.warning("[%d/%d] %s -> %s", done, len(to_analyze), path.name, features["error"])
-                        else:
-                            log.info("[%d/%d] Done  %s", done, len(to_analyze), path.name)
-                        rows[str(path)] = features
-                    if done % 50 == 0:
-                        _save_dataframe(rows, output_path)
-                        log.info("Checkpoint: saved %d rows to %s", len(rows), output_path)
+            futures = {executor.submit(_worker_run, task): task for task in tasks}
+            for future in as_completed(futures):
+                task = futures[future]
+                done += 1
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    if type(exc).__name__ in ("BrokenProcessPool", "BrokenExecutor"):
+                        log.error("Process pool broke (%s) at [%d/%d]; halting batch to protect store integrity", exc, done, len(tasks))
+                        break
+                    log.warning("[%d/%d] Worker error for %s: %s", done, len(tasks), task[1].name, exc)
+                    record(task, _worker_failure_result(task, exc))
+                else:
+                    record(task, result)
+                maybe_checkpoint()
+            else:
+                completed = True
+        except KeyboardInterrupt:
+            save_interrupted()
+            raise
         finally:
+            if completed:
+                executor.shutdown(wait=True)
+            else:
+                _stop_executor(executor)
             start_q.put(None)  # sentinel: stop drain thread
             drain_thread.join(timeout=2.0)
     else:
-        for idx, path in enumerate(to_analyze, start=1):
-            log.info("[%d/%d] Analyzing %s", idx, len(to_analyze), path.name)
-            features = extract_features(path)
-            if features.get("error"):
-                failed += 1
-                log.warning("  -> %s", features["error"])
-            rows[str(path)] = features
-            if idx % 50 == 0:
-                _save_dataframe(rows, output_path)
-                log.info("Checkpoint: saved %d rows to %s", len(rows), output_path)
+        if threads:
+            embedding_lib.set_inference_threads(threads)
+        try:
+            for task in tasks:
+                done += 1
+                log.info("[%d/%d] Analyzing %s", done, len(tasks), task[1].name)
+                record(task, _run_task(task))
+                maybe_checkpoint()
+        except KeyboardInterrupt:
+            save_interrupted()
+            raise
 
-    log.info("Analyzed %d, skipped %d (incremental), failed %d", len(to_analyze), skipped, failed)
+    log.info(
+        "Analyzed %d, skipped %d (incremental), failed %d, embedding failures %d",
+        len(tasks), skipped, failed, embedding_issues,
+    )
 
-    df = _save_dataframe(rows, output_path)
-    log.info("Wrote %d rows to %s", len(df), output_path)
+    if tasks or pruned or moved:
+        df = _save_dataframe(rows, output_path)
+        log.info("Wrote %d rows to %s", len(df), output_path)
+    else:
+        df = pd.DataFrame(list(rows.values()), columns=FEATURE_COLUMNS)
+        log.info("No changes; %s not rewritten", output_path)
 
     return df
 
@@ -927,6 +1222,11 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1),
                         help="Parallel worker processes (default: min(4, cpu_count); "
                              "librosa.load is I/O-heavy so more workers can thrash disk)")
+    parser.add_argument("--checkpoint-seconds", type=float, default=DEFAULT_CHECKPOINT_SECONDS,
+                        help="Minimum seconds between progress saves (default: %(default)s); "
+                             "progress is also saved on completion and Ctrl+C")
+    parser.add_argument("--model-threads", type=int, default=None,
+                        help="ONNX Runtime threads per worker (default: cpu_count // workers)")
     parser.add_argument("--log", type=str, default="review.log",
                         help="Log file path (default: review.log)")
     args = parser.parse_args()
@@ -945,13 +1245,21 @@ def main() -> None:
 
     output_path = Path(args.output) if args.output else _default_output_path()
 
-    analyze_folder(
-        folder,
-        output_path,
-        force=args.force,
-        dry_run=args.dry_run,
-        workers=args.workers,
-    )
+    try:
+        analyze_folder(
+            folder,
+            output_path,
+            force=args.force,
+            dry_run=args.dry_run,
+            workers=args.workers,
+            checkpoint_seconds=args.checkpoint_seconds,
+            model_threads=args.model_threads,
+        )
+    except PreflightError as exc:
+        log.error("%s", exc)
+        raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":

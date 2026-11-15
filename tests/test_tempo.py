@@ -12,6 +12,11 @@ import numpy as np
 
 import config
 from lib.tempo import (
+    TEMPO_FAILED,
+    TEMPO_LOW_CONFIDENCE,
+    TEMPO_OK,
+    TEMPO_OUT_OF_RANGE,
+    TEMPO_TOO_SHORT,
     TempoResult,
     apply_genre_octave_fold,
     estimate_tempo,
@@ -65,6 +70,29 @@ class TestTempoHelpers(unittest.TestCase):
         short_sig = np.zeros(44100 // 2, dtype=np.float32)
         res = estimate_tempo(audio=short_sig, sr=44100)
         self.assertIsNone(res.bpm)
+        self.assertEqual(res.status, TEMPO_TOO_SHORT)
+
+    def test_estimate_tempo_reports_status(self):
+        signal = np.zeros(44100 * 10, dtype=np.float32)
+        cases = [
+            ((120.0, [], 0.9, [], []), 120.0, TEMPO_OK),
+            ((120.0, [], 0.2, [], []), None, TEMPO_LOW_CONFIDENCE),
+            ((400.0, [], 0.9, [], []), None, TEMPO_OUT_OF_RANGE),
+        ]
+        for output, bpm, status in cases:
+            with self.subTest(status=status), \
+                 patch("essentia.standard.RhythmExtractor2013") as extractor:
+                extractor.return_value.return_value = output
+                res = estimate_tempo(audio=signal, sr=44100, genre="Rock")
+            self.assertEqual(res.bpm, bpm)
+            self.assertEqual(res.status, status)
+            self.assertEqual(res.method, "essentia_rhythm2013_mf")
+
+    def test_estimate_tempo_error_status(self):
+        with patch("lib.tempo._estimate_with_essentia", side_effect=RuntimeError("boom")):
+            res = estimate_tempo(audio=np.zeros(44100 * 10, dtype=np.float32), sr=44100)
+        self.assertIsNone(res.bpm)
+        self.assertEqual(res.status, TEMPO_FAILED)
 
 
 class TestRepairBpmScript(unittest.TestCase):

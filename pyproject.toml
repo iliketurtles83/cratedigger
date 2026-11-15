@@ -23,6 +23,7 @@ mb = [
 audio = [
     "librosa>=0.10",
     "pyloudnorm>=0.1",
+    "essentia>=2.1b6.dev1389",
     "onnxruntime>=1.16",
 ]
 web = [
