@@ -76,6 +76,16 @@ a:hover { text-decoration: underline; }
   border-radius: var(--radius);
   margin-bottom: 16px;
 }
+.flash.error {
+  background: rgba(240, 106, 106, 0.14);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.flash.warn {
+  background: rgba(245, 185, 66, 0.14);
+  border-color: var(--warn);
+  color: var(--warn);
+}
 
 .toolbar {
   display: flex;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlencode
@@ -19,7 +20,30 @@ _WEB_DIR = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
 
 
-def _nav_badges(db_path: Path, music_root: Path) -> dict[str, int]:
+def _is_music_root_readonly(music_root: Path) -> bool:
+    try:
+        if music_root.exists():
+            st = os.statvfs(music_root)
+            if bool(getattr(os, "ST_RDONLY", 1) & st.f_flag):
+                return True
+            return not os.access(music_root, os.W_OK)
+    except OSError:
+        return False
+    return False
+
+
+def _redirect_with_flash(url: str, *, msg: str = "", err: str = "") -> RedirectResponse:
+    params = {}
+    if msg:
+        params["msg"] = msg
+    if err:
+        params["err"] = err
+    sep = "&" if "?" in url else "?"
+    target = f"{url}{sep}{urlencode(params)}" if params else url
+    return RedirectResponse(url=target, status_code=303)
+
+
+def _nav_badges(db_path: Path, music_root: Path) -> dict[str, object]:
     with open_db(db_path) as conn:
         act = int(
             conn.execute(
@@ -46,6 +70,8 @@ def _nav_badges(db_path: Path, music_root: Path) -> dict[str, int]:
         "quarantine": q_count,
         "duplicates": dups,
         "undoable": undoable,
+        "read_only": _is_music_root_readonly(music_root),
+        "music_root": str(music_root),
     }
 
 
@@ -79,6 +105,7 @@ def create_app(
         group: str = Query(default=""),
         page: int = Query(default=1, ge=1),
         msg: str = Query(default=""),
+        err: str = Query(default=""),
     ) -> HTMLResponse:
         per_page = 30
         offset = (page - 1) * per_page
@@ -124,6 +151,7 @@ def create_app(
                 "reason_counts": reason_counts,
                 "status_counts": status_counts,
                 "msg": msg,
+                "err": err,
             },
         )
 
@@ -136,24 +164,25 @@ def create_app(
     ) -> RedirectResponse:
         ids = item_ids or []
         msg = "No items selected"
-        with open_db(app.state.db_path) as conn:
-            if action == "dismiss" and ids:
-                n = services.mark_review_status(conn, ids, status="dismissed", resolution={"method": "bulk_dismiss"})
-                msg = f"Dismissed {n} item(s)"
-            elif action == "resolve" and ids:
-                n = services.mark_review_status(conn, ids, status="resolved", resolution={"method": "bulk_resolve"})
-                msg = f"Marked {n} item(s) resolved"
-            elif action == "apply_genre" and ids and genre_value.strip():
-                n = services.apply_tags_to_items(
-                    conn, ids, updates={"genre": genre_value.strip()}, music_root=app.state.music_root
-                )
-                msg = f"Applied genre '{genre_value.strip()}' to {n} file(s)"
-            elif action == "reopen" and ids:
-                n = services.mark_review_status(conn, ids, status="pending")
-                msg = f"Reopened {n} item(s)"
-
-        sep = "&" if "?" in return_url else "?"
-        return RedirectResponse(url=f"{return_url}{sep}{urlencode({'msg': msg})}", status_code=303)
+        try:
+            with open_db(app.state.db_path) as conn:
+                if action == "dismiss" and ids:
+                    n = services.mark_review_status(conn, ids, status="dismissed", resolution={"method": "bulk_dismiss"})
+                    msg = f"Dismissed {n} item(s)"
+                elif action == "resolve" and ids:
+                    n = services.mark_review_status(conn, ids, status="resolved", resolution={"method": "bulk_resolve"})
+                    msg = f"Marked {n} item(s) resolved"
+                elif action == "apply_genre" and ids and genre_value.strip():
+                    n = services.apply_tags_to_items(
+                        conn, ids, updates={"genre": genre_value.strip()}, music_root=app.state.music_root
+                    )
+                    msg = f"Applied genre '{genre_value.strip()}' to {n} file(s)"
+                elif action == "reopen" and ids:
+                    n = services.mark_review_status(conn, ids, status="pending")
+                    msg = f"Reopened {n} item(s)"
+            return _redirect_with_flash(return_url, msg=msg)
+        except Exception as exc:
+            return _redirect_with_flash(return_url, err=str(exc))
 
     @app.post("/review/group-genre")
     def review_group_genre(
@@ -162,15 +191,14 @@ def create_app(
         return_url: Annotated[str, Form()] = "/review?reason=no_genre&group=folder",
     ) -> RedirectResponse:
         ids = [int(tok) for tok in item_ids_csv.split(",") if tok.strip().isdigit()]
-        with open_db(app.state.db_path) as conn:
-            n = services.apply_tags_to_items(
-                conn, ids, updates={"genre": genre_value.strip()}, music_root=app.state.music_root
-            )
-        sep = "&" if "?" in return_url else "?"
-        return RedirectResponse(
-            url=f"{return_url}{sep}{urlencode({'msg': f'Applied genre to {n} file(s)'})}",
-            status_code=303,
-        )
+        try:
+            with open_db(app.state.db_path) as conn:
+                n = services.apply_tags_to_items(
+                    conn, ids, updates={"genre": genre_value.strip()}, music_root=app.state.music_root
+                )
+            return _redirect_with_flash(return_url, msg=f"Applied genre to {n} file(s)")
+        except Exception as exc:
+            return _redirect_with_flash(return_url, err=str(exc))
 
     @app.post("/review/{item_id}/pick-cover")
     def review_pick_cover(
@@ -178,14 +206,15 @@ def create_app(
         selected_path: Annotated[str, Form()],
         return_url: Annotated[str, Form()] = "/review?reason=ambiguous_cover_art",
     ) -> RedirectResponse:
-        with open_db(app.state.db_path) as conn:
-            try:
+        try:
+            with open_db(app.state.db_path) as conn:
                 res = services.pick_cover_image(conn, item_id, selected_path, app.state.music_root)
-                msg = f"Saved cover.jpg (quarantined {res['quarantined']} alternate image(s))"
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        sep = "&" if "?" in return_url else "?"
-        return RedirectResponse(url=f"{return_url}{sep}{urlencode({'msg': msg})}", status_code=303)
+            return _redirect_with_flash(
+                return_url,
+                msg=f"Saved cover.jpg (quarantined {res['quarantined']} alternate image(s))",
+            )
+        except Exception as exc:
+            return _redirect_with_flash(return_url, err=str(exc))
 
     @app.post("/review/{item_id}/resolve-conflict")
     def review_resolve_conflict(
@@ -193,8 +222,8 @@ def create_app(
         decision: Annotated[str, Form()],
         return_url: Annotated[str, Form()] = "/review?reason=rename_conflict",
     ) -> RedirectResponse:
-        with open_db(app.state.db_path) as conn:
-            try:
+        try:
+            with open_db(app.state.db_path) as conn:
                 res = services.resolve_rename_conflict(
                     conn,
                     item_id,
@@ -202,11 +231,9 @@ def create_app(
                     app.state.music_root,
                     features_path=app.state.features_path,
                 )
-                msg = f"Conflict resolved ({res['method']})"
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        sep = "&" if "?" in return_url else "?"
-        return RedirectResponse(url=f"{return_url}{sep}{urlencode({'msg': msg})}", status_code=303)
+            return _redirect_with_flash(return_url, msg=f"Conflict resolved ({res['method']})")
+        except Exception as exc:
+            return _redirect_with_flash(return_url, err=str(exc))
 
     @app.post("/review/{item_id}/apply-folder-tag")
     def review_apply_folder_tag(
@@ -215,16 +242,17 @@ def create_app(
         value: Annotated[str, Form()],
         return_url: Annotated[str, Form()] = "/review",
     ) -> RedirectResponse:
-        with open_db(app.state.db_path) as conn:
-            try:
+        try:
+            with open_db(app.state.db_path) as conn:
                 res = services.apply_folder_tag_value(
                     conn, item_id, field=field, value=value, music_root=app.state.music_root
                 )
-                msg = f"Updated {res['field']} on {res['updated_files']} file(s)"
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        sep = "&" if "?" in return_url else "?"
-        return RedirectResponse(url=f"{return_url}{sep}{urlencode({'msg': msg})}", status_code=303)
+            return _redirect_with_flash(
+                return_url,
+                msg=f"Updated {res['field']} on {res['updated_files']} file(s)",
+            )
+        except Exception as exc:
+            return _redirect_with_flash(return_url, err=str(exc))
 
     @app.post("/review/{item_id}/write-tags")
     def review_write_tags(
@@ -243,13 +271,15 @@ def create_app(
             "genre": genre,
             "title": title,
         }
-        with open_db(app.state.db_path) as conn:
-            n = services.apply_tags_to_items(
-                conn, [item_id], updates=updates, music_root=app.state.music_root
-            )
-        msg = f"Updated tags on {n} file" if n else "No tags updated"
-        sep = "&" if "?" in return_url else "?"
-        return RedirectResponse(url=f"{return_url}{sep}{urlencode({'msg': msg})}", status_code=303)
+        try:
+            with open_db(app.state.db_path) as conn:
+                n = services.apply_tags_to_items(
+                    conn, [item_id], updates=updates, music_root=app.state.music_root
+                )
+            msg = f"Updated tags on {n} file" if n else "No tags updated"
+            return _redirect_with_flash(return_url, msg=msg)
+        except Exception as exc:
+            return _redirect_with_flash(return_url, err=str(exc))
 
     @app.post("/review/{item_id}/status")
     def review_item_status(
@@ -270,6 +300,7 @@ def create_app(
         q: str = Query(default=""),
         page: int = Query(default=1, ge=1),
         msg: str = Query(default=""),
+        err: str = Query(default=""),
     ) -> HTMLResponse:
         per_page = 40
         offset = (page - 1) * per_page
@@ -303,6 +334,7 @@ def create_app(
                 "reason_counts": reason_counts,
                 "status_counts": status_counts,
                 "msg": msg,
+                "err": err,
             },
         )
 
@@ -312,6 +344,7 @@ def create_app(
         tab: str = Query(default="duplicates"),
         page: int = Query(default=1, ge=1),
         msg: str = Query(default=""),
+        err: str = Query(default=""),
     ) -> HTMLResponse:
         per_page = 25
         offset = (page - 1) * per_page
@@ -333,6 +366,7 @@ def create_app(
                 "page": page,
                 "total_pages": total_pages,
                 "msg": msg,
+                "err": err,
             },
         )
 
@@ -342,8 +376,8 @@ def create_app(
         keep_path: Annotated[str, Form()],
         quarantine_path: Annotated[str, Form()],
     ) -> RedirectResponse:
-        with open_db(app.state.db_path) as conn:
-            try:
+        try:
+            with open_db(app.state.db_path) as conn:
                 services.quarantine_duplicate_hash_copy(
                     conn,
                     audio_hash_val=audio_hash_val,
@@ -352,31 +386,33 @@ def create_app(
                     music_root=app.state.music_root,
                     features_path=app.state.features_path,
                 )
-                msg = "Quarantined duplicate copy and relinked playlists"
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(url=f"/quarantine?tab=duplicates&{urlencode({'msg': msg})}", status_code=303)
+            return _redirect_with_flash("/quarantine?tab=duplicates", msg="Quarantined duplicate copy and relinked playlists")
+        except Exception as exc:
+            return _redirect_with_flash("/quarantine?tab=duplicates", err=str(exc))
 
     @app.post("/quarantine/restore")
     def quarantine_restore(quarantined_path: Annotated[str, Form()]) -> RedirectResponse:
-        with open_db(app.state.db_path) as conn:
-            try:
+        try:
+            with open_db(app.state.db_path) as conn:
                 dest = services.restore_quarantined_file(conn, quarantined_path, app.state.music_root)
-                msg = f"Restored {dest.name}"
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(url=f"/quarantine?tab=files&{urlencode({'msg': msg})}", status_code=303)
+            return _redirect_with_flash("/quarantine?tab=files", msg=f"Restored {dest.name}")
+        except Exception as exc:
+            return _redirect_with_flash("/quarantine?tab=files", err=str(exc))
 
     @app.post("/quarantine/empty")
     def quarantine_empty() -> RedirectResponse:
-        removed = services.empty_quarantine(app.state.music_root)
-        return RedirectResponse(
-            url=f"/quarantine?tab=files&{urlencode({'msg': f'Permanently removed {removed} quarantined file(s)'})}",
-            status_code=303,
-        )
+        try:
+            removed = services.empty_quarantine(app.state.music_root)
+            return _redirect_with_flash("/quarantine?tab=files", msg=f"Permanently removed {removed} quarantined file(s)")
+        except Exception as exc:
+            return _redirect_with_flash("/quarantine?tab=files", err=str(exc))
 
     @app.get("/undo", response_class=HTMLResponse)
-    def undo_page(request: Request, msg: str = Query(default="")) -> HTMLResponse:
+    def undo_page(
+        request: Request,
+        msg: str = Query(default=""),
+        err: str = Query(default=""),
+    ) -> HTMLResponse:
         with open_db(app.state.db_path) as conn:
             rows = conn.execute(
                 """
@@ -394,19 +430,19 @@ def create_app(
         return _TEMPLATES.TemplateResponse(
             request,
             "undo.html",
-            {"active_nav": "undo", "badges": badges, "runs": runs, "msg": msg},
+            {"active_nav": "undo", "badges": badges, "runs": runs, "msg": msg, "err": err},
         )
 
     @app.post("/undo/{run_id}")
     def undo_execute(run_id: str) -> RedirectResponse:
-        with open_db(app.state.db_path) as conn:
-            n = services.undo_run(
-                conn, run_id, app.state.music_root, features_path=app.state.features_path
-            )
-        return RedirectResponse(
-            url=f"/undo?{urlencode({'msg': f'Reverted {n} operation(s) in {run_id}'})}",
-            status_code=303,
-        )
+        try:
+            with open_db(app.state.db_path) as conn:
+                n = services.undo_run(
+                    conn, run_id, app.state.music_root, features_path=app.state.features_path
+                )
+            return _redirect_with_flash("/undo", msg=f"Reverted {n} operation(s) in {run_id}")
+        except Exception as exc:
+            return _redirect_with_flash("/undo", err=str(exc))
 
     @app.get("/media/image")
     def serve_image(path: str = Query(...)) -> FileResponse:

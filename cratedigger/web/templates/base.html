@@ -30,6 +30,12 @@
   </header>
 
   <main class="container">
+    {% if badges.read_only %}
+      <div class="flash warn">Library root (<code>{{ badges.music_root }}</code>) is mounted read-only. File moves and tag writes will fail until remounted read-write.</div>
+    {% endif %}
+    {% if err %}
+      <div class="flash error">{{ err }}</div>
+    {% endif %}
     {% if msg %}
       <div class="flash">{{ msg }}</div>
     {% endif %}
