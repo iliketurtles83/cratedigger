@@ -43,7 +43,7 @@ LETTER_BUCKETS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 # Completely ignored non-audio trees. Letter buckets are deliberately not
 # included because pipeline stages descend into them.
-SKIP_FOLDERS = {"0videos", "Playlists"}
+SKIP_FOLDERS = {"0videos", "0quarantine", "Playlists"}
 
 # Special folders — tag only, never move or rename files (kept for backward compatibility)
 SPECIAL_FOLDERS = {

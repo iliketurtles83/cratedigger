@@ -650,23 +650,22 @@ def undo_run(
     *,
     features_path: Path | None = None,
 ) -> int:
-    """Revert all file moves recorded under *run_id* in reverse order."""
+    """Revert all operations recorded under *run_id* in reverse order."""
+    from cratedigger.engine.executor import undo_plan_run
+
     entries = conn.execute(
-        "SELECT * FROM undo_journal WHERE run_id = ? AND reverted = 0 ORDER BY seq DESC",
+        "SELECT src_path, dst_path FROM undo_journal WHERE run_id = ? AND reverted = 0",
         (run_id,),
     ).fetchall()
-    reverted = 0
     for entry in entries:
-        src = entry["src_path"]
-        dst = entry["dst_path"]
-        if src and dst and entry["op_type"] in {"quarantine_move", "rename", "restore"}:
-            dst_p = resolve_safe_path(dst, music_root)
-            src_p = resolve_safe_path(src, music_root)
-            if dst_p.exists() and not src_p.exists():
-                src_p.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(dst_p), str(src_p))
-                update_downstream_paths({dst_p: src_p}, music_root=music_root, logger=log, features_path=features_path)
-        conn.execute("UPDATE undo_journal SET reverted = 1 WHERE id = ?", (entry["id"],))
-        reverted += 1
-    conn.commit()
-    return reverted
+        if entry["src_path"]:
+            resolve_safe_path(entry["src_path"], music_root)
+        if entry["dst_path"]:
+            resolve_safe_path(entry["dst_path"], music_root)
+
+    return undo_plan_run(
+        conn,
+        run_id,
+        music_root=music_root,
+        features_path=features_path,
+    )
