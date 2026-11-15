@@ -22,7 +22,7 @@ Output schema (one row per audio file):
     key                 : str  (e.g. "C", "F#")
     mode                : str  ("major" | "minor")
     energy              : float (mean RMS, 0..1)
-    loudness_lufs       : float (integrated LUFS, may be None)
+    loudness_lufs       : float (ITU-R BS.1770 integrated LUFS of the original channels at native rate; may be None)
     spectral_centroid   : float (mean Hz)
     zero_crossing_rate  : float (mean 0..1)
     danceability        : float (heuristic proxy 0..1)
@@ -112,7 +112,9 @@ from lib.tempo import estimate_tempo, sanitize_bpm_tag
 
 # 10: HQ model resampling, raw 400+1280 model outputs, embedding/tempo/key status
 # and provenance, signal quality, and raw Essentia/MFCC summaries.
-FEATURE_SCHEMA_VERSION = 10
+# 11: loudness_lufs measured on the original channels at the native rate instead
+# of the mono 22.05 kHz downmix (stereo tracks read 3-6 dB low before).
+FEATURE_SCHEMA_VERSION = 11
 SILENT_PEAK_DBFS = -80.0
 DEFAULT_CHECKPOINT_SECONDS = 300.0
 
@@ -494,10 +496,10 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
     except Exception:
         pass
 
-    # Load audio at standard analysis rate (22,050 Hz) for 3x faster decoding
-    # and lower memory usage while fully preserving musical pitch/tonality.
+    # Decode once at the native rate for loudness, then analyze a mono 22,050 Hz
+    # buffer (identical to librosa.load(sr=22050)) to keep DSP fast and stable.
     try:
-        y, sr = _load_analysis_audio(path, librosa)
+        y, sr, native_lufs = _load_analysis_audio_with_loudness(path, librosa)
     except Exception as exc:
         base["error"] = f"load_failed: {exc}"
         return base
@@ -608,15 +610,7 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
             duration_s=duration_s,
         )
 
-        pln = _load_pyloudnorm()
-        if pln is not None and duration_s >= 0.5:
-            try:
-                meter = pln.Meter(sr)
-                lufs = float(meter.integrated_loudness(y))
-                if np.isfinite(lufs) and lufs <= 0.0:
-                    base["loudness_lufs"] = round(lufs, 2)
-            except Exception as exc:
-                log.debug("LUFS failed for %s: %s", path.name, exc)
+        base["loudness_lufs"] = native_lufs
 
         try:
             base["speechiness"] = _speechiness_proxy(
@@ -694,6 +688,41 @@ def _load_analysis_audio(path: Path, librosa) -> tuple[np.ndarray, int]:
         warnings.filterwarnings("ignore", category=FutureWarning)
         y, sr = librosa.load(str(path), sr=embedding_lib.DECODE_SAMPLE_RATE, mono=True)
     return y, int(sr)
+
+
+def _integrated_loudness(native: np.ndarray, native_sr: int) -> float | None:
+    """BS.1770 integrated loudness of the decoded channels (pyloudnorm supports up to five)."""
+    pln = _load_pyloudnorm()
+    if pln is None:
+        return None
+    channels = native if native.ndim == 1 else native.T
+    if channels.shape[0] < int(0.5 * native_sr):
+        return None
+    clean, _ = sanitize_audio(channels)
+    try:
+        lufs = float(pln.Meter(native_sr).integrated_loudness(clean))
+    except Exception as exc:
+        log.debug("LUFS failed: %s", exc)
+        return None
+    return round(lufs, 2) if np.isfinite(lufs) and lufs <= 0.0 else None
+
+
+def _load_analysis_audio_with_loudness(path: Path, librosa) -> tuple[np.ndarray, int, float | None]:
+    """Decode once at the native rate, measure loudness on the original channels,
+    then derive the same mono buffer ``_load_analysis_audio`` returns
+    (``librosa.load`` downmixes and resamples in this order)."""
+    with warnings.catch_warnings(), _suppress_c_stderr():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        native, native_sr = librosa.load(str(path), sr=None, mono=False)
+    native_sr = int(native_sr)
+    lufs = _integrated_loudness(native, native_sr)
+    y = librosa.to_mono(native)
+    del native
+    target_sr = embedding_lib.DECODE_SAMPLE_RATE
+    if native_sr != target_sr:
+        y = librosa.resample(y, orig_sr=native_sr, target_sr=target_sr, res_type="soxr_hq")
+    return y, target_sr, lufs
 
 
 def _embedding_for(

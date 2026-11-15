@@ -215,6 +215,11 @@ are recomputed without repeating DSP analysis, and a full re-analysis reuses a
 current embedding when the audio hash is unchanged. Silent audio (peak at or
 below −80 dBFS) and tracks over 20 minutes are not embedded.
 
+`loudness_lufs` is ITU-R BS.1770 integrated loudness of the original channels
+at the native sample rate (schema 11). Earlier schemas measured the mono
+downmix, which read 3–6 dB low for stereo files. It describes the file's
+mastered level; use it for playback leveling rather than rewriting audio.
+
 ### intake.py — Full intake in one command
 
 Orchestrates `01_tag.py → 02_rename.py → 04_move.py --intake` for files in `INCOMING_FOLDER`.

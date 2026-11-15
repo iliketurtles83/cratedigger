@@ -261,6 +261,50 @@ class TestAnalyzeIncremental(unittest.TestCase):
         self.assertEqual(len(df), 0)
 
 
+class TestNativeLoudness(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.librosa = analyze._load_librosa()
+        self.pln = analyze._load_pyloudnorm()
+        if self.librosa is None or self.pln is None:
+            self.skipTest("librosa and pyloudnorm are required")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_stereo(self, name: str, left: np.ndarray, right: np.ndarray, sr: int = 44100) -> Path:
+        import soundfile as sf
+        path = self.root / name
+        sf.write(path, np.stack([left, right], axis=1).astype(np.float32), sr, subtype="PCM_24")
+        return path
+
+    def test_native_decode_matches_analysis_buffer(self):
+        rng = np.random.default_rng(3)
+        n = 44100 * 3
+        path = self._write_stereo("wide.flac", 0.2 * rng.standard_normal(n), 0.2 * rng.standard_normal(n))
+        y_ref, sr_ref = analyze._load_analysis_audio(path, self.librosa)
+        y, sr, lufs = analyze._load_analysis_audio_with_loudness(path, self.librosa)
+        self.assertEqual(sr, sr_ref)
+        self.assertTrue(np.array_equal(y, y_ref))
+        self.assertIsNotNone(lufs)
+
+    def test_loudness_sums_channels_at_native_rate(self):
+        t = np.arange(44100 * 3) / 44100
+        tone = 0.25 * np.sin(2 * np.pi * 1000 * t)
+        path = self._write_stereo("dual_mono.flac", tone, tone)
+        y, sr, lufs = analyze._load_analysis_audio_with_loudness(path, self.librosa)
+        mono_lufs = float(self.pln.Meter(sr).integrated_loudness(y))
+        self.assertAlmostEqual(lufs, mono_lufs + 3.01, delta=0.1)
+
+        row = analyze.extract_features(path)
+        self.assertEqual(row["loudness_lufs"], lufs)
+
+    def test_short_or_silent_audio_has_no_loudness(self):
+        self.assertIsNone(analyze._integrated_loudness(np.zeros((2, 44100), dtype=np.float32), 44100))
+        self.assertIsNone(analyze._integrated_loudness(np.full(1000, 0.5, dtype=np.float32), 44100))
+
+
 def _ok_embedding(scale: float = 1.0) -> EmbeddingResult:
     return EmbeddingResult(
         EMBEDDING_OK,
