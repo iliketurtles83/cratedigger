@@ -48,12 +48,11 @@ class TestAnalyzeSchema(unittest.TestCase):
             "artist_tag", "album_tag", "track_tag", "year_tag", "genre_tag",
             "rating_tag", "rating",
             "duration_ms", "bpm_tag", "bpm", "bpm_confidence", "key", "mode",
-            "energy", "loudness_lufs", "spectral_centroid",
-            "zero_crossing_rate", "danceability",
-            "speechiness", "acousticness", "instrumentalness", "liveness", "valence",
+            "loudness_lufs", "spectral_centroid", "zero_crossing_rate",
             "bpm_method", "bpm_status", "key_method", "key_strength",
             "dynamic_complexity", "danceability_raw", "mfcc_delta_std",
-            "peak_dbfs", "native_peak_dbfs", "rms_dbfs", "sanitized_fraction", "signal_status",
+            "peak_dbfs", "native_peak_dbfs", "rms_dbfs", "sanitized_fraction",
+            "decode_coverage", "decoder", "signal_status",
             "embedding", "style_activations", "audio_embedding", "embedding_patches",
             "embedding_status", "embedding_error", "embedding_recipe",
             "embedding_model_sha256", "style_labels_sha256",
@@ -72,18 +71,6 @@ class TestAnalyzeSchema(unittest.TestCase):
         self.assertAlmostEqual(audible["peak_dbfs"], -6.02, places=1)
         self.assertAlmostEqual(audible["rms_dbfs"], -9.03, places=0)
         self.assertEqual(audible["sanitized_fraction"], 0.01)
-
-    def test_danceability_proxy_range(self):
-        self.assertEqual(analyze._danceability_proxy(0, 1.0), 0.0)
-        self.assertEqual(analyze._danceability_proxy(None, 1.0, dance_raw=2.0, duration_s=30.0), 0.0)
-        score = analyze._danceability_proxy(120.0, 0.5)
-        self.assertGreater(score, 0.0)
-        self.assertLessEqual(score, 1.0)
-        es_score = analyze._danceability_proxy(
-            120.0, 0.5, dance_raw=2.1, bpm_confidence=0.8, duration_s=30.0
-        )
-        self.assertGreater(es_score, 0.0)
-        self.assertLessEqual(es_score, 1.0)
 
     def test_sanitize_audio_and_key_normalization(self):
         dirty = np.array([0.5, np.nan, np.inf, -np.inf, 3279.0, -500.0, 1.3], dtype=np.float32)
@@ -132,7 +119,10 @@ class TestAnalyzeIncremental(unittest.TestCase):
         self.assertEqual(row["schema_version"], analyze.FEATURE_SCHEMA_VERSION)
         self.assertIsNone(row["error"])
         self.assertGreater(row["duration_ms"], 1000)
-        self.assertGreater(row["energy"], 0.3)  # 0.5 amplitude sine -> RMS ~0.35 (not Hann-weighted ~0.21)
+        self.assertAlmostEqual(row["rms_dbfs"], -9.03, places=1)  # 0.5 amplitude sine
+        self.assertEqual(row["decoder"], "librosa")
+        self.assertAlmostEqual(row["decode_coverage"], 1.0, places=3)
+        self.assertEqual(row["signal_status"], "ok")
         self.assertIn(row["mode"], ("major", "minor"))
 
     def test_audio_bpm_ignores_corrupt_or_stale_bpm_tag(self):
@@ -241,7 +231,7 @@ class TestAnalyzeIncremental(unittest.TestCase):
         with patch("librosa.load", return_value=(spike, 22050)), \
              patch.object(analyze, "extract_embeddings") as extract:
             row = analyze.extract_features(self.audio)
-        self.assertEqual(row["energy"], 0.0)
+        self.assertEqual(row["rms_dbfs"], -200.0)
         if row["loudness_lufs"] is not None:
             self.assertLessEqual(row["loudness_lufs"], 0.0)
         self.assertEqual(row["sanitized_fraction"], 1.0)
@@ -284,21 +274,24 @@ class TestNativeLoudness(unittest.TestCase):
         n = 44100 * 3
         path = self._write_stereo("wide.flac", 0.2 * rng.standard_normal(n), 0.2 * rng.standard_normal(n))
         y_ref, sr_ref = analyze._load_analysis_audio(path, self.librosa)
-        y, sr, lufs, _ = analyze._load_analysis_audio_with_levels(path, self.librosa)
-        self.assertEqual(sr, sr_ref)
-        self.assertTrue(np.array_equal(y, y_ref))
-        self.assertIsNotNone(lufs)
+        audio = analyze._load_analysis_audio_with_levels(path, self.librosa)
+        self.assertEqual(audio.sr, sr_ref)
+        self.assertTrue(np.array_equal(audio.y, y_ref))
+        self.assertTrue(np.array_equal(y_ref, self.librosa.load(str(path), sr=22050, mono=True)[0]))
+        self.assertIsNotNone(audio.lufs)
+        self.assertEqual(audio.decoder, "librosa")
+        self.assertFalse(audio.truncated)
 
     def test_loudness_sums_channels_at_native_rate(self):
         t = np.arange(44100 * 3) / 44100
         tone = 0.25 * np.sin(2 * np.pi * 1000 * t)
         path = self._write_stereo("dual_mono.flac", tone, tone)
-        y, sr, lufs, _ = analyze._load_analysis_audio_with_levels(path, self.librosa)
-        mono_lufs = float(self.pln.Meter(sr).integrated_loudness(y))
-        self.assertAlmostEqual(lufs, mono_lufs + 3.01, delta=0.1)
+        audio = analyze._load_analysis_audio_with_levels(path, self.librosa)
+        mono_lufs = float(self.pln.Meter(audio.sr).integrated_loudness(audio.y))
+        self.assertAlmostEqual(audio.lufs, mono_lufs + 3.01, delta=0.1)
 
         row = analyze.extract_features(path)
-        self.assertEqual(row["loudness_lufs"], lufs)
+        self.assertEqual(row["loudness_lufs"], audio.lufs)
 
     def test_native_peak_uses_loudest_original_channel(self):
         t = np.arange(44100 * 3) / 44100
@@ -317,6 +310,75 @@ class TestNativeLoudness(unittest.TestCase):
     def test_short_or_silent_audio_has_no_loudness(self):
         self.assertIsNone(analyze._integrated_loudness(np.zeros((2, 44100), dtype=np.float32), 44100))
         self.assertIsNone(analyze._integrated_loudness(np.full(1000, 0.5, dtype=np.float32), 44100))
+
+
+class TestTruncatedDecode(unittest.TestCase):
+    """A decode cut short of the header length is retried with ffmpeg or flagged."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.audio = Path(self.tmp.name) / "song.wav"
+        _write_sine_wav(self.audio, duration_s=3.0)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_unrecovered_short_decode_is_flagged_truncated(self):
+        with patch.object(analyze, "header_seconds", return_value=30.0), \
+             patch("lib.decode.ffmpeg_decode", return_value=None), \
+             patch.object(analyze, "extract_embeddings", return_value=_ok_embedding()) as extract:
+            row = analyze.extract_features(self.audio)
+        self.assertIsNone(row["error"])
+        self.assertEqual(row["signal_status"], "truncated")
+        self.assertEqual(row["decoder"], "librosa")
+        self.assertEqual(row["decode_coverage"], 0.1)
+        self.assertEqual(row["duration_ms"], 3000)
+        extract.assert_called_once()  # the decoded part still gets an embedding
+        self.assertEqual(row["embedding_status"], EMBEDDING_OK)
+
+    def test_ffmpeg_recovery_replaces_short_decode(self):
+        t = np.arange(22050 * 30) / 22050
+        full = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        with patch.object(analyze, "header_seconds", return_value=30.0), \
+             patch("lib.decode.ffmpeg_decode", return_value=full) as ff, \
+             patch.object(analyze, "extract_embeddings", return_value=_ok_embedding()) as extract:
+            row = analyze.extract_features(self.audio)
+        ff.assert_called_once_with(self.audio, 22050, 1)
+        self.assertEqual(row["signal_status"], "ok")
+        self.assertEqual(row["decoder"], "ffmpeg")
+        self.assertEqual(row["decode_coverage"], 1.0)
+        self.assertEqual(row["duration_ms"], 30000)
+        self.assertEqual(extract.call_args.kwargs["audio"].size, full.size)
+
+    def test_header_length_drives_long_file_skip(self):
+        with patch.object(analyze, "header_seconds", return_value=1300.0), \
+             patch.object(analyze, "decode_native") as dec:
+            row = analyze.extract_features(self.audio)
+        dec.assert_not_called()
+        self.assertEqual(row["error"], "duration_exceeds_20min")
+        self.assertEqual(row["duration_ms"], 1300000)
+
+    def test_very_short_truncated_audio_does_not_fail_mfcc_delta(self):
+        short = Path(self.tmp.name) / "short.wav"
+        _write_sine_wav(short, duration_s=0.093)
+        with patch.object(analyze, "header_seconds", return_value=30.0), \
+             patch("lib.decode.ffmpeg_decode", return_value=None):
+            row = analyze.extract_features(short)
+        self.assertIsNone(row["error"])
+        self.assertEqual(row["signal_status"], "truncated")
+        self.assertEqual(row["decode_coverage"], 0.0031)
+        self.assertLess(row["mfcc_delta_std"], 1e-4)
+
+    def test_embedding_refresh_uses_truncation_safe_decode(self):
+        librosa = analyze._load_librosa()
+        y, sr = analyze._load_analysis_audio(self.audio, librosa)
+        self.assertEqual(sr, 22050)
+        self.assertTrue(np.array_equal(y, librosa.load(str(self.audio), sr=22050, mono=True)[0]))
+        full = np.zeros(22050 * 30, dtype=np.float32)
+        with patch("lib.decode.header_seconds", return_value=30.0), \
+             patch("lib.decode.ffmpeg_decode", return_value=full):
+            y, _ = analyze._load_analysis_audio(self.audio, librosa)
+        self.assertEqual(y.size, full.size)
 
 
 def _ok_embedding(scale: float = 1.0) -> EmbeddingResult:

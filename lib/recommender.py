@@ -7,14 +7,19 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
+from lib.descriptors import DESCRIPTOR_RECIPE, DESCRIPTOR_SCALE, attach_descriptors, to_probability
+
 log = logging.getLogger("lib.recommender")
 
-RECIPE_VERSION = "cratedigger-v1.0-discogs-effnet-hybrid"
+# v2: learned EffNet-head scalars replace the librosa heuristics; tracks without
+# a usable embedding or decoded for less than half their length are not exported.
+RECIPE_VERSION = "cratedigger-v2.0-discogs-effnet-hybrid"
+MIN_EXPORT_DECODE_COVERAGE = 0.5
 
 DEFAULT_WEIGHTS = {
     "embedding": 0.70,
@@ -26,7 +31,15 @@ DEFAULT_WEIGHTS = {
 PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 PITCH_TO_INDEX = {k: i for i, k in enumerate(PITCH_CLASSES)}
 
-SCALAR_COLS = ["energy", "valence", "danceability", "acousticness", "speechiness"]
+# Descriptor logits (lib.descriptors); the scalar block standardizes their probabilities.
+SCALAR_COLS = ["energy", "valence", "danceability", "acousticness", "instrumentalness"]
+# Readable export fields: descriptor logits (order-preserving; rank them as percentiles).
+EXPORT_DESCRIPTOR_FIELDS = [
+    "energy", "valence", "danceability", "acousticness", "instrumentalness",
+    "happy", "sad", "relaxed", "aggressive", "party", "electronic",
+]
+EXPORT_REGRESSION_FIELDS = ["approachability", "engagement"]
+EXPORT_LEVEL_FIELDS = ["loudness_lufs", "native_peak_dbfs"]
 
 
 # ---------------------------------------------------------------------------
@@ -72,14 +85,28 @@ def encode_harmonic_circle(key: Optional[str], mode: Optional[str]) -> np.ndarra
     return np.array([scale * np.cos(theta), scale * np.sin(theta), scale * mode_sign], dtype=np.float32)
 
 
+def _finite(value: Any) -> Optional[float]:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    return val if np.isfinite(val) else None
+
+
+def scalar_probability(value: Any) -> Optional[float]:
+    """Probability for a descriptor logit, or None when missing."""
+    val = _finite(value)
+    return None if val is None else float(to_probability(val))
+
+
 def encode_scalars(row: dict | pd.Series, means: dict, stds: dict) -> np.ndarray:
-    """Standardize and L2-normalize readable scalars."""
+    """Standardize and L2-normalize descriptor probabilities (missing values -> mean)."""
     vals = []
     for col in SCALAR_COLS:
-        val = row.get(col)
-        if val is None or np.isnan(val):
-            val = means.get(col, 0.5)
         mean = means.get(col, 0.5)
+        val = scalar_probability(row.get(col))
+        if val is None:
+            val = mean
         std = stds.get(col, 0.25)
         std = std if std > 1e-4 else 1.0
         standardized = (float(val) - mean) / std
@@ -107,27 +134,27 @@ class VectorBaker:
         total = sum(raw_weights.values())
         self.weights = {k: v / total for k, v in raw_weights.items()}
 
-        # Default standardization parameters for scalars
+        # Probability-scale defaults from the 240-track, 12-genre pilot
         self.scalar_means = {
-            "energy": 0.09,
-            "valence": 0.54,
+            "energy": 0.32,
+            "valence": 0.51,
             "danceability": 0.50,
-            "acousticness": 0.45,
-            "speechiness": 0.36,
+            "acousticness": 0.35,
+            "instrumentalness": 0.37,
         }
         self.scalar_stds = {
-            "energy": 0.04,
-            "valence": 0.18,
-            "danceability": 0.13,
-            "acousticness": 0.13,
-            "speechiness": 0.14,
+            "energy": 0.26,
+            "valence": 0.27,
+            "danceability": 0.43,
+            "acousticness": 0.37,
+            "instrumentalness": 0.36,
         }
 
     def fit_scalars(self, df: pd.DataFrame) -> None:
-        """Fit means and stds from a reference DataFrame."""
+        """Fit probability means and stds from a reference DataFrame of descriptor logits."""
         for col in SCALAR_COLS:
             if col in df.columns:
-                valid = df[col].dropna()
+                valid = to_probability(pd.to_numeric(df[col], errors="coerce")).dropna()
                 if len(valid) > 0:
                     self.scalar_means[col] = float(valid.mean())
                     std = float(valid.std())
@@ -333,14 +360,56 @@ def deduplicate_features_by_audio_hash(df: pd.DataFrame) -> pd.DataFrame:
     return deduped.reset_index(drop=True)
 
 
+def _has_style_embedding(value: Any) -> bool:
+    return (
+        isinstance(value, np.ndarray)
+        and value.ndim == 1
+        and value.size > 0
+        and bool(np.all(np.isfinite(value)))
+        and float(np.linalg.norm(value)) > 1e-9
+    )
+
+
+def _rounded(value: Any, digits: int) -> Optional[float]:
+    val = _finite(value)
+    return None if val is None else round(val, digits)
+
+
+def exportable_mask(df: pd.DataFrame) -> pd.Series:
+    """Rows with a usable style embedding that are not silent and decoded enough audio."""
+    if df.empty:
+        return pd.Series(False, index=df.index, dtype=bool)
+    has_emb = df["embedding"].map(_has_style_embedding).astype(bool) if "embedding" in df.columns else False
+    if "decode_coverage" in df.columns:
+        coverage = pd.to_numeric(df["decode_coverage"], errors="coerce")
+        decoded = coverage.isna() | (coverage >= MIN_EXPORT_DECODE_COVERAGE)
+    else:
+        decoded = True
+    audible = df["signal_status"].ne("silent") if "signal_status" in df.columns else True
+    return pd.Series(has_emb, index=df.index) & decoded & audible
+
+
 def export_features(
     df: pd.DataFrame,
     output_path: Path | str,
     baker: Optional[VectorBaker] = None,
     model_version: str = RECIPE_VERSION,
+    descriptor_runners: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Export feature store to a compact gzipped JSON format for the phone/server."""
+    """Export feature store to a compact gzipped JSON format for the phone/server.
+
+    Descriptor columns are always recomputed from ``audio_embedding`` (replacing
+    any legacy proxy columns).  Rows without a usable embedding, or decoded for
+    less than ``MIN_EXPORT_DECODE_COVERAGE`` of their length, are left out.
+    """
     df = deduplicate_features_by_audio_hash(df)
+    if "audio_hash" in df.columns:
+        df = df[df["audio_hash"].notna() & (df["audio_hash"].astype(str) != "")]
+    else:
+        df = df.iloc[0:0]
+    keep = exportable_mask(df)
+    excluded = int((~keep).sum())
+    df = attach_descriptors(df.loc[keep], descriptor_runners)
     if baker is None:
         baker = VectorBaker()
         baker.fit_scalars(df)
@@ -352,26 +421,23 @@ def export_features(
     dims = None
 
     for _, row in df.iterrows():
-        ah = row.get("audio_hash")
-        if not ah:
-            continue
-
         vec = baker.bake_vector(row)
         if dims is None:
             dims = len(vec)
 
         track_dict = {
-            "audio_hash": ah,
+            "audio_hash": row["audio_hash"],
             "vector": [round(float(x), 5) for x in vec],
-            "bpm": round(float(row["bpm"]), 1) if pd.notna(row.get("bpm")) else None,
+            "bpm": _rounded(row.get("bpm"), 1),
             "key": str(row["key"]) if pd.notna(row.get("key")) else None,
             "mode": str(row["mode"]) if pd.notna(row.get("mode")) else None,
-            "energy": round(float(row["energy"]), 3) if pd.notna(row.get("energy")) else None,
-            "valence": round(float(row["valence"]), 3) if pd.notna(row.get("valence")) else None,
-            "danceability": round(float(row["danceability"]), 3) if pd.notna(row.get("danceability")) else None,
-            "acousticness": round(float(row["acousticness"]), 3) if pd.notna(row.get("acousticness")) else None,
-            "speechiness": round(float(row["speechiness"]), 3) if pd.notna(row.get("speechiness")) else None,
         }
+        for field in EXPORT_DESCRIPTOR_FIELDS + EXPORT_REGRESSION_FIELDS:
+            track_dict[field] = _rounded(row.get(field), 3)
+        for field in EXPORT_LEVEL_FIELDS:
+            track_dict[field] = _rounded(row.get(field), 2)
+        if row.get("signal_status") == "truncated":
+            track_dict["truncated"] = True
 
         # Optional metadata tags if present
         for tag_field in ["artist_tag", "album_tag", "genre_tag"]:
@@ -386,7 +452,10 @@ def export_features(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "dims": dims or 0,
         "weights": baker.weights,
+        "descriptor_recipe": DESCRIPTOR_RECIPE,
+        "descriptor_scale": DESCRIPTOR_SCALE,
         "track_count": len(tracks),
+        "excluded_count": excluded,
         "tracks": tracks,
     }
 
@@ -399,11 +468,15 @@ def export_features(
         output_path.write_text(raw_json, encoding="utf-8")
 
     size_mb = output_path.stat().st_size / (1024 * 1024)
-    log.info("Exported %d tracks (%d dims) to %s (%.2f MB)", len(tracks), dims or 0, output_path, size_mb)
+    log.info(
+        "Exported %d tracks (%d dims) to %s (%.2f MB); %d left out (silent, no usable embedding, or decode coverage < %.0f%%)",
+        len(tracks), dims or 0, output_path, size_mb, excluded, MIN_EXPORT_DECODE_COVERAGE * 100,
+    )
 
     return {
         "output_path": str(output_path),
         "track_count": len(tracks),
+        "excluded_count": excluded,
         "dims": dims,
         "size_mb": round(size_mb, 2),
     }

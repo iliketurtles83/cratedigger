@@ -149,17 +149,16 @@ Extract audio features for a personal recommender model. Runs independently of `
 |---|---|---|
 | BPM (tempo) | librosa | ✅ |
 | Key + mode | librosa (Krumhansl-Schmuckler) | ✅ |
-| Energy (RMS) | librosa | ✅ |
 | Loudness (LUFS) | pyloudnorm | ✅ |
 | Spectral centroid | librosa | ✅ |
 | Zero crossing rate | librosa | ✅ |
-| Danceability (heuristic proxy) | librosa | ✅ |
+| Raw danceability + dynamic summaries | Essentia / librosa | ✅ |
 | Duration (ms) | librosa | ✅ |
-| speechiness / acousticness / instrumentalness / liveness / valence | reserved | columns present, populated by Phase 6 |
+| Mood, danceability, acousticness, instrumentalness | Discogs-EffNet heads on stored embeddings | schema 12, derived |
 
 **Storage:** pickled pandas DataFrame at `config.FEATURES_STORE_PATH`. Primary key: absolute file path. Incremental key: `(mtime, size, schema_version)`. Schema migration: bump `FEATURE_SCHEMA_VERSION` in `06_analyze.py` and rerun — rows with an older version are automatically re-analyzed.
 
-**Schema v10 (feature-extraction plan, `docs/feature-extraction-plan.md`):** anti-aliased (`soxr_hq`) 16 kHz model input; raw Discogs-EffNet style activations (400) and latent embedding (1280) stored beside the normalized compatibility `embedding`; embedding status, recipe, and model/label checksums; tempo/key provenance; signal level and sanitation summaries. Failed or stale embeddings retry without repeating DSP, unchanged audio reuses its embedding, scoped runs only prune inside the scanned folder, a preflight check blocks runs with an unusable model, and checkpoints are time-based and interrupt-safe. The 240-track pilot passed. **Schema v11** measures `loudness_lufs` on the original channels at the native rate (v10 read the mono downmix, 3–6 dB low for stereo) and adds `native_peak_dbfs` for clipping-safe playback gain. The production store migration is ready to run; a versioned export recipe is pending.
+**Schema v10** added anti-aliased model input, raw 400-d style activations and 1280-d latent embeddings, status/provenance, and incremental embedding refresh. **Schema v11** corrected stereo loudness and added native peak. **Schema v12** removes heuristic proxy columns, retries suspiciously short decodes with ffmpeg, and records decode coverage/provenance; its pinned learned descriptors are computed from stored embeddings. The 410-d export retains its vector shape and weights under recipe v2, with logits for readable classifier descriptors and playback-level fields. The isolated pilot and full test suite pass; the production schema migration is ready to run separately.
 
 **Phase 5 Exit Criteria**
 - ✅ Feature extraction is incremental (skips files whose `mtime`, `size`, and `schema_version` are unchanged).
@@ -174,6 +173,18 @@ Build a content-based feature export and offline similarity model consumed by th
 - ✅ **Baked hybrid vector** — standardizes and scales components ($w_{\text{emb}} \cdot \hat{e} + w_{\text{tempo}} \cdot \hat{t} + w_{\text{harm}} \cdot \hat{h} + w_{\text{scalar}} \cdot \hat{s}$) into an L2-normalized unit vector so phone dot product computes exact weighted similarity offline.
 - ✅ **Offline evaluation harness** — `07_recommend.py` provides 20% holdout recall/ranking benchmarks on `0faves`.
 - ✅ **Feature export** — `export_features()` serializes tracks, unit vectors, and readable filter scalars to compact `features_export.json.gz`.
+
+**Schema 12 follow-up:** export recipe `cratedigger-v2.0-discogs-effnet-hybrid` keeps the 410-dimensional player contract, uses probabilities derived from learned descriptor logits in the scalar block, and adds readable mood/vocal and playback-level fields. Silent tracks and tracks below 50% decode coverage are excluded; truncated tracks that pass the coverage floor carry a `truncated` flag. Run the v12 pilot before the production migration.
+
+### Audio integrity audit and repair — **PLANNED**
+
+Use schema 12 `decode_coverage`, `decoder`, `signal_status` and
+`sanitized_fraction` to identify incomplete or damaged audio. The future tool
+will distinguish losslessly repairable frame resync, damaged sections,
+truncated downloads and unreadable files; default to dry-run; preserve ratings;
+and re-analyze changed files. No audio repair or normalization is part of
+schema 12, and mp3gain undo remains parked. Necessary file replacement may
+change `audio_hash`; update player state through the existing library sync.
 
 **Phase 6 Exit Criteria**
 - ✅ Baseline model quality is measurable via offline evaluation metrics (Recall@5/10/20, MRR).

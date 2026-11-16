@@ -132,6 +132,43 @@ The conventions that matter for grouping:
 
 Beets with MusicBrainz autotagging writes all of this when it finds a match. The player's own Beets runs with autotag off and `write: no`, so cratedigger is the only place these tags get written.
 
+## 11. How the player uses the features export (2026-11-15)
+
+From the installed export (`cratedigger-v1.0-discogs-effnet-hybrid`, 410 dims, weights embedding 0.7, tempo 0.15, harmonic 0.1, scalars 0.05):
+
+- **Similarity ("More like this") uses only `vector`:** cosine similarity to the average of the seed tracks, after rescaling to unit length and storing as int8. The player doesn't reweight anything, so the export's `weights` decide what counts. The scalars get 5% there. If energy, valence and the rest should count more for similarity, raise their weight in the export.
+- **The readable fields are separate rule and sort values:** `bpm` as is, and `energy`, `valence` (shown as "Mood"), `danceability` and `acousticness` as **percentiles within the library**. Only their order matters, not their scale or average. A field whose values bunch together makes poor rules even when it's accurate on average. No built-in mix uses them; they apply only to live playlists the user writes.
+- **Not used yet:** `speechiness`, `key` and `mode` are stored but nothing in the app reads them.
+
+### Export v2 contract (pilot validated; production migration pending)
+
+The extractor/schema 12 work keeps the 410-dimensional `vector`
+contract and the existing readable names `bpm`, `energy`, `valence`,
+`danceability` and `acousticness`. `energy`, `valence`, `danceability`,
+`acousticness`, `instrumentalness`, `happy`, `sad`, `relaxed`, `aggressive`,
+`party` and `electronic` are classifier logits (`descriptor_scale: "logit"`),
+not 0–1 values. The player can continue to rank them by library percentile;
+apply a sigmoid only when a probability display is useful. `approachability`
+and `engagement` are regression outputs. The export also adds
+`loudness_lufs` and `native_peak_dbfs`. `speechiness` is removed.
+
+Suggested percentile-based playlist rules (thresholds are starting points,
+not calibrated labels):
+
+- Chill: high `relaxed`, low `aggressive`.
+- Party: high `party` or `danceability`.
+- Focus: high `instrumentalness`, low `engagement`.
+- Energy ramp: sort ascending by `energy` percentile, then by `bpm`.
+
+For playback leveling, use the device's target loudness and peak ceiling:
+`gain_db = min(target_lufs - loudness_lufs, peak_ceiling_dbfs - native_peak_dbfs)`.
+This is player-side gain; do not rewrite or normalize the audio files.
+
+Recipe v2 excludes silent files and files with less than 50% decode coverage.
+Files still marked `truncated` but above that floor are included with a
+`truncated: true` flag. This export contract passed the isolated pilot; it does not change player
+code here.
+
 ## Contract reminders (docs/architecture.md, "Contract with cratedigger")
 
 - Never re-encode. Tag edits, renames and moves are free.

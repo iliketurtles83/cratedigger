@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 .aider*
 models/*.onnx
+models/heads/
 features_export.json.gz
 *.gz
 0faves_clusters.*

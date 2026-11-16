@@ -21,28 +21,24 @@ Output schema (one row per audio file):
     bpm_confidence      : float (Essentia RhythmExtractor2013 confidence)
     key                 : str  (e.g. "C", "F#")
     mode                : str  ("major" | "minor")
-    energy              : float (mean RMS, 0..1)
     loudness_lufs       : float (ITU-R BS.1770 integrated LUFS of the original channels at native rate; may be None)
     spectral_centroid   : float (mean Hz)
     zero_crossing_rate  : float (mean 0..1)
-    danceability        : float (heuristic proxy 0..1)
-    speechiness         : float  (spectral flatness × ZCR proxy; 0=tonal, 1=speech-like)
-    acousticness        : float  (HPSS harmonic ratio, penalized by HF rolloff)
-    instrumentalness    : float  (inverse vocal activity via MFCC delta variance)
-    liveness            : float  (inverse dynamic range; high noise floor ≈ live)
-    valence             : float  (mode + tempo + brightness + energy heuristic)
     bpm_method          : str  (tempo estimator used)
     bpm_status          : str  (ok | low_confidence | out_of_range | too_short | failed)
     key_method          : str  (essentia_key_extractor | librosa_ks_chroma)
     key_strength        : float (raw Essentia key strength; None for the fallback)
     dynamic_complexity  : float (raw Essentia DynamicComplexity, dB)
     danceability_raw    : float (raw Essentia DFA danceability)
-    mfcc_delta_std      : float (mean std of lower MFCC deltas; vocal-activity proxy input)
+    mfcc_delta_std      : float (mean std of lower MFCC deltas; vocal-articulation measure)
     peak_dbfs           : float (sanitized peak level of the mono 22.05 kHz analysis signal)
     native_peak_dbfs    : float (sample peak of the original channels at native rate; may exceed 0 for decoded overs)
     rms_dbfs            : float (sanitized RMS level)
     sanitized_fraction  : float (fraction of samples zeroed as non-finite/decoder spikes)
-    signal_status       : str  (ok | silent; silent when peak <= SILENT_PEAK_DBFS)
+    decode_coverage     : float (decoded duration / header duration; None when the header has no length)
+    decoder             : str  (librosa | ffmpeg; ffmpeg when a short libsndfile decode was recovered)
+    signal_status       : str  (ok | silent | truncated; silent when peak <= SILENT_PEAK_DBFS,
+                                truncated when the decode stays short of the header length)
     embedding           : ndarray(400) float32 (L2-normalized style activations; compatibility)
     style_activations   : ndarray(400) float32 (raw mean Discogs-EffNet style activations)
     audio_embedding     : ndarray(1280) float32 (raw mean Discogs-EffNet latent embedding)
@@ -62,6 +58,10 @@ versioned separately by ``EMBEDDING_RECIPE`` and model checksum: failed,
 unavailable, or stale embeddings are recomputed without repeating DSP, and a
 full re-analysis reuses a current embedding for unchanged audio.
 
+Mood, danceability, acousticness, instrumentalness, energy and valence are not
+stored here: ``lib.descriptors`` derives them from ``audio_embedding`` with
+learned classifier heads, versioned by ``DESCRIPTOR_RECIPE``.
+
 Usage:
     python 06_analyze.py --folder rock
     python 06_analyze.py --folder rock --output features.pkl
@@ -71,15 +71,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import logging
 import os
 import signal
 import threading
 import time
-import warnings
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from multiprocessing import Queue as MPQueue
 from multiprocessing import get_context
@@ -92,6 +91,7 @@ import pandas as pd
 import config
 from lib import embeddings as embedding_lib
 from lib.audiohash import audio_hash
+from lib.decode import analysis_buffer, decode_native, header_seconds
 from lib.embeddings import (
     EMBEDDING_COLUMNS,
     EMBEDDING_FAILED,
@@ -116,7 +116,11 @@ from lib.tempo import estimate_tempo, sanitize_bpm_tag
 # 11: loudness_lufs measured on the original channels at the native rate instead
 # of the mono 22.05 kHz downmix (stereo tracks read 3-6 dB low before), plus
 # native_peak_dbfs for clipping-safe playback gain.
-FEATURE_SCHEMA_VERSION = 11
+# 12: heuristic danceability/speechiness/acousticness/instrumentalness/liveness/
+# valence/energy proxies dropped (lib.descriptors derives learned ones from the
+# embedding); decodes cut short by corrupt MP3 frames are retried with ffmpeg and
+# recorded in decode_coverage/decoder, with signal_status "truncated" if still short.
+FEATURE_SCHEMA_VERSION = 12
 SILENT_PEAK_DBFS = -80.0
 DEFAULT_CHECKPOINT_SECONDS = 300.0
 
@@ -172,13 +176,12 @@ FEATURE_COLUMNS: list[str] = [
     "artist_tag", "album_tag", "track_tag", "year_tag", "genre_tag",
     "rating_tag", "rating",
     "duration_ms", "bpm_tag", "bpm", "bpm_confidence", "key", "mode",
-    "energy", "loudness_lufs",
+    "loudness_lufs",
     "spectral_centroid", "zero_crossing_rate",
-    "danceability",
-    "speechiness", "acousticness", "instrumentalness", "liveness", "valence",
     "bpm_method", "bpm_status", "key_method", "key_strength",
     "dynamic_complexity", "danceability_raw", "mfcc_delta_std",
-    "peak_dbfs", "native_peak_dbfs", "rms_dbfs", "sanitized_fraction", "signal_status",
+    "peak_dbfs", "native_peak_dbfs", "rms_dbfs", "sanitized_fraction",
+    "decode_coverage", "decoder", "signal_status",
     *EMBEDDING_COLUMNS,
     "schema_version", "analyzed_at", "error",
 ]
@@ -247,187 +250,6 @@ def _estimate_key(chroma_mean: np.ndarray) -> tuple[str, str]:
     return best_key, best_mode
 
 
-@contextlib.contextmanager
-def _suppress_c_stderr():
-    """Redirect C-level stderr (fd 2) to /dev/null.
-
-    Python's warnings.filterwarnings cannot silence messages written
-    directly by C libraries (e.g. libmpg123 resync notices).
-    """
-    devnull_fd = os.open(os.devnull, os.O_WRONLY)
-    saved_fd = os.dup(2)
-    os.dup2(devnull_fd, 2)
-    os.close(devnull_fd)
-    try:
-        yield
-    finally:
-        os.dup2(saved_fd, 2)
-        os.close(saved_fd)
-
-
-def _danceability_proxy(
-    bpm: float | None,
-    beat_strength: float,
-    *,
-    dance_raw: float | None = None,
-    bpm_confidence: float | None = None,
-    duration_s: float | None = None,
-) -> float:
-    """0..1 danceability gated on detected tempo, preferring Essentia DFA when valid."""
-    if not bpm or bpm <= 0:
-        return 0.0
-    if (
-        dance_raw is not None
-        and np.isfinite(dance_raw)
-        and (duration_s is None or duration_s >= 5.0)
-    ):
-        score = float(np.clip((dance_raw - 0.6) / 2.0, 0.0, 1.0))
-        if bpm_confidence is not None and bpm_confidence < 1.0:
-            score *= float(np.clip(bpm_confidence, 0.25, 1.0))
-        return round(score, 4)
-    tempo_score = float(np.exp(-((bpm - 120.0) ** 2) / (2 * 30.0 ** 2)))
-    strength_score = float(min(max(beat_strength, 0.0), 1.0))
-    return round(tempo_score * 0.6 + strength_score * 0.4, 4)
-
-
-def _speechiness_proxy(
-    y: np.ndarray,
-    librosa,
-    *,
-    dmfcc: float | None = None,
-    S_pow: np.ndarray | None = None,
-    sr: int = 22050,
-    rms_frames: np.ndarray | None = None,
-) -> float:
-    """Speech likelihood via syllabic MFCC modulation, pause dynamics, and HF penalty.
-
-    Combines lower-MFCC delta spread (vocal articulation), RMS frame coefficient
-    of variation and silence fraction (speech pauses), while penalizing >4 kHz
-    cymbal/distortion fizz that misclassified Metal and EDM in the flat/ZCR proxy.
-    """
-    if S_pow is None:
-        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
-        S_pow = S ** 2
-    if rms_frames is None:
-        rms_frames = librosa.feature.rms(S=np.sqrt(S_pow))[0]
-    if dmfcc is None:
-        mel = librosa.feature.melspectrogram(S=S_pow, sr=sr)
-        mfccs = librosa.feature.mfcc(S=librosa.power_to_db(mel + 1e-12), n_mfcc=13)
-        delta = librosa.feature.delta(mfccs)
-        dmfcc = float(np.mean(np.std(delta[:5], axis=1)))
-
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
-    tot_e = np.sum(S_pow, axis=0) + 1e-12
-    hf_ratio = float(np.mean(np.sum(S_pow[freqs >= 4000], axis=0) / tot_e))
-
-    mean_rms = float(np.mean(rms_frames)) + 1e-9
-    sil = float(np.mean(rms_frames < (0.15 * mean_rms)))
-    cv = float(np.std(rms_frames) / mean_rms)
-
-    vocal_mod = 1.0 / (1.0 + float(np.exp(-(dmfcc - 3.5) / 1.5)))
-    pause_dyn = float(np.clip((cv - 0.25) / 0.9, 0.0, 1.0))
-    sil_score = float(np.clip(sil / 0.35, 0.0, 1.0))
-    hf_pen = float(np.clip(1.0 - hf_ratio * 3.0, 0.2, 1.0))
-    score = (0.40 * vocal_mod + 0.35 * pause_dyn + 0.25 * sil_score) * hf_pen
-    return round(float(np.clip(score, 0.0, 1.0)), 4)
-
-
-def _acousticness_proxy(
-    y: np.ndarray | None,
-    y_harm: np.ndarray | None,
-    sr: int,
-    librosa,
-    *,
-    S_win: np.ndarray | None = None,
-    S_harm: np.ndarray | None = None,
-) -> float:
-    """Harmonic-to-total energy ratio, penalized by high-frequency spectral rolloff.
-
-    Acoustic instruments → high harmonic ratio + moderate rolloff → high score.
-    Distorted electric / synthesizers → high rolloff or low harmonic ratio → lower score.
-    """
-    if S_win is not None and S_harm is not None:
-        harm_energy = float(np.sum(S_harm ** 2))
-        total_energy = float(np.sum(S_win ** 2)) + 1e-9
-        harm_ratio = float(np.clip(harm_energy / total_energy, 0.0, 1.0))
-        rolloff = librosa.feature.spectral_rolloff(S=S_win, sr=sr, roll_percent=0.85)
-    else:
-        harm_energy = float(np.mean(y_harm ** 2))
-        total_energy = float(np.mean(y ** 2)) + 1e-9
-        harm_ratio = float(np.clip(harm_energy / total_energy, 0.0, 1.0))
-        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85)
-    rolloff_norm = float(np.clip(np.mean(rolloff) / (sr / 2.0), 0.0, 1.0))
-    return round(harm_ratio * (1.0 - rolloff_norm * 0.5), 4)
-
-
-def _instrumentalness_proxy(
-    y: np.ndarray,
-    sr: int,
-    librosa,
-    *,
-    dmfcc: float | None = None,
-) -> float:
-    """Inverse vocal activity estimated via lower MFCC delta variance.
-
-    Vocals produce rapid spectral modulation captured in lower MFCC deltas.
-    Sigmoid centred at 3.0 (empirical: instruments ≈ 1-2, vocals ≈ 4-8).
-    """
-    if dmfcc is None:
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-        delta = librosa.feature.delta(mfccs)
-        dmfcc = float(np.mean(np.std(delta[:5], axis=1)))
-    vocal_norm = 1.0 / (1.0 + float(np.exp(-(dmfcc - 3.0) / 2.0)))
-    return round(1.0 - vocal_norm, 4)
-
-
-def _liveness_proxy(
-    y: np.ndarray | None,
-    sr: int,
-    librosa,
-    *,
-    dynamic_complexity: float | None = None,
-    rms_frames: np.ndarray | None = None,
-) -> float:
-    """Dynamic-range / loudness-compression indicator (0=wide dynamics, 1=compressed).
-
-    Prefers Essentia's ``DynamicComplexity`` (dB loudness spread, scaled by
-    ``1 - dc / 12``) when available, falling back to the RMS p90/p10 ratio.
-    """
-    if dynamic_complexity is not None and np.isfinite(dynamic_complexity):
-        return round(float(np.clip(1.0 - dynamic_complexity / 12.0, 0.0, 1.0)), 4)
-    if rms_frames is None:
-        rms_frames = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
-    if len(rms_frames) < 4:
-        return 0.0
-    noise_floor = float(np.percentile(rms_frames, 10))
-    peak_rms = float(np.percentile(rms_frames, 90))
-    dynamic_range = peak_rms / (noise_floor + 1e-9)
-    # log10(DR): 1→0, 10→0.33, 100→0.67, 1000→1.0; invert and clip.
-    liveness = float(np.clip(1.0 - np.log10(max(dynamic_range, 1.0)) / 3.0, 0.0, 1.0))
-    return round(liveness, 4)
-
-
-def _valence_proxy(
-    mode: str,
-    bpm: float | None,
-    spectral_centroid: float | None,
-    energy: float | None,
-) -> float:
-    """Weighted heuristic: major + fast + bright + loud → high valence.
-
-    Weights are rough; mode is the strongest single predictor (~0.15 Pearson
-    correlation with Spotify valence in published studies).
-    """
-    mode_score = 1.0 if mode == "major" else 0.0
-    tempo_score = float(np.clip(bpm / 200.0, 0.0, 1.0)) if bpm else 0.5
-    centroid_score = float(np.clip(spectral_centroid / 5000.0, 0.0, 1.0)) if spectral_centroid else 0.5
-    energy_score = float(np.clip(energy * 8.0, 0.0, 1.0)) if energy else 0.5
-    return round(
-        0.35 * mode_score + 0.25 * tempo_score + 0.20 * centroid_score + 0.20 * energy_score,
-        4,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Per-file extraction
 # ---------------------------------------------------------------------------
@@ -481,38 +303,36 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
         base["error"] = "librosa_not_installed"
         return base
 
-    # Quick pre-check using mutagen for long files (> 20 min) to avoid decoding
-    try:
-        import mutagen
-        mf = mutagen.File(str(path))
-        if mf is not None and getattr(mf, "info", None) and getattr(mf.info, "length", 0) > 1200:
-            stat = path.stat()
-            base["mtime"] = stat.st_mtime
-            base["size"] = stat.st_size
-            base["schema_version"] = FEATURE_SCHEMA_VERSION
-            base["duration_ms"] = int(round(mf.info.length * 1000))
-            base["error"] = "duration_exceeds_20min"
-            base.update(embedding_fields(EmbeddingResult(EMBEDDING_SKIPPED_DURATION)))
-            base["analyzed_at"] = datetime.now(timezone.utc).isoformat()
-            return base
-    except Exception:
-        pass
+    # The header length skips long files (> 20 min) without decoding and
+    # reveals decodes cut short by corrupt frames.
+    header_s = header_seconds(path)
+    if header_s is not None and header_s > 1200:
+        base["duration_ms"] = int(round(header_s * 1000))
+        base["error"] = "duration_exceeds_20min"
+        base.update(embedding_fields(EmbeddingResult(EMBEDDING_SKIPPED_DURATION)))
+        return base
 
     # Decode once at the native rate for loudness, then analyze a mono 22,050 Hz
     # buffer (identical to librosa.load(sr=22050)) to keep DSP fast and stable.
     try:
-        y, sr, native_lufs, native_peak = _load_analysis_audio_with_levels(path, librosa)
+        audio = _load_analysis_audio_with_levels(path, librosa, header_s=header_s)
     except Exception as exc:
         base["error"] = f"load_failed: {exc}"
         return base
+    base["decoder"] = audio.decoder
+    base["decode_coverage"] = audio.coverage
 
+    y, sr = audio.y, audio.sr
     if y.size == 0:
         base["error"] = "empty_audio"
         return base
 
     y, zeroed = sanitize_audio(y)
     base.update(_signal_quality(y, zeroed, y.size))
-    base["native_peak_dbfs"] = native_peak
+    base["native_peak_dbfs"] = audio.native_peak
+    base["loudness_lufs"] = audio.lufs
+    if audio.truncated and base["signal_status"] == "ok":
+        base["signal_status"] = "truncated"
 
     try:
         duration_s = float(librosa.get_duration(y=y, sr=sr))
@@ -533,14 +353,9 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
         base["bpm_confidence"] = tempo_res.confidence
         base["bpm_method"] = tempo_res.method
         base["bpm_status"] = tempo_res.status
-        bpm = base["bpm"]
 
-        # Shared STFT + spectral/mel intermediates so proxies avoid redundant STFTs.
         S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
         S_pow = S ** 2
-
-        rms_frames = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
-        base["energy"] = round(float(np.mean(rms_frames)), 6)
 
         centroid = librosa.feature.spectral_centroid(S=S, sr=sr)
         base["spectral_centroid"] = round(float(np.mean(centroid)), 2)
@@ -550,7 +365,12 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
 
         mel = librosa.feature.melspectrogram(S=S_pow, sr=sr)
         mfccs = librosa.feature.mfcc(S=librosa.power_to_db(mel + 1e-12), n_mfcc=13)
-        dmfcc = float(np.mean(np.std(librosa.feature.delta(mfccs)[:5], axis=1)))
+        n_mfcc_frames = mfccs.shape[-1]
+        if n_mfcc_frames < 3:
+            dmfcc = 0.0
+        else:
+            delta_width = min(9, n_mfcc_frames if n_mfcc_frames % 2 else n_mfcc_frames - 1)
+            dmfcc = float(np.mean(np.std(librosa.feature.delta(mfccs, width=delta_width)[:5], axis=1)))
         base["mfcc_delta_std"] = round(dmfcc, 6)
 
         # Central 90s window for tonal/rhythmic Essentia extractors.
@@ -561,8 +381,6 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
         else:
             y_win = y
 
-        dance_raw: float | None = None
-        dyn_comp: float | None = None
         es_std = _load_essentia()
         if es_std is not None and y_win.size > 0:
             try:
@@ -576,14 +394,12 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
                 base["key_strength"] = round(float(key_strength), 6)
                 try:
                     d_val, _ = es_std.Danceability()(y44)
-                    dance_raw = float(d_val)
-                    base["danceability_raw"] = round(dance_raw, 6)
+                    base["danceability_raw"] = round(float(d_val), 6)
                 except Exception as exc:
                     log.debug("Essentia Danceability failed for %s: %s", path.name, exc)
                 try:
                     dc_val, _ = es_std.DynamicComplexity()(y44)
-                    dyn_comp = float(dc_val)
-                    base["dynamic_complexity"] = round(dyn_comp, 6)
+                    base["dynamic_complexity"] = round(float(dc_val), 6)
                 except Exception as exc:
                     log.debug("Essentia DynamicComplexity failed for %s: %s", path.name, exc)
             except Exception as exc:
@@ -601,81 +417,6 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
             base["key_method"] = "librosa_ks_chroma"
             base["key_strength"] = None
 
-        beat_strength = 0.0
-        if bpm is not None and (dance_raw is None or duration_s < 5.0):
-            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-            beat_strength = float(np.mean(onset_env) / (np.max(onset_env) + 1e-9))
-        base["danceability"] = _danceability_proxy(
-            bpm,
-            beat_strength,
-            dance_raw=dance_raw,
-            bpm_confidence=tempo_res.confidence,
-            duration_s=duration_s,
-        )
-
-        base["loudness_lufs"] = native_lufs
-
-        try:
-            base["speechiness"] = _speechiness_proxy(
-                y,
-                librosa,
-                dmfcc=dmfcc,
-                S_pow=S_pow,
-                sr=sr,
-                rms_frames=rms_frames,
-            )
-        except Exception as exc:
-            log.debug("speechiness proxy failed for %s: %s", path.name, exc)
-
-        try:
-            if duration_s > 30.0:
-                start_f = int(librosa.time_to_frames((duration_s / 2.0) - 15.0, sr=sr, hop_length=512))
-                end_f = int(librosa.time_to_frames((duration_s / 2.0) + 15.0, sr=sr, hop_length=512))
-                end_f = min(end_f, S.shape[1])
-                start_f = max(0, min(start_f, end_f))
-                S_win = S[:, start_f:end_f] if (end_f - start_f) >= 16 else S
-            else:
-                S_win = S
-            try:
-                S_harm, _ = librosa.decompose.hpss(S_win, kernel_size=15)
-            except Exception:
-                S_harm = S_win
-            base["acousticness"] = _acousticness_proxy(
-                None,
-                None,
-                sr,
-                librosa,
-                S_win=S_win,
-                S_harm=S_harm,
-            )
-        except Exception as exc:
-            log.debug("acousticness proxy failed for %s: %s", path.name, exc)
-
-        try:
-            base["instrumentalness"] = _instrumentalness_proxy(
-                y, sr, librosa, dmfcc=dmfcc
-            )
-        except Exception as exc:
-            log.debug("instrumentalness proxy failed for %s: %s", path.name, exc)
-
-        try:
-            base["liveness"] = _liveness_proxy(
-                y,
-                sr,
-                librosa,
-                dynamic_complexity=dyn_comp,
-                rms_frames=rms_frames,
-            )
-        except Exception as exc:
-            log.debug("liveness proxy failed for %s: %s", path.name, exc)
-
-        try:
-            base["valence"] = _valence_proxy(
-                base["mode"], bpm, base.get("spectral_centroid"), base.get("energy")
-            )
-        except Exception as exc:
-            log.debug("valence proxy failed for %s: %s", path.name, exc)
-
         base.update(_embedding_for(path, y, sr, base, prior))
 
     except Exception as exc:
@@ -686,11 +427,8 @@ def extract_features(path: Path, prior: Mapping[str, Any] | None = None) -> dict
 
 def _load_analysis_audio(path: Path, librosa) -> tuple[np.ndarray, int]:
     """Decode *path* exactly as ``lib.embeddings.decode_audio`` does, muting decoder noise."""
-    with warnings.catch_warnings(), _suppress_c_stderr():
-        warnings.filterwarnings("ignore", category=UserWarning)
-        warnings.filterwarnings("ignore", category=FutureWarning)
-        y, sr = librosa.load(str(path), sr=embedding_lib.DECODE_SAMPLE_RATE, mono=True)
-    return y, int(sr)
+    target_sr = embedding_lib.DECODE_SAMPLE_RATE
+    return analysis_buffer(decode_native(path, librosa), librosa, target_sr), target_sr
 
 
 def _integrated_loudness(native: np.ndarray, native_sr: int) -> float | None:
@@ -721,25 +459,39 @@ def _native_peak_dbfs(native: np.ndarray) -> float | None:
     return _level_dbfs(peak)
 
 
+@dataclass(frozen=True)
+class DecodedAudio:
+    """Mono analysis buffer plus levels and decode provenance from the native decode."""
+
+    y: np.ndarray
+    sr: int
+    lufs: float | None
+    native_peak: float | None
+    decoder: str
+    coverage: float | None
+    truncated: bool
+
+
 def _load_analysis_audio_with_levels(
-    path: Path, librosa
-) -> tuple[np.ndarray, int, float | None, float | None]:
+    path: Path, librosa, *, header_s: float | None = None
+) -> DecodedAudio:
     """Decode once at the native rate, measure loudness and peak on the original
     channels, then derive the same mono buffer ``_load_analysis_audio`` returns
-    (``librosa.load`` downmixes and resamples in this order)."""
-    with warnings.catch_warnings(), _suppress_c_stderr():
-        warnings.filterwarnings("ignore", category=UserWarning)
-        warnings.filterwarnings("ignore", category=FutureWarning)
-        native, native_sr = librosa.load(str(path), sr=None, mono=False)
-    native_sr = int(native_sr)
-    lufs = _integrated_loudness(native, native_sr)
-    native_peak = _native_peak_dbfs(native)
-    y = librosa.to_mono(native)
-    del native
+    (``librosa.load`` downmixes and resamples in this order).
+
+    *header_s* is the declared duration used to detect short decodes.
+    """
+    native = decode_native(path, librosa, header_s=header_s)
     target_sr = embedding_lib.DECODE_SAMPLE_RATE
-    if native_sr != target_sr:
-        y = librosa.resample(y, orig_sr=native_sr, target_sr=target_sr, res_type="soxr_hq")
-    return y, target_sr, lufs, native_peak
+    return DecodedAudio(
+        y=analysis_buffer(native, librosa, target_sr),
+        sr=target_sr,
+        lufs=_integrated_loudness(native.samples, native.sr),
+        native_peak=_native_peak_dbfs(native.samples),
+        decoder=native.decoder,
+        coverage=native.coverage,
+        truncated=native.truncated,
+    )
 
 
 def _embedding_for(

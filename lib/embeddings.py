@@ -13,7 +13,6 @@ import hashlib
 import json
 import logging
 import urllib.request
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -41,9 +40,10 @@ MAX_PATCHES = 150
 
 # Official Essentia inference uses overlapping patches (hop 62) and centered
 # first frames; this recipe keeps the historical non-overlapping uniform sample.
+# "ffmpegretry": short decodes from corrupt MP3 frames are retried (lib.decode).
 EMBEDDING_RECIPE = (
     "discogs-effnet-bsdynamic-1"
-    ":decode22050-sanitize-soxr_hq16000"
+    ":decode22050-ffmpegretry-sanitize-soxr_hq16000"
     ":musicnn-f512-h256-startzero"
     ":patch128-hop128-uniform150"
     ":mean"
@@ -208,14 +208,16 @@ def sanitize_audio(y: np.ndarray) -> tuple[np.ndarray, int]:
 
 
 def decode_audio(path: Path | str) -> np.ndarray:
-    """Decode *path* to mono float32 at ``DECODE_SAMPLE_RATE`` (not sanitized)."""
+    """Decode *path* to mono float32 at ``DECODE_SAMPLE_RATE`` (not sanitized).
+
+    Short decodes from corrupt MP3 frames are retried with ffmpeg (``lib.decode``).
+    """
     try:
         import librosa
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning)
-            warnings.filterwarnings("ignore", category=FutureWarning)
-            loaded, _ = librosa.load(str(path), sr=DECODE_SAMPLE_RATE, mono=True)
+        from lib.decode import analysis_buffer, decode_native
+
+        loaded = analysis_buffer(decode_native(path, librosa), librosa, DECODE_SAMPLE_RATE)
     except Exception:
         import essentia.standard as es
 

@@ -42,6 +42,7 @@ from lib.embeddings import (
     extract_embeddings,
     get_style_classes,
 )
+from lib.descriptors import attach_descriptors, to_probability
 from lib.logger import setup_logger
 from lib.recommender import (
     DEFAULT_WEIGHTS,
@@ -184,15 +185,30 @@ def _get_faves_dataframe(df: pd.DataFrame, playlist_path: Optional[Path] = None)
     return df
 
 
+def _analysis_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach learned descriptors and keep only rows with usable decoded embeddings."""
+    enriched = attach_descriptors(df)
+    if "energy" not in enriched.columns:
+        return enriched.iloc[0:0]
+    valid = enriched["energy"].notna()
+    if "signal_status" in enriched.columns:
+        valid &= ~enriched["signal_status"].isin(("silent", "truncated"))
+    if "decode_coverage" in enriched.columns:
+        coverage = pd.to_numeric(enriched["decode_coverage"], errors="coerce")
+        valid &= coverage.isna() | (coverage >= 0.5)
+    return enriched.loc[valid].reset_index(drop=True)
+
+
 def run_evaluation(df: pd.DataFrame) -> None:
-    """Run holdout evaluation comparing Scalars, Embedding, and Hybrid representations."""
+    """Run holdout evaluation comparing learned scalars, embeddings, and hybrid vectors."""
+    df = _analysis_feature_frame(df)
     faves_df = _get_faves_dataframe(df)
     print("\n" + "=" * 70)
     print(f"  PHASE 6 HOLDOUT EVALUATION (20% Holdout on {len(faves_df)} favorites)")
     print("=" * 70)
 
     configurations = [
-        ("Scalars Only (librosa proxies)", {"scalars": 1.0, "embedding": 0.0, "tempo": 0.0, "harmonic": 0.0}),
+        ("Scalars Only (learned descriptors)", {"scalars": 1.0, "embedding": 0.0, "tempo": 0.0, "harmonic": 0.0}),
         ("Embedding Only (Discogs-EffNet)", {"embedding": 1.0, "scalars": 0.0, "tempo": 0.0, "harmonic": 0.0}),
         ("Hybrid (Proposed Recipe)", DEFAULT_WEIGHTS),
     ]
@@ -219,6 +235,7 @@ def run_evaluation(df: pd.DataFrame) -> None:
 
 def run_weight_tuning(df: pd.DataFrame) -> None:
     """Grid search over component weights to maximize holdout Recall@10 and MRR."""
+    df = _analysis_feature_frame(df)
     faves_df = _get_faves_dataframe(df)
     print("\n" + "=" * 70)
     print(f"  HYBRID COMPONENT WEIGHT TUNING (20% Holdout on {len(faves_df)} favorites)")
@@ -255,6 +272,7 @@ def inspect_clusters(
 ) -> None:
     """Analyze taste clusters/archetypes across favorites or full collection."""
     target_df = df if all_tracks else _get_faves_dataframe(df)
+    target_df = _analysis_feature_frame(target_df)
     if n_clusters is None:
         n_clusters = 6 if all_tracks else 4
 
@@ -263,12 +281,13 @@ def inspect_clusters(
 
     feature_cols = [
         "bpm", "energy", "loudness_lufs", "spectral_centroid",
-        "zero_crossing_rate", "danceability", "speechiness",
-        "acousticness", "instrumentalness", "liveness", "valence"
+        "zero_crossing_rate", "danceability", "acousticness",
+        "instrumentalness", "valence",
     ]
     X_df = target_df[feature_cols].copy()
     X_df["bpm"] = X_df["bpm"].clip(40, 260)
-    X_df["energy"] = X_df["energy"].clip(0, 1)
+    for col in ("energy", "danceability", "acousticness", "instrumentalness", "valence"):
+        X_df[col] = to_probability(X_df[col])
     X_df["loudness_lufs"] = X_df["loudness_lufs"].clip(-40, 0)
     X_df["spectral_centroid"] = X_df["spectral_centroid"].clip(200, 8000)
     X_raw = X_df.fillna(X_df.median())
@@ -283,17 +302,17 @@ def inspect_clusters(
     for c in range(n_clusters):
         c_df = df_clustered[df_clustered["cluster"] == c]
         avg_bpm = c_df["bpm"].clip(40, 260).mean()
-        avg_energy = c_df["energy"].clip(0, 1).mean()
-        avg_val = c_df["valence"].mean()
-        avg_dance = c_df["danceability"].mean()
-        avg_ac = c_df["acousticness"].mean()
+        avg_energy = to_probability(c_df["energy"]).mean()
+        avg_val = to_probability(c_df["valence"]).mean()
+        avg_dance = to_probability(c_df["danceability"]).mean()
+        avg_ac = to_probability(c_df["acousticness"]).mean()
         top_genres = c_df["genre_tag"].dropna().value_counts().head(3).to_dict()
 
         # Find closest track to cluster center
         center = kmeans.cluster_centers_[c]
         dists = np.linalg.norm(X_scaled[df_clustered["cluster"] == c] - center, axis=1)
         rep_idx = c_df.index[np.argmin(dists)]
-        rep_row = df.loc[rep_idx]
+        rep_row = target_df.loc[rep_idx]
         rep_title = Path(rep_row["path"]).name
 
         print(f"\n[Cluster {c}] ({len(c_df)} tracks)")
@@ -304,6 +323,7 @@ def inspect_clusters(
 
 def run_query(df: pd.DataFrame, query: str, top_n: int = 5) -> None:
     """Search for a track and display the most similar tracks with dot product similarity."""
+    df = _analysis_feature_frame(df)
     print(f"\n=== QUERY: '{query}' (Top {top_n} Similar) ===")
     baker = VectorBaker()
     baker.fit_scalars(df)
@@ -363,6 +383,7 @@ def run_visualization(
     from sklearn.preprocessing import StandardScaler
 
     target_df = df.copy() if all_tracks else _get_faves_dataframe(df)
+    target_df = _analysis_feature_frame(target_df)
     if n_clusters is None:
         n_clusters = 6 if all_tracks else 4
     if out_prefix is None:
@@ -370,13 +391,14 @@ def run_visualization(
 
     feature_cols = [
         "bpm", "energy", "loudness_lufs", "spectral_centroid",
-        "zero_crossing_rate", "danceability", "speechiness",
-        "acousticness", "instrumentalness", "liveness", "valence"
+        "zero_crossing_rate", "danceability", "acousticness",
+        "instrumentalness", "valence",
     ]
 
     X_df = target_df[feature_cols].copy()
     X_df["bpm"] = X_df["bpm"].clip(40, 260)
-    X_df["energy"] = X_df["energy"].clip(0, 1)
+    for col in ("energy", "danceability", "acousticness", "instrumentalness", "valence"):
+        X_df[col] = to_probability(X_df[col])
     X_df["loudness_lufs"] = X_df["loudness_lufs"].clip(-40, 0)
     X_df["spectral_centroid"] = X_df["spectral_centroid"].clip(200, 8000)
     X_raw = X_df.fillna(X_df.median())
@@ -410,14 +432,14 @@ def run_visualization(
             sub = df_plot[df_plot["cluster"] == c]
             top_genres = list(sub["genre_tag"].dropna().value_counts().head(2).index)
             genre_str = " / ".join(g.split(" / ")[0] for g in top_genres) if top_genres else f"Cluster {c}"
-            avg_energy = sub["energy"].clip(0, 1).mean()
-            avg_ac = sub["acousticness"].mean()
-            avg_dance = sub["danceability"].mean()
+            avg_energy = to_probability(sub["energy"]).mean()
+            avg_ac = to_probability(sub["acousticness"]).mean()
+            avg_dance = to_probability(sub["danceability"]).mean()
             avg_bpm = sub["bpm"].clip(40, 260).mean()
 
-            if avg_ac > 0.55:
+            if avg_ac > 0.5:
                 trait = "Acoustic / Ambient"
-            elif avg_energy > 0.22:
+            elif avg_energy > 0.5:
                 trait = "High Energy"
             elif avg_dance > 0.52 and avg_bpm < 130:
                 trait = "Groove & Dance"
@@ -473,11 +495,12 @@ def run_visualization(
     ax1.grid(True, linestyle="--", alpha=0.3)
 
     ax2 = axes[1]
-    compare_cols = ["danceability", "valence", "acousticness", "energy", "speechiness"]
-    means_df = df_plot.groupby("cluster_name")[compare_cols].mean().T
+    compare_cols = ["danceability", "valence", "acousticness", "energy", "instrumentalness"]
+    profile_df = df_plot[compare_cols].apply(to_probability)
+    means_df = profile_df.assign(cluster_name=df_plot["cluster_name"]).groupby("cluster_name")[compare_cols].mean().T
     means_df.plot(kind="bar", ax=ax2, colormap="tab10" if n_clusters <= 10 else "tab20", width=0.8, edgecolor="black", linewidth=0.5)
     ax2.set_title("Cluster Acoustic Feature Profiles", fontsize=13, fontweight="bold", pad=12)
-    ax2.set_ylabel("Mean Value (0.0 - 1.0)", fontsize=10)
+    ax2.set_ylabel("Mean Descriptor Probability (0.0 - 1.0)", fontsize=10)
     ax2.set_xlabel("Feature", fontsize=10)
     ax2.tick_params(axis="x", rotation=30)
     ax2.legend(title="Cluster", fontsize=7.5 if n_clusters > 5 else 8, title_fontsize=8.5)
@@ -504,9 +527,9 @@ def run_visualization(
             genre = row.get("genre_tag") or "Unknown"
             bpm = f"{row.get('bpm', 0):.1f}"
             key_mode = f"{row.get('key', '')} {row.get('mode', '')}"
-            energy = f"{row.get('energy', 0):.2f}"
-            valence = f"{row.get('valence', 0):.2f}"
-            dance = f"{row.get('danceability', 0):.2f}"
+            energy = f"{to_probability(row.get('energy')):.2f}"
+            valence = f"{to_probability(row.get('valence')):.2f}"
+            dance = f"{to_probability(row.get('danceability')):.2f}"
             hover = (
                 f"<b>{title}</b><br>"
                 f"Artist: {artist}<br>"

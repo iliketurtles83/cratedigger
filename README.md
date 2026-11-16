@@ -222,6 +222,19 @@ sample peak of the original channels and can exceed 0 dBFS for decoded overs.
 Together they describe the file's mastered level; use them for clipping-safe
 playback leveling rather than rewriting audio.
 
+Schema 12 retries audio that decodes substantially shorter than its mutagen
+header with ffmpeg, recording `decode_coverage` and `decoder`; audio still
+short after retry is marked `signal_status=truncated`. It removes heuristic
+Spotify-like proxy columns from the feature store. Learned mood, danceability,
+acousticness and vocal/instrumental descriptors are instead derived from
+`audio_embedding` by the pinned Essentia heads in `lib/descriptors.py`, and
+are versioned independently. `features_export.json.gz` recipe v2 retains the
+410-dimensional vector and exports classifier descriptors as logits, plus
+`loudness_lufs` and `native_peak_dbfs`. Player rule/filter thresholds should
+use library percentiles; the player should level volume rather than
+normalizing files. The isolated schema 12 pilot and full test suite pass; the
+production migration is the next separate full-library run.
+
 ### intake.py — Full intake in one command
 
 Orchestrates `01_tag.py → 02_rename.py → 04_move.py --intake` for files in `INCOMING_FOLDER`.

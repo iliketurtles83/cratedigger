@@ -52,6 +52,7 @@ Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata m
 - Folder context is read-only; scripts import from `lib/context.py`
 - Tags are written via `lib/tags.py` (format-agnostic wrapper)
 - External dependencies: `fpcalc` (Chromaprint binary) must be available on `$PATH` (e.g. `/usr/bin/fpcalc`) for AcoustID fingerprinting; without it, `pyacoustid` lookups fail even if python packages are installed
+- External dependencies: `ffmpeg` must be available on `$PATH` for schema 12's retry of audio that decodes short of its header; without it, extraction records coverage and marks files still short as truncated but cannot recover damaged frames. Learned descriptor heads download to ignored `models/heads/` and are SHA-256 verified.
 - Path convention: Use `pathlib.Path` consistently across all tools and scripts
 - Repo layout & outputs: Numbered CLI scripts (`01`–`07`), `intake.py`, and `runscripts.py` reside in repo root for now. Active operational state (`features.pkl`, `features_export.json.gz`, `review.json`, `review.log`) lives in repo root; never delete `features.pkl` (feature store for ~44k tracks) or `review.json`. All one-off audit reports, reconciliation data, and cluster plots belong in `reports/` (e.g. `reports/consolidation/`, `reports/genres/`, `reports/clusters/`); never scatter reports or plot images in the repo root. Log archives live in `logs/archive/`. Both `reports/` and `logs/` are gitignored.
 

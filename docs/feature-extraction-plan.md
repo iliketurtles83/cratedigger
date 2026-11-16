@@ -1,8 +1,8 @@
 # Feature extraction and player export plan
 
-Status: v10 extraction committed (`ee9bba2`) and validated by a 240-track
-pilot; schema 11 corrects stereo loudness and adds native peak; production
-migration ready to run; export versioning not started.
+Status: v10 extraction and schema 11 are committed; schema 12 and export v2
+are implemented and passed the isolated pilot and full test suite. The
+production migration has not started.
 Date: 2026-11-15.
 Reviewed baseline: `884ae83`.
 
@@ -142,12 +142,52 @@ tracks plus fixtures):
 A vectorized BS.1770 implementation matched pyloudnorm exactly but saved only
 about 15 minutes over the full run, so v11 keeps pyloudnorm.
 
-Only `loudness_lufs` changes meaning, and `native_peak_dbfs` is new. `energy`,
-`rms_dbfs`, `peak_dbfs`, valence (through its energy term), and the embeddings
-still follow file level.
+Only `loudness_lufs` changes meaning, and `native_peak_dbfs` is new in schema
+11. At that point `energy` and the heuristic valence still followed file
+level; schema 12 removes those heuristic columns from extraction.
 
-Estimated production migration: about 9 hours for 43,882 files at the
-measured rate.
+At the schema 11 measured rate, the production migration was estimated at
+about 9 hours for 43,882 files. Schema 12 removes costly heuristic analysis;
+its pilot will measure the revised rate before the migration.
+
+### Schema 12: decode integrity and learned descriptors (pilot validated)
+
+Schema 12 removes the heuristic `energy`, `danceability`, `speechiness`,
+`acousticness`, `instrumentalness`, `liveness` and `valence` columns from
+extraction. It retains measured summaries (`danceability_raw`,
+`dynamic_complexity`, `mfcc_delta_std`, spectral centroid, zero-crossing rate,
+RMS, peak, LUFS and native peak). The Spotify-like learned descriptors are
+derived from the stored 1280-dimensional `audio_embedding` by pinned Essentia
+Discogs-EffNet heads in `lib/descriptors.py`; they do not require re-decoding
+audio and are versioned independently from the extraction schema.
+Classifier values are stored as logits. `energy` is the logit of the mean
+probability for aggressive, party and not-relaxed; `valence` is the logit of
+the mean probability for happy and not-sad. Approachability and engagement
+retain their native regression outputs.
+
+If decoded audio is more than 3% and 2 seconds shorter than the mutagen header,
+`lib/decode.py` retries it with ffmpeg at the native sample rate and channel
+count and keeps the longer decode. The store records `decode_coverage` and
+`decoder`; `signal_status` is `truncated` if the retry still cannot recover the
+declared duration. Embedding-only refresh uses the same decoder. The
+`EMBEDDING_RECIPE` was also updated so existing vectors are refreshed after
+the decoding change; unchanged healthy-file inputs remain bit-identical.
+
+### Export recipe v2
+
+The 410-dimensional vector keeps the existing style, tempo and harmonic
+blocks and weights. Its 5% scalar block now uses probabilities derived from
+the learned descriptor logits (energy, valence, danceability, acousticness
+and instrumentalness). Readable classifier fields are exported as logits;
+clients should use library percentiles rather than assume 0–1 values.
+Regression outputs (`approachability`, `engagement`) remain on their model
+scale. The export adds mood, instrumental and playback-level fields, drops
+unused `speechiness`, excludes silent or inadequately decoded rows, and flags
+truncated rows that pass the 50% coverage floor.
+
+The remaining integrity audit/repair work is a roadmap item, not part of this
+schema change. It will classify damaged and incomplete files and offer
+dry-run-first repair/replacement; no audio is rewritten by extraction.
 
 ## 1. Correct preprocessing and retain reusable model outputs
 
@@ -223,10 +263,9 @@ Main surfaces:
   dynamic complexity and the MFCC/rhythm summaries already computed. Avoid
   adding expensive analysis solely to populate more descriptive column names.
 
-The existing liveness, instrumentalness, acousticness, speechiness and valence
-fields remain documented heuristic compatibility fields initially. Add explicit
-raw measurements rather than silently assigning new meanings to old fields.
-They are not reliable automatic tags or ground-truth labels.
+Superseded by schema 12: heuristic compatibility fields are removed from
+extraction rather than retained under misleading names. Learned descriptors
+are derived from their own pinned model heads and explicitly named by scale.
 
 Acceptance:
 
@@ -285,7 +324,8 @@ Main surfaces:
 [07_recommend.py](../07_recommend.py).
 
 - Preserve the current 410-dimensional recipe while extraction evolves.
-  Corrected preprocessing still requires a distinct export recipe identity.
+  Corrected preprocessing and the learned scalar block use the distinct
+  `cratedigger-v2.0-discogs-effnet-hybrid` export recipe.
 - Do not silently replace the 400-dimensional block with 1280 dimensions.
   Any such change requires confirmation of the actual player/server contract.
 - Export only valid, nonempty string hashes and finite vectors with the exact
@@ -302,7 +342,7 @@ Main surfaces:
   incompatible component recipes in one declared export vector space.
 - Write exports atomically. Keep the deployed export until the replacement
   meets coverage and client-compatibility requirements.
-- Consider exporting schema 11 `loudness_lufs` and `native_peak_dbfs` so the
+- Schema 12 export includes `loudness_lufs` and `native_peak_dbfs` so the
   player can level playback volume without rewriting audio or clipping.
 
 Measure payload size and player-facing dimensional/memory costs before choosing
@@ -338,7 +378,8 @@ Suggested implementation sequence:
    (Pilot complete; evaluator repair remains and does not block extraction.)
 3. Resume normal version-driven library extraction after engineering gates pass.
    Do not make this extraction migration depend on choosing a new player recipe.
-   (Ready at schema 11: `.venv/bin/python 06_analyze.py --workers 8`.)
+   (Run only after schema 12 pilot validation:
+   `.venv/bin/python 06_analyze.py --workers 8`.)
 4. Validate/export the compatible style-based recipe; promote a new recipe only
    after seed-quality checks and player contract confirmation.
 
