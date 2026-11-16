@@ -89,7 +89,7 @@ GENRE_REMAP_RULES: dict[str, str] = {}
 # Precedence: artist > genre > global.
 #
 # Supported settings:
-# - artist_folder_threshold: positive integer
+# - artist_folder_threshold: legacy positive integer; not used by Tier 1 migration
 # - preference_labels: list[str]
 PREFERENCE_OVERRIDES: dict[str, dict] = {
     "global": {

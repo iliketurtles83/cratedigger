@@ -18,9 +18,34 @@ Personal music collection management pipeline. Tags audio files with genre and m
 | `04_move.py` | Legacy staging router and promotion utility. |
 | `05_review.py` | Interactive resolution of files and folders flagged during earlier pipeline steps. |
 | `06_analyze.py` | Audio feature extraction (librosa, pyloudnorm, Essentia, Discogs-EffNet) into a pickled pandas DataFrame. *(Outside standard ingestion scope)*. |
+| `07_recommend.py` | Evaluate recommendations and export features for the player. |
 
 Run new arrivals through `intake.py --dry-run`. Run tag hygiene/audits with `scripts/audit_repair.py`.
 
+## Repository layout and local data
+
+| Path | Purpose |
+|---|---|
+| `01_tag.py`–`07_recommend.py`, [`intake.py`](intake.py), [`runscripts.py`](runscripts.py) | Existing pipeline and orchestration entry points. |
+| [`cratedigger/`](cratedigger/) | Unified CLI, operational database, scan/plan/apply engine, and web UI. |
+| [`lib/`](lib/) | Shared tagging, path, metadata, audio analysis, and recommendation helpers. |
+| [`scripts/`](scripts/) | Audits, repairs, migrations, artwork, playlists, and sync utilities. |
+| [`tests/`](tests/) | Unit and integration tests; real-library audio tests are opt-in. |
+| [`config/`](config/) and [`config.example.py`](config.example.py) | Beets configuration and the local settings template. |
+| [`docs/`](docs/) | Architecture, roadmap, feature extraction, UI plans, and the player contract. |
+| [`notebooks/`](notebooks/) | Exploratory analysis notebooks, including saved outputs. |
+
+Local configuration and operational data are ignored by Git. These include
+`config.py`, `.env`, `features.pkl` and its checkpoints/backups,
+`features_export.json.gz`, `review.json`, `review.log`, and `cratedigger.db`.
+Reports, archived logs, downloaded models, the virtual environment, generated
+arrays, and audio files are also ignored. They may still be valuable or in use:
+do not delete them merely because they are ignored. Deliberately reviewed
+audio test fixtures may be tracked under `tests/fixtures/`.
+
+Ignore rules match paths and file types, not file size. They do not remove
+already tracked files or erase older commits; review the staged changes before
+committing.
 
 ---
 
@@ -78,7 +103,8 @@ Get a free AcoustID API key at https://acoustid.org/login.
 
 ## Usage
 
-All scripts support these common flags:
+The tagging and movement scripts commonly support these flags; consult each
+script's `--help` for its exact options and defaults:
 
 | Flag | Description |
 |---|---|
@@ -125,14 +151,14 @@ Renames folders to `Artist - Album (Year)/`. Run after `02_rename.py`.
 
 ### 04_move.py — Route and promote music
 
-Three mutually exclusive modes:
+Modes are mutually exclusive. Common legacy and migration modes include:
 
 ```bash
 # Route new arrivals from INCOMING_FOLDER to staging
 python3 04_move.py --intake --dry-run
 python3 04_move.py --intake --no-dry-run
 
-# Apply artist folder threshold rule to existing genre folders
+# Migrate a legacy genre folder to Tier 1 artist roots
 python3 04_move.py --restructure --dry-run --folder rock
 python3 04_move.py --restructure --no-dry-run --folder rock
 
@@ -144,8 +170,9 @@ python3 04_move.py --promote --no-dry-run
 Phase 4 additions in `config.py`:
 
 - `GENRE_REMAP_RULES`: map incoming genres to local taxonomy before routing/writing.
-- `PREFERENCE_OVERRIDES`: scoped overrides (`global`, `genre`, `artist`) for
-	`artist_folder_threshold` and `preference_labels`.
+- `PREFERENCE_OVERRIDES`: scoped preference labels (`global`, `genre`, `artist`).
+  The legacy `artist_folder_threshold` setting is retained for compatibility
+  but is not used by the Tier 1 migration.
 - `MOVE_HOOKS`: optional `pre_move` / `post_move` callbacks.
 
 Hook safety and failure semantics:
@@ -242,7 +269,10 @@ to that source.
 
 ### intake.py — Full intake in one command
 
-Orchestrates `01_tag.py → 02_rename.py → 04_move.py --intake` for files in `INCOMING_FOLDER`.
+For `INCOMING_FOLDER`, the default flow uses beets with a transient catalog,
+optionally enriches covers, then runs `02_rename.py`, `03_folders.py`, and
+`04_move.py --to-artist-root`. Use `--pre-tag` to run `01_tag.py` first or
+`--legacy-move` for the older `01 → 02 → 04 --intake` staging flow.
 
 ```bash
 python3 intake.py --dry-run

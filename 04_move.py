@@ -483,7 +483,7 @@ def run_intake_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
 
 
 
-# ── Artist folder threshold (configurable) ───────────────────────────────────
+# ── Legacy genre-root migration ───────────────────────────────────────────────
 
 def run_restructure_mode(*, dry_run: bool, folder: str | None) -> list[dict]:
     """Migrate legacy genre roots into the canonical Tier 1 artist layout.
@@ -1146,7 +1146,7 @@ def main() -> None:
     mode.add_argument("--intake", action="store_true",
                       help="Route INCOMING_FOLDER files to staging folders")
     mode.add_argument("--restructure", action="store_true",
-                      help="Apply artist folder threshold restructure")
+                      help="Migrate legacy genre roots to Tier 1 (compatibility mode)")
     mode.add_argument("--promote", action="store_true",
                       help="Promote staged albums to main genre folders")
     mode.add_argument("--to-artist-root", action="store_true",

@@ -63,7 +63,7 @@ Cratedigger uses **beets** for release-level identity and AcoustID/MB metadata m
 - API keys: `.env` (never committed)
 - Genre mapping: `FOLDER_TO_GENRE` dict
 - Special folder genre policy: `SPECIAL_FOLDER_GENRE_POLICY`
-- Thresholds: `ARTIST_FOLDER_THRESHOLD`
+- Compilation threshold: `COMPILATION_ARTIST_THRESHOLD` (the artist album-count threshold is retired)
 - BPM disabled for: `NO_BPM_FOLDERS`
 - Skip folders: `SKIP_FOLDERS`
 

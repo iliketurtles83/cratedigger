@@ -93,42 +93,25 @@ This simplifies `context.py` significantly — top-level folder name carries no 
 
 ```
 cratedigger/
-  README.md                  ← setup, usage examples, typical workflows
-  docs/
-    architecture.md          ← this file: design patterns, structure, philosophy
-    roadmap.md              ← planned features, known limitations, testing strategy
-  config.py                  ← LOCAL: user settings (never committed)
-  config.example.py          ← TEMPLATE: example config, committed for reference
-  .env                       ← LOCAL: API keys (never committed)
-  .env.example               ← TEMPLATE: example .env, committed for reference
-  .gitignore                 ← covers .env, config.py, *.log, *.json, __pycache__, .venv
-  
-  lib/
-    __init__.py
-    context.py               ← FolderContext, get_folder_context(), classify_folder()
-    genres.py                ← genre normalization, merge, blacklist, parent lookup
-    parsers.py               ← filename/folder parsing, sanitization
-    tags.py                  ← mutagen wrappers for MP3, FLAC, M4A, OGG, Opus
-    mb.py                    ← MusicBrainz + AcoustID integration, rate limiting
-    logger.py                ← shared logging setup
-  
-  01_tag.py                  ← fingerprint, lookup, fill tags
-  02_rename.py               ← normalize filenames using tags
-  03_folders.py              ← normalize folder names, classify folder types
-  04_move.py                 ← intake routing, restructuring, promotion
-  05_review.py               ← interactive resolution of flagged files/folders
-  06_analyze.py              ← audio feature extraction (future)
-  intake.py                  ← orchestrate 01→02→04 for new arrivals
+  README.md                  ← setup, usage, and repository map
+  AGENTS.md                  ← contributor and agent guardrails
+  config.example.py          ← template for local config.py
+  .env.example               ← template for local API credentials
+  config/                    ← Beets metadata configuration
+  cratedigger/               ← CLI, operational store, unified engine, web UI
+  lib/                       ← shared metadata, tagging, path, and audio helpers
+  scripts/                   ← audits, repairs, migrations, and sync utilities
+  tests/                     ← unit/integration tests; real audio is opt-in
+  docs/                      ← architecture, roadmap, plans, and player contract
+  notebooks/                 ← exploratory analysis notebooks
+  01_tag.py–07_recommend.py  ← standalone pipeline, analysis, and export tools
+  intake.py                  ← Beets matching and Tier 1 intake orchestration
   runscripts.py              ← helper for running scripts with standard args
-  
-  tests/
-    test_parsers.py
-    test_context.py
-    test_real_audio.py       ← opt-in smoke test using real library
-  
-  genre-tree.txt             ← AllMusic taxonomy (reference, never edited)
-  review.json                ← flagged files needing manual intervention
-  review.log                 ← operation log
+  genre-tree.txt             ← genre taxonomy used by lib/genres.py
+
+  Ignored local state includes config.py, .env, features.pkl and backups,
+  features_export.json.gz, review.json, review.log, cratedigger.db, models/,
+  reports/, logs/, and .venv/. These are not disposable just because ignored.
 ```
 
 ---
@@ -138,22 +121,21 @@ cratedigger/
 ### Data Flow
 
 ```
-01_tag.py       fingerprint → MusicBrainz → context → write tags
-      ↓
-02_rename.py    tags → disc context (sibling scan) → write filenames
-      ↓
-03_folders.py   folder content (tags) → classify → write folder names
-      ↓
-04_move.py      genre (from tags) + context → route/restructure/promote
-      ↓
-05_review.py    review.json → interactive resolution
-      ↓
-06_analyze.py   tagged audio → extract features (keyed by audio_hash) → features.pkl
-      ↓
-07_recommend.py features.pkl → evaluate & tune weights → export features_export.json.gz
+intake.py (default):
+  INCOMING_FOLDER → beets (transient catalog) → optional enrich_covers.py
+                  → 02_rename.py → 03_folders.py → 04_move.py --to-artist-root
 
-intake.py       INCOMING_FOLDER → orchestrate 01→02→04
+Standalone tagging and legacy staging:
+  01_tag.py → 02_rename.py → 03_folders.py → 04_move.py
+
+Independent review and analysis:
+  review.json → 05_review.py
+  tagged audio → 06_analyze.py → features.pkl → 07_recommend.py
+               → features_export.json.gz
 ```
+
+`intake.py --pre-tag` adds `01_tag.py` before the default flow, while
+`--legacy-move` uses the older `01 → 02 → 04 --intake` staging flow.
 
 ### Per-Script Inputs and Responsibilities
 
@@ -164,7 +146,7 @@ intake.py       INCOMING_FOLDER → orchestrate 01→02→04
 | `03_folders.py` | File tags inside folder | Folder structure | Renamed folders, review flags |
 | `04_move.py` | Genre (from tags) | Folder classification | Moved/staged files, folder changes |
 | `05_review.py` | review.json | User input | Resolved metadata, moved/renamed files |
-| `intake.py` | INCOMING_FOLDER | — | Orchestrates 01→02→04 |
+| `intake.py` | INCOMING_FOLDER | Beets configuration | Transient matching, enrichment, normalization, and Tier 1 placement |
 | `06_analyze.py` | Tagged audio | — | Feature vectors (audio_hash key, external storage) |
 | `07_recommend.py` | features.pkl | config / taste signals | Evaluated weights, features_export.json.gz |
 
@@ -441,7 +423,7 @@ User configuration is the single source of truth for:
 - Letter bucketing (`LETTER_BUCKETING`, `ARTICLE_STRIP`, `SYMBOL_BUCKET`)
 - Singles routing (`ARTIST_SINGLES_FOLDER`, `ROOT_SINGLES_FOLDER`)
 - Feature eligibility (`NO_BPM_FOLDERS`, `ALBUMARTIST_FOLDERS`)
-- Thresholds (`ARTIST_FOLDER_THRESHOLD`, `COMPILATION_ARTIST_THRESHOLD`)
+- Compilation detection threshold (`COMPILATION_ARTIST_THRESHOLD`)
 - Quality gates (`ACOUSTID_MIN_SCORE`, `MB_RATE_LIMIT_SECONDS`)
 
 Key config additions for artist-root:
@@ -455,15 +437,21 @@ ARTIST_SINGLES_FOLDER = "0singles"
 ROOT_SINGLES_FOLDER   = "0singles"
 
 TOP_LEVEL_SPECIAL = {
-    "0compilations", "0various", "0mixes", "0singles", "0random", "#",
+    "0bestof", "0compilations", "0mixes", "0random", "0random_good",
+    "0shacks", "0singles", "0various", "0videos", "Playlists", "soundtrack",
 }
 LETTER_BUCKETS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-SKIP_FOLDERS   = TOP_LEVEL_SPECIAL | LETTER_BUCKETS | {"#"}
+SKIP_FOLDERS   = {"0videos", "0quarantine", "Playlists"}
 ```
 
-`SKIP_FOLDERS` now includes letter buckets and top-level special folders. The pipeline descends into letter buckets rather than treating them as genre contexts. `TOP_LEVEL_SPECIAL` folders are never renamed, never moved, never have genre injected from path.
+`SKIP_FOLDERS` excludes non-audio trees; it does not include letter buckets,
+because the pipeline descends into them. Special folders are classified
+separately rather than treated as regular genre contexts.
 
-**Pipeline simplification**: Routing in `04_move.py` no longer needs a genre-to-folder mapping for regular albums. Destination is fully deterministic: `artist[0].upper()` after article stripping → letter bucket → artist folder — no config lookup required. `get_folder_context()` reads the top-level folder name only to determine if the path is under a letter bucket, a `TOP_LEVEL_SPECIAL`, or unknown — not for genre signal.
+**Pipeline simplification**: Tier 1 migration in `04_move.py` routes regular
+albums by artist letter after article stripping, rather than into genre roots.
+Legacy intake and promotion still use genre routing. `get_folder_context()`
+uses top-level folders to determine their structural context.
 
 **Critical principle**: Never hardcode folder names, genre lists, or paths outside `config.py`. All scripts import config and respect its values.
 
@@ -472,16 +460,21 @@ SKIP_FOLDERS   = TOP_LEVEL_SPECIAL | LETTER_BUCKETS | {"#"}
 ## Pipeline Dependencies
 
 ### Hard Dependencies
-- **01_tag.py must run before 03_folders.py**: Folder names are built from file tags. Untagged files will cause 03_folders.py to flag for review.
-- **02_rename.py should run after 01_tag.py**: Better tags → better filenames.
-- **04_move.py runs after 03_folders.py (optional but recommended)**: Folder names should be canonical before routing.
+- **Metadata precedes normalization**: Beets supplies it in the default intake
+  flow; standalone workflows may use `01_tag.py`. Filenames and folder names
+  depend on the resulting tags.
+- **02_rename.py and 03_folders.py run before Tier 1 placement** in the default
+  intake flow.
 
 ### Soft Dependencies
 - **05_review.py** can run anytime after flags are written (review.json from 01_tag.py, 03_folders.py, 04_move.py).
-- **06_analyze.py** should run after 01_tag.py (needs ISRC in tags for cross-referencing).
+- **06_analyze.py** runs independently on tagged audio and stores features
+  keyed by audio identity for the recommender.
 
 ### Why intake.py Exists
-Orchestrates `01→02→04` in one command for new arrivals. Users can run one command instead of three, but the underlying pipeline is unchanged.
+It coordinates transient Beets matching, optional cover enrichment,
+normalization, and Tier 1 placement for new arrivals. The earlier staging flow
+remains available with `--legacy-move`.
 
 ---
 
@@ -489,13 +482,15 @@ Orchestrates `01→02→04` in one command for new arrivals. Users can run one c
 
 ### Pattern 1: Dry-Run First, Write Second
 
-All write operations are gated by a dry-run check:
+Tagging and movement writes are gated by a dry-run check:
 ```python
 if not dry_run:
     file.write_text(content)
 ```
 
-Default is `--dry-run` (safe). `--no-dry-run` enables writes. This prevents accidental data loss.
+Most maintenance commands default to dry-run; `--no-dry-run` enables writes.
+`06_analyze.py` writes its feature store by default, so pass `--dry-run` to
+preview analysis without saving.
 
 ### Pattern 2: Lazy Imports for Optional Dependencies
 

@@ -19,7 +19,7 @@ Manual pre-migration completed May 2026:
 - Existing singles folders renamed to `0singles/` within artist folders where they existed
 - `0random/` preserved with per-genre subfolders
 
-Current on-disk shape before pipeline runs:
+Examples of legacy shapes that can be migrated to Tier 1:
 
 ```
 genre/artist/artist - album          # needs restructure to artist-root
@@ -28,7 +28,10 @@ genre/artist/0singles/               # needs restructure to artist-root
 0random/genre/                       # kept as-is, local_special
 ```
 
-Pipeline Phase 1 will formalize `classify_folder()` against the Tier 1 contract and begin restructuring genre-root folders to artist-root.
+Tier 1 classification and migration are implemented. Use
+`04_move.py --to-artist-root` to migrate legacy genre roots; `--restructure`
+remains a compatibility route to the same migration. Neither uses the former
+album-count threshold.
 
 ---
 
@@ -40,7 +43,8 @@ Pipeline Phase 1 will formalize `classify_folder()` against the Tier 1 contract 
 - **Genre hierarchy not enforced in tags** — parent and subgenre are slash-separated; no semantic validation of genre relationships.
 
 ### Folder Structure
-- **Only 3-level artist threshold (N=3)** — `--restructure` mode applies a fixed threshold. Configurable per-genre thresholds not yet supported.
+- **Legacy layout migration requires review** — preview genre-root migrations
+  before applying them; every Tier 1 artist keeps an artist directory.
 - **No automatic orphan cleanup** — empty folders are not deleted; must verify and delete manually.
 - **Compilation detection heuristic-based** — inferred from artist count and albumartist tag; ambiguous cases flagged for review rather than auto-resolved.
 
@@ -131,7 +135,9 @@ Make tag normalization and review semantics consistent across formats and script
 
 ### Phase 4: User Preferences and Hooks — **COMPLETE**
 
-- ✅ **Per-artist thresholds** — restructure mode resolves thresholds by scoped precedence (`artist` > `genre` > `global` > default).
+- ✅ **Scoped preference helpers** — the legacy threshold resolver remains for
+  compatibility, but Tier 1 restructure no longer uses an album-count
+  threshold.
 - ✅ **Genre remapping rules** — remapping applies to tag writes and intake routing.
 - ✅ **Custom hooks** — configurable pre/post move callbacks run from allow-listed paths with timeout and failure policy handling.
 - ✅ **Preference labels** — labels persist in sidecar metadata without changing folder structure.
