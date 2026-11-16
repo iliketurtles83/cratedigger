@@ -67,6 +67,26 @@ a:hover { text-decoration: underline; }
 .badge.ok { background: rgba(63, 207, 142, 0.14); border-color: var(--ok); color: var(--ok); }
 
 .container { max-width: 1280px; margin: 0 auto; padding: 20px 24px 80px; }
+.ops-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.op-card { margin: 0; min-width: 0; }
+.op-form { display: grid; gap: 10px; }
+.op-field { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.op-field input[type="text"], .op-field input[type="number"], .op-field select { width: 100%; }
+.checkbox-field { display: flex; align-items: flex-start; gap: 8px; color: var(--text); }
+.checkbox-field small { color: var(--muted); }
+.job-log {
+  max-height: 65vh;
+  min-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0b0d12;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 .flash {
   background: rgba(63, 207, 142, 0.12);

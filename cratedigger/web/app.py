@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import config
 from cratedigger.db import DEFAULT_DB_PATH, open_db
+from cratedigger.jobs import cancel_job, get_job, list_jobs, read_job_log, reconcile_jobs, start_job
+from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
 from cratedigger.web import services
+from cratedigger.web.security import LocalSecurityMiddleware
 
 _WEB_DIR = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
@@ -80,6 +85,7 @@ def create_app(
     db_path: Path | None = None,
     music_root: Path | None = None,
     features_path: Path | None = None,
+    logs_dir: Path | None = None,
 ) -> FastAPI:
     """Create configured FastAPI app instance."""
     resolved_db = Path(db_path or DEFAULT_DB_PATH)
@@ -87,14 +93,187 @@ def create_app(
     resolved_features = Path(features_path or getattr(config, "FEATURES_STORE_PATH", Path("features.pkl")))
 
     app = FastAPI(title="Cratedigger", version="0.2.0")
+    app.add_middleware(LocalSecurityMiddleware)
     app.state.db_path = resolved_db
     app.state.music_root = resolved_root
     app.state.features_path = resolved_features
+    app.state.repo_root = REPOSITORY_ROOT
+    app.state.logs_dir = Path(logs_dir or REPOSITORY_ROOT / "logs" / "jobs")
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     def root() -> RedirectResponse:
         return RedirectResponse(url="/review", status_code=302)
+
+    @app.get("/library", response_class=HTMLResponse)
+    def library_page(
+        request: Request,
+        q: str = Query(default="", max_length=200),
+        artist: str = Query(default="", max_length=500),
+        album: str = Query(default="", max_length=500),
+        page: int = Query(default=1, ge=1),
+    ) -> HTMLResponse:
+        per_page = 50
+        q = q.strip()
+        with open_db(app.state.db_path) as conn:
+            tracks, total, page = services.list_library_tracks(
+                conn, query=q, artist=artist, album=album, page=page, per_page=per_page
+            )
+        filters = urlencode({key: value for key, value in (("q", q), ("artist", artist), ("album", album)) if value})
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "library.html",
+            {
+                "active_nav": "library",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "tracks": tracks,
+                "total": total,
+                "page": page,
+                "total_pages": max(1, (total + per_page - 1) // per_page),
+                "q": q,
+                "artist": artist,
+                "album": album,
+                "filters": filters,
+            },
+        )
+
+    @app.get("/ops", response_class=HTMLResponse)
+    def operations_page(
+        request: Request,
+        msg: str = Query(default=""),
+        err: str = Query(default=""),
+    ) -> HTMLResponse:
+        groups: dict[str, list[dict[str, object]]] = {}
+        for operation in OPERATIONS.values():
+            groups.setdefault(operation.group, []).append(public_operation(operation))
+        with open_db(app.state.db_path) as conn:
+            reconcile_jobs(conn)
+            recent = list_jobs(conn, limit=8)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "ops.html",
+            {
+                "active_nav": "ops",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "groups": groups,
+                "recent_jobs": recent,
+                "msg": msg,
+                "err": err,
+            },
+        )
+
+    @app.post("/ops/{operation_id}/start")
+    async def operation_start(operation_id: str, request: Request) -> RedirectResponse:
+        try:
+            form = await request.form()
+            raw_params = {key: value for key, value in form.multi_items() if key not in {"csrf_token", "mode"}}
+            mode = str(form.get("mode") or "preview")
+            operation = OPERATIONS.get(operation_id)
+            if operation is None:
+                raise ValueError(f"Unknown operation: {operation_id}")
+            if mode == "apply" and operation.risk in {"writes_tags", "moves_files", "writes_library"} and _is_music_root_readonly(app.state.music_root):
+                raise ValueError("The music library is mounted read-only")
+            if raw_params.get("report"):
+                report_path = Path(str(raw_params["report"]))
+                if not report_path.is_absolute():
+                    report_path = app.state.repo_root / report_path
+                report_path = report_path.resolve()
+                reports_root = (app.state.repo_root / "reports").resolve()
+                if not report_path.is_relative_to(reports_root):
+                    raise ValueError("Report paths must stay inside the repository reports directory")
+                raw_params["report"] = str(report_path)
+            with open_db(app.state.db_path) as conn:
+                reconcile_jobs(conn)
+                job_id = start_job(
+                    conn,
+                    db_path=app.state.db_path,
+                    operation_id=operation_id,
+                    raw_params=raw_params,
+                    mode=mode,
+                    repo_root=app.state.repo_root,
+                    logs_dir=app.state.logs_dir,
+                    music_root=app.state.music_root,
+                )
+            return _redirect_with_flash(f"/jobs/{job_id}", msg=f"{mode.title()} job queued")
+        except (ValueError, RuntimeError) as exc:
+            return _redirect_with_flash("/ops", err=str(exc))
+
+    @app.get("/jobs", response_class=HTMLResponse)
+    def jobs_page(
+        request: Request,
+        status: str = Query(default=""),
+    ) -> HTMLResponse:
+        with open_db(app.state.db_path) as conn:
+            reconcile_jobs(conn)
+            jobs = list_jobs(conn)
+        if status:
+            jobs = [job for job in jobs if job["status"] == status]
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "jobs.html",
+            {
+                "active_nav": "jobs",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "jobs": jobs,
+                "status": status,
+            },
+        )
+
+    @app.get("/jobs/{job_id}", response_class=HTMLResponse)
+    def job_detail(request: Request, job_id: str) -> HTMLResponse:
+        with open_db(app.state.db_path) as conn:
+            reconcile_jobs(conn)
+            job = get_job(conn, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        log_text, _ = read_job_log(str(job["log_path"]), allowed_dir=app.state.logs_dir)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "job.html",
+            {
+                "active_nav": "jobs",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "job": job,
+                "log_text": log_text,
+            },
+        )
+
+    @app.post("/jobs/{job_id}/cancel")
+    def job_cancel(job_id: str) -> RedirectResponse:
+        try:
+            with open_db(app.state.db_path) as conn:
+                cancel_job(conn, job_id)
+            return _redirect_with_flash(f"/jobs/{job_id}", msg="Cancellation requested")
+        except (KeyError, RuntimeError, ValueError) as exc:
+            return _redirect_with_flash(f"/jobs/{job_id}", err=str(exc))
+
+    @app.get("/jobs/{job_id}/events")
+    async def job_events(job_id: str) -> StreamingResponse:
+        with open_db(app.state.db_path) as conn:
+            job = get_job(conn, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        async def event_stream():
+            offset = 0
+            while True:
+                text, offset = read_job_log(
+                    str(job["log_path"]), allowed_dir=app.state.logs_dir, offset=offset
+                )
+                if text:
+                    yield f"data: {json.dumps({'log': text})}\n\n"
+                with open_db(app.state.db_path) as conn:
+                    current = get_job(conn, job_id)
+                if current is None or current["status"] in {"succeeded", "failed", "cancelled", "stale"}:
+                    yield f"data: {json.dumps({'done': True})}\n\n"
+                    break
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/review", response_class=HTMLResponse)
     def review_page(

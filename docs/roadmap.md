@@ -4,7 +4,7 @@
 
 **Core pipeline, SQLite operational store, unified engine, and initial FastAPI Web UI are implemented**:
 - Legacy scripts (`01_tag.py`–`07_recommend.py`, `intake.py`, and repair utilities in `scripts/`) handle tagging, renaming, normalization, cover enrichment, duplicate quarantine, playlist generation, feature extraction (`features.pkl`), and recommendation export (`features_export.json.gz`).
-- The `cratedigger` package adds a SQLite operational database (`cratedigger.db`), `cratedigger` CLI (`db-init`, `sync-features`, `migrate-review`, `status`, `ui`, `index-artists`, `scan`, `plan`, `apply`, `undo`), a local FastAPI review/health/quarantine/undo Web UI, and the Phase 3 unified scan/plan/apply/undo engine.
+- The `cratedigger` package adds a SQLite operational database (`cratedigger.db`), `cratedigger` CLI (`db-init`, `sync-features`, `migrate-review`, `status`, `ui`, `index-artists`, `scan`, `plan`, `apply`, `undo`), a local FastAPI review/health/quarantine/undo Web UI, and the Phase 3 unified scan/plan/apply/undo engine. The UI now includes a read-only indexed Library browser and an allowlisted operations catalog with persistent preview/apply jobs.
 - Always validate with `--dry-run` first; see [ui_plan.md](ui_plan.md) for the remaining Web UI work.
 
 ---

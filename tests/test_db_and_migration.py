@@ -41,6 +41,7 @@ class TestDatabaseAndMigration(unittest.TestCase):
                     "size": 1234,
                     "artist_tag": "Artist",
                     "album_tag": "Debut",
+                    "track_tag": "Song title",
                     "year_tag": "2010",
                     "genre_tag": "Indie",
                     "rating": 1.0,
@@ -58,6 +59,14 @@ class TestDatabaseAndMigration(unittest.TestCase):
                 self.assertEqual(
                     track["canonical_path"],
                     "/music/A/Artist/Artist - Debut (2010)/01 - Artist - Song.mp3",
+                )
+                self.assertEqual(track["title"], "Song title")
+                df = df.drop(columns=["track_tag"])
+                df.to_pickle(features_path)
+                sync_features_into_db(conn, features_path)
+                self.assertEqual(
+                    conn.execute("SELECT title FROM tracks WHERE audio_hash = 'a1:1111'").fetchone()["title"],
+                    "Song title",
                 )
                 paths = conn.execute(
                     "SELECT path, is_canonical FROM track_paths WHERE audio_hash = 'a1:1111' ORDER BY is_canonical DESC"

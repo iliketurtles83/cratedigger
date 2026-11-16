@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Jobs — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 style="margin: 0; font-size: 20px;">Jobs</h1>
+    <div class="mono">Operations are persisted and continue independently of this page.</div>
+  </div>
+  <div class="pills" style="margin: 0;">
+    <a class="pill {% if not status %}active{% endif %}" href="/jobs">All</a>
+    {% for state in ["queued", "running", "succeeded", "failed", "cancelled", "stale"] %}
+      <a class="pill {% if status == state %}active{% endif %}" href="/jobs?status={{ state }}">{{ state }}</a>
+    {% endfor %}
+  </div>
+</div>
+{% if not jobs %}
+  <div class="card">No jobs yet. Start an operation from <a href="/ops">Operations</a>.</div>
+{% else %}
+  <div class="card" style="padding: 0; overflow-x: auto;">
+    <table>
+      <thead><tr><th>Operation</th><th>Mode</th><th>Status</th><th>Created</th><th>Exit</th></tr></thead>
+      <tbody>{% for job in jobs %}
+        <tr>
+          <td><a href="/jobs/{{ job.id }}">{{ job.operation_id }}</a></td>
+          <td>{{ job.mode }}</td>
+          <td><span class="badge {% if job.status == 'succeeded' %}ok{% elif job.status in ['failed', 'stale'] %}warn{% endif %}">{{ job.status }}</span></td>
+          <td class="mono">{{ job.created_at }}</td><td>{{ job.exit_code if job.exit_code is not none else "—" }}</td>
+        </tr>
+      {% endfor %}</tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

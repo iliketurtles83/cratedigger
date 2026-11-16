@@ -13,6 +13,7 @@
   </div>
   {% if tab == 'files' and q_files %}
     <form method="post" action="/quarantine/empty" onsubmit="return confirm('Permanently delete all {{ q_files|length }} file(s) inside 0quarantine?');">
+      <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
       <button type="submit" class="danger">Empty Quarantine ({{ q_files|length }})</button>
     </form>
   {% endif %}
@@ -54,6 +55,7 @@
                 {% if loc.exists and grp.locations|length > 1 %}
                   {% set keep_target = alt_keep if loop.index0 == 0 else default_keep %}
                   <form method="post" action="/quarantine/dedup">
+                    <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
                     <input type="hidden" name="audio_hash_val" value="{{ grp.audio_hash }}">
                     <input type="hidden" name="keep_path" value="{{ keep_target }}">
                     <input type="hidden" name="quarantine_path" value="{{ loc.path }}">
@@ -104,6 +106,7 @@
               </td>
               <td>
                 <form method="post" action="/quarantine/restore">
+                  <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
                   <input type="hidden" name="quarantined_path" value="{{ f.path }}">
                   <button type="submit" class="ok">Restore</button>
                 </form>

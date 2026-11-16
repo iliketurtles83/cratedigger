@@ -103,6 +103,23 @@ Get a free AcoustID API key at https://acoustid.org/login.
 
 ## Usage
 
+### Local web UI
+
+Run `cratedigger ui` and open `http://127.0.0.1:8765/`. The UI is
+localhost-only; it is not intended for LAN access or reverse-proxy exposure.
+POST requests require a session CSRF token, and browser sessions expire when
+the server restarts. The Library page browses the SQLite index rather than
+scanning files live. Use `cratedigger sync-features` to refresh it from the
+feature store; the index may be incomplete or stale between refreshes.
+
+The Operations page exposes an allowlisted subset of script commands. Jobs run
+as background subprocesses with persistent logs and resource locks; conflicting
+jobs are rejected with a busy-resource message rather than started concurrently.
+File/tag mutations require a successful preview with the same parameters before
+they can be applied. The UI also refuses feature-store jobs while it detects a
+legacy `06_analyze.py` process, so it will not overlap an extraction started
+outside the UI.
+
 The tagging and movement scripts commonly support these flags; consult each
 script's `--help` for its exact options and defaults:
 

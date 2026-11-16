@@ -36,6 +36,53 @@ def quarantine_root(music_root: Path) -> Path:
     return music_root / "0quarantine"
 
 
+def list_library_tracks(
+    conn: sqlite3.Connection,
+    *,
+    query: str = "",
+    artist: str = "",
+    album: str = "",
+    page: int = 1,
+    per_page: int = 50,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Browse the indexed canonical tracks; this does not scan the library."""
+    clauses: list[str] = []
+    params: list[str] = []
+    if query:
+        clauses.append(
+            "(instr(lower(coalesce(artist, '')), lower(?)) > 0 OR "
+            "instr(lower(coalesce(album, '')), lower(?)) > 0 OR "
+            "instr(lower(coalesce(title, '')), lower(?)) > 0 OR "
+            "instr(lower(coalesce(canonical_path, '')), lower(?)) > 0 OR "
+            "instr(lower(coalesce(genre, '')), lower(?)) > 0)"
+        )
+        params.extend([query] * 5)
+    if artist:
+        clauses.append("artist = ?")
+        params.append(artist)
+    if album:
+        clauses.append("album = ?")
+        params.append(album)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    total = int(conn.execute("SELECT COUNT(*) FROM tracks" + where, params).fetchone()[0])
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = min(max(1, page), total_pages)
+    rows = conn.execute(
+        "SELECT audio_hash, canonical_path, artist, album, title, year, genre, file_format, updated_at "
+        "FROM tracks" + where
+        + " ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, canonical_path COLLATE NOCASE, audio_hash "
+        "LIMIT ? OFFSET ?",
+        [*params, per_page, (page - 1) * per_page],
+    ).fetchall()
+    tracks = []
+    for row in rows:
+        track = dict(row)
+        path = track["canonical_path"]
+        track["display_title"] = track["title"] or (Path(path).stem if path else "(unknown title)")
+        tracks.append(track)
+    return tracks, total, page
+
+
 def _record_undo(
     conn: sqlite3.Connection,
     *,

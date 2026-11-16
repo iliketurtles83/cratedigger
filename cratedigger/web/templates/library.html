@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Library — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 style="margin: 0; font-size: 20px;">Library</h1>
+    <div class="mono">Indexed tracks: {{ total }} matching</div>
+  </div>
+  <form method="get" action="/library" class="inline-form">
+    {% if artist %}<input type="hidden" name="artist" value="{{ artist }}">{% endif %}
+    {% if album %}<input type="hidden" name="album" value="{{ album }}">{% endif %}
+    <input type="text" name="q" value="{{ q }}" placeholder="Artist, album, title, path or genre" aria-label="Search library">
+    <button type="submit">Search</button>
+    <a class="btn" href="/library">Clear filters</a>
+  </form>
+</div>
+<p class="mono">This is the SQLite index, not a live filesystem scan. Refresh it with <code>cratedigger sync-features</code>; newly added or changed tracks may not appear until indexed.</p>
+{% if artist or album %}
+  <div class="pills">
+    {% if artist %}<span class="pill">Artist: {{ artist }}</span>{% endif %}
+    {% if album %}<span class="pill">Album: {{ album }}</span>{% endif %}
+  </div>
+{% endif %}
+{% if tracks %}
+  <div class="card" style="overflow-x: auto; padding: 0;">
+    <table>
+      <thead><tr><th>Title</th><th>Artist</th><th>Album</th><th>Year</th><th>Genre</th><th>Format</th></tr></thead>
+      <tbody>
+      {% for track in tracks %}
+        <tr>
+          <td><span title="{{ track.canonical_path or '' }}">{{ track.display_title }}</span></td>
+          <td>{% if track.artist %}<a href="/library?artist={{ track.artist|urlencode }}">{{ track.artist }}</a>{% else %}—{% endif %}</td>
+          <td>{% if track.album %}<a href="/library?{% if track.artist %}artist={{ track.artist|urlencode }}&amp;{% endif %}album={{ track.album|urlencode }}">{{ track.album }}</a>{% else %}—{% endif %}</td>
+          <td>{{ track.year or '—' }}</td>
+          <td>{{ track.genre or '—' }}</td>
+          <td>{{ track.file_format or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="pagination">
+    {% if page > 1 %}<a class="btn" href="/library?{{ filters }}{% if filters %}&amp;{% endif %}page={{ page - 1 }}">Prev</a>{% endif %}
+    <span class="mono">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}<a class="btn" href="/library?{{ filters }}{% if filters %}&amp;{% endif %}page={{ page + 1 }}">Next</a>{% endif %}
+  </div>
+{% else %}
+  <div class="card">No indexed tracks match. If your library has not been indexed, run <code>cratedigger sync-features</code>.</div>
+{% endif %}
+{% endblock %}

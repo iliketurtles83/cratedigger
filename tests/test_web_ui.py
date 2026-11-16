@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from html.parser import HTMLParser
 from pathlib import Path
 import pickle
 import tempfile
@@ -11,6 +12,7 @@ import unittest
 from fastapi.testclient import TestClient
 import pandas as pd
 from PIL import Image
+from unittest.mock import patch
 
 from cratedigger.db import open_db
 from cratedigger.web.app import create_app
@@ -46,8 +48,11 @@ class WebUITests(unittest.TestCase):
             db_path=self.db_path,
             music_root=self.music_root,
             features_path=self.features_path,
+            logs_dir=self.root / "logs",
         )
-        self.client = TestClient(self.app)
+        self.client = TestClient(self.app, base_url="http://127.0.0.1:8765")
+        self.client.get("/")
+        self.client.headers["x-csrf-token"] = self.client.cookies["cratedigger_session"]
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -72,6 +77,164 @@ class WebUITests(unittest.TestCase):
         r2 = self.client.get("/review")
         self.assertEqual(r2.status_code, 200)
         self.assertIn("Review Queue", r2.text)
+
+    def test_library_search_filter_and_pagination(self) -> None:
+        with open_db(self.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO tracks (audio_hash, canonical_path, artist, album, title, year, genre, file_format, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (f"a1:{i:04d}", f"/music/track-{i:02d}.mp3", "Artist & Co", "Record / One",
+                     f"Song {i:02d}", "2001", "Rock / Alternative", "mp3", "2026-01-01")
+                    for i in range(52)
+                ] + [
+                    ("a1:other", "/music/Fallback.mp3", "Other", "Album", None,
+                     None, None, "mp3", "2026-01-01")
+                ],
+            )
+            conn.commit()
+        page = self.client.get("/library")
+        self.assertIn("53 matching", page.text)
+        self.assertIn("Page 1 of 2", page.text)
+        self.assertIn("Artist &amp; Co", page.text)
+        self.assertEqual(self.client.get("/library", params={"q": "song 12"}).text.count("Song 12"), 1)
+        filtered = self.client.get("/library", params={"artist": "Artist & Co", "album": "Record / One", "page": 2})
+        self.assertIn("52 matching", filtered.text)
+        self.assertIn("Page 2 of 2", filtered.text)
+        self.assertNotIn("Fallback", filtered.text)
+        fallback = self.client.get("/library", params={"q": "Fallback"})
+        self.assertIn("Fallback", fallback.text)
+        self.assertNotIn("Song 12", fallback.text)
+        literal = self.client.get("/library", params={"q": "%"})
+        self.assertIn("No indexed tracks match", literal.text)
+        self.assertEqual(self.client.get("/library", params={"page": 0}).status_code, 422)
+
+    def test_operations_catalog_and_queued_preview(self) -> None:
+        page = self.client.get("/ops")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Operations", page.text)
+        self.assertIn("Process incoming music", page.text)
+        self.assertIn("Extract audio features", page.text)
+
+        with patch("cratedigger.web.app.start_job", return_value="job-abc") as start:
+            response = self.client.post(
+                "/ops/tag/start",
+                data={"csrf_token": self.client.cookies["cratedigger_session"], "mode": "preview", "folder": "A"},
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/jobs/job-abc", response.headers["location"])
+        self.assertEqual(start.call_args.kwargs["operation_id"], "tag")
+        self.assertEqual(start.call_args.kwargs["raw_params"], {"folder": "A"})
+        self.assertEqual(start.call_args.kwargs["mode"], "preview")
+
+        bad = self.client.post(
+            "/ops/not-registered/start",
+            data={"csrf_token": self.client.cookies["cratedigger_session"], "mode": "preview"},
+            follow_redirects=False,
+        )
+        self.assertIn("/ops?err=", bad.headers["location"])
+
+    def test_persistent_job_history_detail_and_terminal_stream(self) -> None:
+        log_path = self.root / "logs" / "job.log"
+        log_path.parent.mkdir(parents=True)
+        log_path.write_text("$ tool --dry-run\npreview complete\n", encoding="utf-8")
+        with open_db(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, operation_id, params_json, mode, fingerprint, argv_json, locks_json, status, "
+                "exit_code, log_path, created_at, started_at, finished_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "job-fixture", "tag", '{"folder":"A"}', "preview", "fingerprint", '["python"]', "[]",
+                    "succeeded", 0, str(log_path), "2026-01-01", "2026-01-01", "2026-01-01",
+                ),
+            )
+            conn.commit()
+        history = self.client.get("/jobs")
+        self.assertEqual(history.status_code, 200)
+        self.assertIn("job-fixture", history.text)
+        detail = self.client.get("/jobs/job-fixture")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("preview complete", detail.text)
+        self.assertIn("Parameters", detail.text)
+        stream = self.client.get("/jobs/job-fixture/events")
+        self.assertEqual(stream.status_code, 200)
+        self.assertIn('"done": true', stream.text)
+        self.assertEqual(self.client.get("/jobs/not-found").status_code, 404)
+
+    def test_local_host_and_cross_site_protection(self) -> None:
+        client = TestClient(self.app, base_url="http://127.0.0.1:8765")
+        for host in ("evil.example:8765", "localhost.evil.example", "127.0.0.1@evil.example", "localhost:99999"):
+            with self.subTest(host=host):
+                self.assertEqual(client.get("/", headers={"host": host}).status_code, 400)
+        self.assertEqual(client.post("/quarantine/empty").status_code, 403)
+
+        page = client.get("/review")
+        token = client.cookies["cratedigger_session"]
+        self.assertIn(f'name="csrf_token" value="{token}"', page.text)
+        self.assertIn("HttpOnly", page.headers["set-cookie"])
+        self.assertIn("SameSite=strict", page.headers["set-cookie"])
+        for origin in ("http://evil.example", "null", "http://127.0.0.1:8766", "http://localhost:8765"):
+            with self.subTest(origin=origin):
+                response = client.post(
+                    "/review/bulk",
+                    data={"action": "dismiss", "csrf_token": token},
+                    headers={"origin": origin},
+                )
+                self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            client.post("/review/bulk", data={"action": "dismiss", "csrf_token": "wrong"}).status_code, 403
+        )
+        response = client.post(
+            "/review/bulk",
+            data={"action": "dismiss", "csrf_token": token},
+            headers={"origin": "http://127.0.0.1:8765"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+
+        forged = TestClient(self.app, base_url="http://127.0.0.1:8765")
+        forged.cookies.set("cratedigger_session", "x" * 43 + "." + "0" * 64)
+        self.assertEqual(
+            forged.post("/review/bulk", data={"action": "dismiss"}, headers={"x-csrf-token": forged.cookies["cratedigger_session"]}).status_code,
+            403,
+        )
+
+    def test_review_post_forms_are_not_nested_and_have_csrf_tokens(self) -> None:
+        track = _make_mp3(self.music_root / "A" / "Artist" / "Album" / "01 - Track.mp3")
+        self._insert_review(item_key="form1", queue_type="actionable", reason="incomplete_metadata", path=track, payload={})
+        page = self.client.get("/review")
+
+        class FormParser(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.in_form = False
+                self.post = False
+                self.has_token = False
+                self.post_forms = 0
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                values = dict(attrs)
+                if tag == "form":
+                    if self.in_form:
+                        raise AssertionError("Nested form")
+                    self.in_form = True
+                    self.post = values.get("method", "").lower() == "post"
+                    self.has_token = False
+                if tag == "input" and self.in_form and values.get("name") == "csrf_token":
+                    self.has_token = bool(values.get("value"))
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag == "form":
+                    if self.post:
+                        if not self.has_token:
+                            raise AssertionError("POST form without CSRF token")
+                        self.post_forms += 1
+                    self.in_form = False
+
+        parser = FormParser()
+        parser.feed(page.text)
+        self.assertGreaterEqual(parser.post_forms, 5)
 
     def test_grouped_no_genre_apply(self) -> None:
         folder = self.music_root / "C" / "Cure" / "Disintegration (1989)"

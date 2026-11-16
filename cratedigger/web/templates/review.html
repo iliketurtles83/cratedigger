@@ -62,6 +62,7 @@
         </div>
       </div>
       <form method="post" action="/review/group-genre" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="item_ids_csv" value="{{ grp['items'] | map(attribute='id') | join(',') }}">
         <input type="hidden" name="return_url" value="{{ current_url }}">
         <input type="text" name="genre_value" placeholder="Genre (e.g. Rock / Post-Punk)" required style="min-width: 260px;">
@@ -79,7 +80,9 @@
   {% endfor %}
 {% else %}
   <form id="bulk-form" method="post" action="/review/bulk">
+    <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="return_url" value="{{ current_url }}">
+  </form>
     {% if items %}
       <div class="toolbar">
         <label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
@@ -125,6 +128,7 @@
                 <div class="mono">{{ cand.name }}</div>
                 <div class="mono">{{ cand.dims or "?" }} · {{ cand.size_kb }} KB</div>
                 <form method="post" action="/review/{{ item.id }}/pick-cover">
+                  <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
                   <input type="hidden" name="selected_path" value="{{ cand.path }}">
                   <input type="hidden" name="return_url" value="{{ current_url }}">
                   <button type="submit" class="primary" style="width: 100%;">Select as cover.jpg</button>
@@ -171,16 +175,19 @@
           </div>
           <div class="inline-form">
             <form method="post" action="/review/{{ item.id }}/resolve-conflict">
+              <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
               <input type="hidden" name="decision" value="quarantine_source">
               <input type="hidden" name="return_url" value="{{ current_url }}">
               <button type="submit">Quarantine Source (Keep Target)</button>
             </form>
             <form method="post" action="/review/{{ item.id }}/resolve-conflict">
+              <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
               <input type="hidden" name="decision" value="replace_target">
               <input type="hidden" name="return_url" value="{{ current_url }}">
               <button type="submit" class="danger">Replace Target (Quarantine Target)</button>
             </form>
             <form method="post" action="/review/{{ item.id }}/resolve-conflict">
+              <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
               <input type="hidden" name="decision" value="keep_both">
               <input type="hidden" name="return_url" value="{{ current_url }}">
               <button type="submit" class="primary">Keep Both ([alternate])</button>
@@ -199,6 +206,7 @@
           </div>
           {% set top_val = item.ctx.value_distribution[0][0] if item.ctx.value_distribution and item.ctx.value_distribution[0][0] != '<empty>' else '' %}
           <form method="post" action="/review/{{ item.id }}/apply-folder-tag" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
             <input type="hidden" name="return_url" value="{{ current_url }}">
             <select name="field">
               {% for fname in ["album", "albumartist", "artist", "year", "genre"] %}
@@ -212,6 +220,7 @@
         {% elif item.ctx.is_file %}
           {% set tags = item.ctx.tags or {} %}
           <form method="post" action="/review/{{ item.id }}/write-tags" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
             <input type="hidden" name="return_url" value="{{ current_url }}">
             <input type="text" name="artist" value="{{ tags.get('artist', '') }}" placeholder="Artist">
             <input type="text" name="album" value="{{ tags.get('album', '') }}" placeholder="Album">
@@ -229,14 +238,17 @@
       </div>
 
       <form id="status-resolve-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="status" value="resolved">
         <input type="hidden" name="return_url" value="{{ current_url }}">
       </form>
       <form id="status-dismiss-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="status" value="dismissed">
         <input type="hidden" name="return_url" value="{{ current_url }}">
       </form>
       <form id="status-reopen-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="status" value="pending">
         <input type="hidden" name="return_url" value="{{ current_url }}">
       </form>
@@ -245,14 +257,13 @@
     <div id="bulk-bar" class="bulk-bar">
       <div><strong><span id="bulk-count">0</span></strong> item(s) selected</div>
       <div class="inline-form" style="margin-top: 0;">
-        <input type="text" name="genre_value" placeholder="Genre for selected...">
-        <button type="submit" name="action" value="apply_genre" class="primary">Apply Genre</button>
-        <button type="submit" name="action" value="resolve" class="ok">Mark Resolved</button>
-        <button type="submit" name="action" value="dismiss">Dismiss</button>
-        <button type="submit" name="action" value="reopen">Reopen</button>
+        <input type="text" name="genre_value" form="bulk-form" placeholder="Genre for selected...">
+        <button type="submit" form="bulk-form" name="action" value="apply_genre" class="primary">Apply Genre</button>
+        <button type="submit" form="bulk-form" name="action" value="resolve" class="ok">Mark Resolved</button>
+        <button type="submit" form="bulk-form" name="action" value="dismiss">Dismiss</button>
+        <button type="submit" form="bulk-form" name="action" value="reopen">Reopen</button>
       </div>
     </div>
-  </form>
 {% endif %}
 
 {% if total_pages > 1 %}

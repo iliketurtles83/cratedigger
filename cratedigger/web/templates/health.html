@@ -36,6 +36,7 @@
 </div>
 
 <form id="bulk-form" method="post" action="/review/bulk">
+  <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
   <input type="hidden" name="return_url" value="{{ current_url }}">
   {% if items %}
     <div class="toolbar">
@@ -90,10 +91,12 @@
 
 {% for item in items %}
   <form id="h-dismiss-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+    <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="status" value="dismissed">
     <input type="hidden" name="return_url" value="{{ current_url }}">
   </form>
   <form id="h-reopen-{{ item.id }}" method="post" action="/review/{{ item.id }}/status">
+    <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="status" value="pending">
     <input type="hidden" name="return_url" value="{{ current_url }}">
   </form>

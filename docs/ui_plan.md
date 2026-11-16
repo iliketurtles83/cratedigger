@@ -11,6 +11,7 @@ The foundation in `cratedigger/web/` (`app.py`, `services.py`, `templates/`, `st
 
 - **App shell & safety**
   - Top navigation with live SQLite badge counts (`actionable`, `health`, `duplicates / quarantine`, `undoable`)
+  - Localhost-only binding, Host and Origin checks, and session CSRF tokens for POST requests
   - Read-only `music_root` mount detection (`_is_music_root_readonly`) with persistent warning banner
   - Consistent flash messaging (`msg` / `err`) across POST redirects
   - Path-traversal guard (`resolve_safe_path`) on `/media/image`, `/media/audio`, quarantine, and undo operations
@@ -25,6 +26,10 @@ The foundation in `cratedigger/web/` (`app.py`, `services.py`, `templates/`, `st
   - `0quarantine/` browser with per-file restore (`/quarantine/restore`) and empty-quarantine confirmation (`/quarantine/empty`)
 - **Undo Journal (`/undo`)**
   - Reversible run history from `undo_journal` delegated to `cratedigger.engine.executor.undo_plan_run`
+- **Library (`/library`)**
+  - Read-only, paginated SQLite index with search and artist/album filters; the index is refreshed separately with `cratedigger sync-features`
+- **Operations (`/ops`) and Jobs (`/jobs`)**
+  - Allowlisted script catalog with typed parameters, dry-run/apply modes, persisted worker jobs, resource locks, preview matching, cancel, and live log streaming
 
 ---
 

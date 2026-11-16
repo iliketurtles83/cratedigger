@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="Show SQLite store counts")
 
     ui_p = sub.add_parser("ui", help="Launch local review & quarantine web UI")
-    ui_p.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    ui_p.add_argument("--host", choices=["127.0.0.1"], default="127.0.0.1", help="Bind to localhost only")
     ui_p.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
     ui_p.add_argument("--music-root", type=Path, default=None, help="Override MUSIC_ROOT directory")
 

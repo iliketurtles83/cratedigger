@@ -33,6 +33,7 @@
             <td>
               {% if run.any_pending == 0 %}
                 <form method="post" action="/undo/{{ run.run_id }}">
+                  <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
                   <button type="submit" class="primary">Undo Run</button>
                 </form>
               {% else %}

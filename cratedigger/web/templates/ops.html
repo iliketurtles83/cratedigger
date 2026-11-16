@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Operations — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 style="margin: 0; font-size: 20px;">Operations</h1>
+    <div class="mono">Allowlisted script operations. Preview first; apply requires a matching successful preview.</div>
+  </div>
+  <a class="btn" href="/jobs">Job history</a>
+</div>
+{% for group, operations in groups.items() %}
+  <h2 style="font-size: 16px; margin: 22px 0 10px;">{{ group }}</h2>
+  <div class="ops-grid">
+  {% for op in operations %}
+    <section class="card op-card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">{{ op.title }}</div>
+          {% if op.help %}<div class="mono">{{ op.help }}</div>{% endif %}
+        </div>
+        <span class="badge {% if op.risk == 'read_only' %}ok{% elif op.risk == 'network' %}warn{% else %}accent{% endif %}">{{ op.risk|replace('_', ' ') }}</span>
+      </div>
+      <form method="post" action="/ops/{{ op.id }}/start" class="op-form">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+        {% for field in op.fields %}
+          <label class="op-field">
+            <span>{{ field.label }}</span>
+            {% if field.kind == "boolean" %}
+              <span class="checkbox-field">
+                <input type="checkbox" name="{{ field.name }}" value="true" {% if field.default %}checked{% endif %}>
+                {% if field.help %}<small>{{ field.help }}</small>{% endif %}
+              </span>
+            {% elif field.kind == "choice" %}
+              <select name="{{ field.name }}" {% if field.name == "mode" %}required{% endif %}>
+                <option value="">Select…</option>
+                {% for choice in field.choices %}
+                  <option value="{{ choice }}">{{ choice|replace('-', ' ')|title }}</option>
+                {% endfor %}
+              </select>
+            {% else %}
+              <input type="{{ 'number' if field.kind in ['integer', 'number'] else 'text' }}"
+                     name="{{ field.name }}" value="{{ field.default if field.default is not none else '' }}"
+                     {% if field.minimum is not none %}min="{{ field.minimum }}"{% endif %}
+                     {% if field.maximum is not none %}max="{{ field.maximum }}"{% endif %}
+                     {% if field.help %}title="{{ field.help }}"{% endif %}>
+            {% endif %}
+          </label>
+        {% endfor %}
+        <label class="op-field">
+          <span>Run mode</span>
+          <select name="mode">
+            <option value="preview">Preview (safe)</option>
+            {% if op.can_apply %}<option value="apply">Apply changes</option>{% endif %}
+          </select>
+        </label>
+        <button type="submit" class="primary">Start job</button>
+      </form>
+    </section>
+  {% endfor %}
+  </div>
+{% endfor %}
+{% if recent_jobs %}
+  <h2 style="font-size: 16px; margin: 26px 0 10px;">Recent jobs</h2>
+  <div class="card" style="padding: 0; overflow-x: auto;">
+    <table>
+      <thead><tr><th>Operation</th><th>Mode</th><th>Status</th><th>Started</th></tr></thead>
+      <tbody>{% for job in recent_jobs %}
+        <tr>
+          <td><a href="/jobs/{{ job.id }}">{{ job.operation_id }}</a></td>
+          <td>{{ job.mode }}</td><td><span class="badge">{{ job.status }}</span></td>
+          <td class="mono">{{ job.started_at or job.created_at }}</td>
+        </tr>
+      {% endfor %}</tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

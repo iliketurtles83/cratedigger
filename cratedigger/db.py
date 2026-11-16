@@ -118,6 +118,32 @@ CREATE TABLE IF NOT EXISTS settings (
     value_json       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id               TEXT PRIMARY KEY,
+    operation_id     TEXT NOT NULL,
+    params_json      TEXT NOT NULL,
+    mode             TEXT NOT NULL CHECK (mode IN ('preview', 'apply')),
+    fingerprint      TEXT NOT NULL,
+    argv_json        TEXT NOT NULL,
+    locks_json       TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'queued',
+    pid              INTEGER,
+    pgid             INTEGER,
+    exit_code        INTEGER,
+    log_path         TEXT NOT NULL,
+    error            TEXT,
+    created_at       TEXT NOT NULL,
+    started_at       TEXT,
+    finished_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+
+CREATE TABLE IF NOT EXISTS job_locks (
+    lock_key         TEXT PRIMARY KEY,
+    job_id           TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE
+);
 """
 
 
@@ -246,13 +272,14 @@ def sync_features_into_db(
         conn.execute(
             """
             INSERT INTO tracks (
-                audio_hash, canonical_path, artist, album, year, genre,
+                audio_hash, canonical_path, artist, album, title, year, genre,
                 rating, duration_ms, file_format, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(audio_hash) DO UPDATE SET
                 canonical_path = excluded.canonical_path,
                 artist = COALESCE(excluded.artist, tracks.artist),
                 album = COALESCE(excluded.album, tracks.album),
+                title = COALESCE(excluded.title, tracks.title),
                 year = COALESCE(excluded.year, tracks.year),
                 genre = COALESCE(excluded.genre, tracks.genre),
                 rating = COALESCE(excluded.rating, tracks.rating),
@@ -265,6 +292,7 @@ def sync_features_into_db(
                 p_str,
                 str(row["artist_tag"]) if pd.notna(row.get("artist_tag")) else None,
                 str(row["album_tag"]) if pd.notna(row.get("album_tag")) else None,
+                str(row["track_tag"]) if pd.notna(row.get("track_tag")) else None,
                 str(row["year_tag"]) if pd.notna(row.get("year_tag")) else None,
                 str(row["genre_tag"]) if pd.notna(row.get("genre_tag")) else None,
                 rating,
