@@ -5,6 +5,8 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import stat
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -461,11 +463,21 @@ def export_features(
 
     raw_json = json.dumps(payload, ensure_ascii=False)
 
-    if str(output_path).endswith(".gz"):
-        with gzip.open(output_path, "wt", encoding="utf-8") as f:
-            f.write(raw_json)
-    else:
-        output_path.write_text(raw_json, encoding="utf-8")
+    target_path = output_path.resolve()
+    with tempfile.TemporaryDirectory(prefix=".cratedigger-export-", dir=target_path.parent) as temp_dir:
+        temp_path = Path(temp_dir) / target_path.name
+        if str(output_path).endswith(".gz"):
+            with gzip.open(temp_path, "wt", encoding="utf-8") as f:
+                f.write(raw_json)
+        else:
+            temp_path.write_text(raw_json, encoding="utf-8")
+        try:
+            existing_mode = stat.S_IMODE(target_path.stat().st_mode)
+        except FileNotFoundError:
+            pass
+        else:
+            temp_path.chmod(existing_mode)
+        temp_path.replace(target_path)
 
     size_mb = output_path.stat().st_size / (1024 * 1024)
     log.info(

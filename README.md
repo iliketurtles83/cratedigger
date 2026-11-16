@@ -235,6 +235,11 @@ use library percentiles; the player should level volume rather than
 normalizing files. The isolated schema 12 pilot and full test suite pass; the
 production migration is the next separate full-library run.
 
+The producer-side feature-export and audio-identity contract is documented in
+[docs/player-contract.md](docs/player-contract.md). The player repository
+should record only the contract versions and fields it consumes, linking back
+to that source.
+
 ### intake.py — Full intake in one command
 
 Orchestrates `01_tag.py → 02_rename.py → 04_move.py --intake` for files in `INCOMING_FOLDER`.

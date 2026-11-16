@@ -5,8 +5,11 @@
 # 1. Deletion propagation before transfer so stale case variants do not alias
 #    canonical Windows-safe paths.
 # 2. Perishable junk exclusions so hidden files cannot preserve stale folders.
-# 3. Whole-file hashed formats check (.ogg, .opus, .wma).
+# 3. The excluded 0videos tree is protected from deletion.
 # 4. Player refresh is performed separately on the remote player host.
+#
+# The source must be a complete mirror. This script does not check the special
+# retag/sync/refresh/move sequence required for Ogg, Opus, and WMA files.
 #
 # Usage:
 #   ./scripts/server_sync.sh [--dry-run] [--source /path/to/buffer] [--dest user@server:/path]
@@ -48,6 +51,7 @@ echo "=== Cratedigger Server Sync ==="
 echo "Source:      $SOURCE"
 echo "Destination: $DEST"
 echo "Dry Run:     $DRY_RUN"
+echo "Delete mode: --delete-before (requires a complete source mirror)"
 echo "==============================="
 
 # Ensure source path ends with slash for rsync

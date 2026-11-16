@@ -36,6 +36,19 @@ class TestAudioHash(unittest.TestCase):
         self.assertEqual(len(parts), 2)
         self.assertEqual(len(parts[1]), 32)
 
+    def test_a1_reference_vectors(self):
+        mp3 = self.root / "short.mp3"
+        mp3.write_bytes(b"\xff\xfb\x90\x64" * 1000)
+        self.assertEqual(audio_hash(str(mp3)), "a1:b169eb5e47f36ad019494f1b1140e2b4")
+
+        ogg = self.root / "large.ogg"
+        ogg.write_bytes(b"A" * SAMPLE_BYTES + b"B" * 4 + b"C" * SAMPLE_BYTES)
+        expected = "a1:4286dbb41368062786eb8ef90340f0fe"
+        self.assertEqual(audio_hash(str(ogg)), expected)
+
+        ogg.write_bytes(b"A" * SAMPLE_BYTES + b"Z" * 4 + b"C" * SAMPLE_BYTES)
+        self.assertEqual(audio_hash(str(ogg)), expected)
+
     def test_short_file_determinism(self):
         f1 = self.root / "track1.wav"
         f2 = self.root / "track2.wav"

@@ -2,9 +2,13 @@
 
 import gzip
 import json
+import os
+import stat
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -207,6 +211,101 @@ class TestRecommenderEvaluationAndExport(unittest.TestCase):
         self.assertEqual(len(track["vector"]), 410)
         self.assertIn("bpm", track)
         self.assertIn("energy", track)
+
+    def test_gzip_write_failure_does_not_publish_partial_export(self):
+        gzip_open = gzip.open
+
+        @contextmanager
+        def partial_write(*args, **kwargs):
+            with gzip_open(*args, **kwargs) as stream:
+                class FailingWriter:
+                    def write(self, content):
+                        stream.write(content[:16])
+                        raise OSError("simulated write failure")
+
+                yield FailingWriter()
+
+        for existing in (True, False):
+            with self.subTest(existing=existing):
+                out_file = self.root / "export.json.gz"
+                if existing:
+                    out_file.write_bytes(b"previous export")
+                with patch("lib.recommender.gzip.open", side_effect=partial_write):
+                    with self.assertRaisesRegex(OSError, "simulated write failure"):
+                        export_features(self.df, out_file)
+                if existing:
+                    self.assertEqual(out_file.read_bytes(), b"previous export")
+                    out_file.unlink()
+                else:
+                    self.assertFalse(out_file.exists())
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_json_write_failure_does_not_publish_partial_export(self):
+        original_write_text = Path.write_text
+
+        def partial_write(path, content, *args, **kwargs):
+            original_write_text(path, content[:16], *args, **kwargs)
+            raise OSError("simulated write failure")
+
+        for existing in (True, False):
+            with self.subTest(existing=existing):
+                out_file = self.root / "export.json"
+                if existing:
+                    out_file.write_bytes(b"previous export")
+                with patch.object(Path, "write_text", autospec=True, side_effect=partial_write):
+                    with self.assertRaisesRegex(OSError, "simulated write failure"):
+                        export_features(self.df, out_file)
+                if existing:
+                    self.assertEqual(out_file.read_bytes(), b"previous export")
+                    out_file.unlink()
+                else:
+                    self.assertFalse(out_file.exists())
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_export_json_and_replace_failure(self):
+        out_file = self.root / "export.json"
+        out_file.write_bytes(b"previous export")
+        with patch.object(Path, "replace", side_effect=OSError("simulated publish failure")):
+            with self.assertRaisesRegex(OSError, "simulated publish failure"):
+                export_features(self.df, out_file)
+        self.assertEqual(out_file.read_bytes(), b"previous export")
+        self.assertEqual(list(self.root.iterdir()), [out_file])
+
+        res = export_features(self.df, out_file)
+        data = json.loads(out_file.read_text(encoding="utf-8"))
+        self.assertEqual(res["track_count"], 50)
+        self.assertEqual(data["track_count"], 50)
+        self.assertEqual(len(data["tracks"][0]["vector"]), 410)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file modes are required")
+    def test_new_export_uses_normal_creation_mode(self):
+        reference = self.root / "reference.json"
+        reference.write_text("reference", encoding="utf-8")
+        out_file = self.root / "export.json"
+        export_features(self.df, out_file)
+        self.assertEqual(
+            stat.S_IMODE(out_file.stat().st_mode),
+            stat.S_IMODE(reference.stat().st_mode),
+        )
+
+    def test_export_preserves_symlink_and_existing_file_mode(self):
+        target = self.root / "target.json.gz"
+        target.write_bytes(b"previous export")
+        if os.name == "posix":
+            target.chmod(0o640)
+        out_file = self.root / "export.json.gz"
+        try:
+            out_file.symlink_to(target.name)
+        except OSError as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+
+        export_features(self.df, out_file)
+
+        self.assertTrue(out_file.is_symlink())
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
+        with gzip.open(out_file, "rt", encoding="utf-8") as stream:
+            self.assertEqual(json.load(stream)["track_count"], 50)
 
     def test_export_features_deduplicates_audio_hash_preferring_tier1(self):
         from lib.recommender import deduplicate_features_by_audio_hash
