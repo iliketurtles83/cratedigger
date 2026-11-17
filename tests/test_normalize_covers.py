@@ -1,6 +1,8 @@
 """Tests for scripts/normalize_covers.py."""
 
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -59,6 +61,24 @@ class NormalizeCoversTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertFalse(ripper_art.exists())
             self.assertTrue((album_dir / "cover.jpg").exists())
+
+    def test_preview_does_not_modify_review_json_for_ambiguous_covers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            album = root / "music" / "Album"
+            album.mkdir(parents=True)
+            for name in ("01.mp3", "scan1.jpg", "scan2.jpg"):
+                (album / name).touch()
+            review = root / "review.json"
+            review.write_text("[]\n", encoding="utf-8")
+            script = Path(__file__).resolve().parents[1] / "scripts" / "normalize_covers.py"
+            result = subprocess.run(
+                [sys.executable, str(script), "--library-root", str(root / "music"), "--dry-run"],
+                cwd=root, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(review.read_text(encoding="utf-8"), "[]\n")
+            self.assertIn("Would append 1 review item", result.stderr)
 
 
 if __name__ == "__main__":

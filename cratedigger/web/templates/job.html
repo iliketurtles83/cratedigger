@@ -7,7 +7,7 @@
     <h1 style="margin: 0; font-size: 20px;">{{ job.operation_id }}</h1>
     <div class="mono">Job {{ job.id }} · {{ job.mode }} · started {{ job.started_at or "queued" }}</div>
   </div>
-  <span id="job-status" class="badge {% if job.status == 'succeeded' %}ok{% elif job.status in ['failed', 'stale'] %}warn{% endif %}">{{ job.status }}</span>
+  <span id="job-status" class="badge {% if job.status == 'succeeded' %}ok{% elif job.status in ['failed', 'stale', 'orphaned'] %}warn{% endif %}">{{ job.status }}</span>
 </div>
 {% if job.error %}<div class="flash error">{{ job.error }}</div>{% endif %}
 <div class="card">
@@ -21,6 +21,20 @@
     <button class="danger" type="submit">Cancel job</button>
   </form>
 {% endif %}
+{% if operation %}
+  <div class="toolbar">
+    <form method="post" action="/jobs/{{ job.id }}/rerun">
+      <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+      <button type="submit">Run preview again</button>
+    </form>
+    {% if job.mode == "preview" and job.status == "succeeded" and operation.can_apply %}
+      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('Apply this preview? This legacy operation cannot be undone through Cratedigger.');">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+        <button class="danger" type="submit">Apply this preview</button>
+      </form>
+    {% endif %}
+  </div>
+{% endif %}
 <div class="card">
   <div class="card-head"><strong>Live log</strong><a href="/jobs">Back to jobs</a></div>
   <pre id="job-log" class="job-log">{{ log_text }}</pre>
@@ -28,9 +42,9 @@
 <script>
 (() => {
   const status = document.getElementById("job-status");
-  if (!["queued", "running", "cancelling"].includes(status.textContent.trim())) return;
+  const wasActive = ["queued", "running", "cancelling"].includes(status.textContent.trim());
   const log = document.getElementById("job-log");
-  const source = new EventSource("/jobs/{{ job.id }}/events");
+  const source = new EventSource("/jobs/{{ job.id }}/events?offset={{ log_offset }}");
   source.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.log) {
@@ -39,7 +53,7 @@
     }
     if (data.done) {
       source.close();
-      window.location.reload();
+      if (wasActive) window.location.reload();
     }
   };
 })();

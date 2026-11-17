@@ -29,7 +29,10 @@ The foundation in `cratedigger/web/` (`app.py`, `services.py`, `templates/`, `st
 - **Library (`/library`)**
   - Read-only, paginated SQLite index with search and artist/album filters; the index is refreshed separately with `cratedigger sync-features`
 - **Operations (`/ops`) and Jobs (`/jobs`)**
-  - Allowlisted script catalog with typed parameters, dry-run/apply modes, persisted worker jobs, resource locks, preview matching, cancel, and live log streaming
+  - Allowlisted subset of scripts with typed parameters, preview/apply modes, persisted workers, read/write resource locks, cancellation, and resumable log streaming
+  - Preview fingerprints cover effective roots, operation/config/registry files, and snapshotted reviewed reports; a job can be rerun or applied from its detail page
+  - Direct UI file mutations share resource locks with jobs; external extraction detection is best effort, and external filesystem changes are not tracked by the preview gate
+  - Legacy operations are not undoable and unsupported library-root overrides are rejected rather than sent to the wrong library
 
 ---
 

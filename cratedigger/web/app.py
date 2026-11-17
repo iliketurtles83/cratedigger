@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AbstractContextManager
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,9 @@ from fastapi.templating import Jinja2Templates
 
 import config
 from cratedigger.db import DEFAULT_DB_PATH, open_db
-from cratedigger.jobs import cancel_job, get_job, list_jobs, read_job_log, reconcile_jobs, start_job
+from cratedigger.jobs import (
+    cancel_job, get_job, library_mutation_guard, list_jobs, read_job_log, reconcile_jobs, start_job,
+)
 from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
 from cratedigger.web import services
 from cratedigger.web.security import LocalSecurityMiddleware
@@ -27,14 +30,14 @@ _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
 
 def _is_music_root_readonly(music_root: Path) -> bool:
     try:
-        if music_root.exists():
-            st = os.statvfs(music_root)
-            if bool(getattr(os, "ST_RDONLY", 1) & st.f_flag):
-                return True
-            return not os.access(music_root, os.W_OK)
+        if not music_root.is_dir():
+            return True
+        st = os.statvfs(music_root)
+        if bool(getattr(os, "ST_RDONLY", 1) & st.f_flag):
+            return True
+        return not os.access(music_root, os.W_OK)
     except OSError:
-        return False
-    return False
+        return True
 
 
 def _redirect_with_flash(url: str, *, msg: str = "", err: str = "") -> RedirectResponse:
@@ -100,6 +103,11 @@ def create_app(
     app.state.repo_root = REPOSITORY_ROOT
     app.state.logs_dir = Path(logs_dir or REPOSITORY_ROOT / "logs" / "jobs")
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")), name="static")
+
+    def protected_mutation() -> AbstractContextManager[None]:
+        if _is_music_root_readonly(app.state.music_root):
+            raise RuntimeError("The music library is unavailable or mounted read-only")
+        return library_mutation_guard(app.state.db_path, app.state.repo_root)
 
     @app.get("/", response_class=HTMLResponse)
     def root() -> RedirectResponse:
@@ -172,16 +180,7 @@ def create_app(
             if operation is None:
                 raise ValueError(f"Unknown operation: {operation_id}")
             if mode == "apply" and operation.risk in {"writes_tags", "moves_files", "writes_library"} and _is_music_root_readonly(app.state.music_root):
-                raise ValueError("The music library is mounted read-only")
-            if raw_params.get("report"):
-                report_path = Path(str(raw_params["report"]))
-                if not report_path.is_absolute():
-                    report_path = app.state.repo_root / report_path
-                report_path = report_path.resolve()
-                reports_root = (app.state.repo_root / "reports").resolve()
-                if not report_path.is_relative_to(reports_root):
-                    raise ValueError("Report paths must stay inside the repository reports directory")
-                raw_params["report"] = str(report_path)
+                raise ValueError("The music library is unavailable or mounted read-only")
             with open_db(app.state.db_path) as conn:
                 reconcile_jobs(conn)
                 job_id = start_job(
@@ -195,7 +194,7 @@ def create_app(
                     music_root=app.state.music_root,
                 )
             return _redirect_with_flash(f"/jobs/{job_id}", msg=f"{mode.title()} job queued")
-        except (ValueError, RuntimeError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             return _redirect_with_flash("/ops", err=str(exc))
 
     @app.get("/jobs", response_class=HTMLResponse)
@@ -220,13 +219,13 @@ def create_app(
         )
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
-    def job_detail(request: Request, job_id: str) -> HTMLResponse:
+    def job_detail(request: Request, job_id: str, msg: str = "", err: str = "") -> HTMLResponse:
         with open_db(app.state.db_path) as conn:
             reconcile_jobs(conn)
             job = get_job(conn, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        log_text, _ = read_job_log(str(job["log_path"]), allowed_dir=app.state.logs_dir)
+        log_text, log_offset = read_job_log(str(job["log_path"]), allowed_dir=app.state.logs_dir)
         return _TEMPLATES.TemplateResponse(
             request,
             "job.html",
@@ -234,7 +233,11 @@ def create_app(
                 "active_nav": "jobs",
                 "badges": _nav_badges(app.state.db_path, app.state.music_root),
                 "job": job,
+                "operation": OPERATIONS.get(str(job["operation_id"])),
                 "log_text": log_text,
+                "log_offset": log_offset,
+                "msg": msg,
+                "err": err,
             },
         )
 
@@ -247,24 +250,71 @@ def create_app(
         except (KeyError, RuntimeError, ValueError) as exc:
             return _redirect_with_flash(f"/jobs/{job_id}", err=str(exc))
 
+    def restart_job(job_id: str, mode: str) -> RedirectResponse:
+        try:
+            with open_db(app.state.db_path) as conn:
+                reconcile_jobs(conn)
+                job = get_job(conn, job_id)
+                if job is None:
+                    raise ValueError("Job not found")
+                operation = OPERATIONS.get(str(job["operation_id"]))
+                if operation is None:
+                    raise ValueError("This operation is no longer available")
+                if mode == "apply":
+                    if job["mode"] != "preview" or job["status"] != "succeeded" or not operation.can_apply:
+                        raise ValueError("Only a successful, applicable preview can be applied")
+                    if operation.risk in {"writes_tags", "moves_files", "writes_library"} and _is_music_root_readonly(app.state.music_root):
+                        raise ValueError("The music library is unavailable or mounted read-only")
+                params = job["params"]
+                if not isinstance(params, dict):
+                    raise ValueError("Job parameters are invalid")
+                next_id = start_job(
+                    conn,
+                    db_path=app.state.db_path,
+                    operation_id=operation.id,
+                    raw_params=params,
+                    mode=mode,
+                    repo_root=app.state.repo_root,
+                    logs_dir=app.state.logs_dir,
+                    music_root=app.state.music_root,
+                    expected_preview_id=job_id if mode == "apply" else None,
+                )
+            return _redirect_with_flash(f"/jobs/{next_id}", msg=f"{mode.title()} job queued")
+        except (OSError, ValueError, RuntimeError) as exc:
+            return _redirect_with_flash(f"/jobs/{job_id}", err=str(exc))
+
+    @app.post("/jobs/{job_id}/rerun")
+    def job_rerun(job_id: str) -> RedirectResponse:
+        return restart_job(job_id, "preview")
+
+    @app.post("/jobs/{job_id}/apply")
+    def job_apply_preview(job_id: str) -> RedirectResponse:
+        return restart_job(job_id, "apply")
+
     @app.get("/jobs/{job_id}/events")
-    async def job_events(job_id: str) -> StreamingResponse:
+    async def job_events(request: Request, job_id: str, offset: int = Query(default=0, ge=0)) -> StreamingResponse:
         with open_db(app.state.db_path) as conn:
             job = get_job(conn, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
+        last_event_id = request.headers.get("last-event-id")
+        if last_event_id:
+            if not last_event_id.isdecimal():
+                raise HTTPException(status_code=400, detail="Invalid log offset")
+            offset = int(last_event_id)
 
         async def event_stream():
-            offset = 0
+            current_offset = offset
             while True:
-                text, offset = read_job_log(
-                    str(job["log_path"]), allowed_dir=app.state.logs_dir, offset=offset
+                text, current_offset = read_job_log(
+                    str(job["log_path"]), allowed_dir=app.state.logs_dir, offset=current_offset
                 )
                 if text:
-                    yield f"data: {json.dumps({'log': text})}\n\n"
+                    yield f"id: {current_offset}\ndata: {json.dumps({'log': text})}\n\n"
+                    continue
                 with open_db(app.state.db_path) as conn:
                     current = get_job(conn, job_id)
-                if current is None or current["status"] in {"succeeded", "failed", "cancelled", "stale"}:
+                if current is None or current["status"] in {"succeeded", "failed", "cancelled", "stale", "orphaned"}:
                     yield f"data: {json.dumps({'done': True})}\n\n"
                     break
                 await asyncio.sleep(0.5)
@@ -352,9 +402,10 @@ def create_app(
                     n = services.mark_review_status(conn, ids, status="resolved", resolution={"method": "bulk_resolve"})
                     msg = f"Marked {n} item(s) resolved"
                 elif action == "apply_genre" and ids and genre_value.strip():
-                    n = services.apply_tags_to_items(
-                        conn, ids, updates={"genre": genre_value.strip()}, music_root=app.state.music_root
-                    )
+                    with protected_mutation():
+                        n = services.apply_tags_to_items(
+                            conn, ids, updates={"genre": genre_value.strip()}, music_root=app.state.music_root
+                        )
                     msg = f"Applied genre '{genre_value.strip()}' to {n} file(s)"
                 elif action == "reopen" and ids:
                     n = services.mark_review_status(conn, ids, status="pending")
@@ -371,7 +422,7 @@ def create_app(
     ) -> RedirectResponse:
         ids = [int(tok) for tok in item_ids_csv.split(",") if tok.strip().isdigit()]
         try:
-            with open_db(app.state.db_path) as conn:
+            with protected_mutation(), open_db(app.state.db_path) as conn:
                 n = services.apply_tags_to_items(
                     conn, ids, updates={"genre": genre_value.strip()}, music_root=app.state.music_root
                 )
@@ -386,7 +437,7 @@ def create_app(
         return_url: Annotated[str, Form()] = "/review?reason=ambiguous_cover_art",
     ) -> RedirectResponse:
         try:
-            with open_db(app.state.db_path) as conn:
+            with protected_mutation(), open_db(app.state.db_path) as conn:
                 res = services.pick_cover_image(conn, item_id, selected_path, app.state.music_root)
             return _redirect_with_flash(
                 return_url,
@@ -402,7 +453,7 @@ def create_app(
         return_url: Annotated[str, Form()] = "/review?reason=rename_conflict",
     ) -> RedirectResponse:
         try:
-            with open_db(app.state.db_path) as conn:
+            with protected_mutation(), open_db(app.state.db_path) as conn:
                 res = services.resolve_rename_conflict(
                     conn,
                     item_id,
@@ -422,7 +473,7 @@ def create_app(
         return_url: Annotated[str, Form()] = "/review",
     ) -> RedirectResponse:
         try:
-            with open_db(app.state.db_path) as conn:
+            with protected_mutation(), open_db(app.state.db_path) as conn:
                 res = services.apply_folder_tag_value(
                     conn, item_id, field=field, value=value, music_root=app.state.music_root
                 )
@@ -451,7 +502,7 @@ def create_app(
             "title": title,
         }
         try:
-            with open_db(app.state.db_path) as conn:
+            with protected_mutation(), open_db(app.state.db_path) as conn:
                 n = services.apply_tags_to_items(
                     conn, [item_id], updates=updates, music_root=app.state.music_root
                 )
@@ -556,7 +607,7 @@ def create_app(
         quarantine_path: Annotated[str, Form()],
     ) -> RedirectResponse:
         try:
-            with open_db(app.state.db_path) as conn:
+            with protected_mutation(), open_db(app.state.db_path) as conn:
                 services.quarantine_duplicate_hash_copy(
                     conn,
                     audio_hash_val=audio_hash_val,
@@ -572,7 +623,7 @@ def create_app(
     @app.post("/quarantine/restore")
     def quarantine_restore(quarantined_path: Annotated[str, Form()]) -> RedirectResponse:
         try:
-            with open_db(app.state.db_path) as conn:
+            with protected_mutation(), open_db(app.state.db_path) as conn:
                 dest = services.restore_quarantined_file(conn, quarantined_path, app.state.music_root)
             return _redirect_with_flash("/quarantine?tab=files", msg=f"Restored {dest.name}")
         except Exception as exc:
@@ -581,7 +632,8 @@ def create_app(
     @app.post("/quarantine/empty")
     def quarantine_empty() -> RedirectResponse:
         try:
-            removed = services.empty_quarantine(app.state.music_root)
+            with protected_mutation():
+                removed = services.empty_quarantine(app.state.music_root)
             return _redirect_with_flash("/quarantine?tab=files", msg=f"Permanently removed {removed} quarantined file(s)")
         except Exception as exc:
             return _redirect_with_flash("/quarantine?tab=files", err=str(exc))
@@ -615,7 +667,7 @@ def create_app(
     @app.post("/undo/{run_id}")
     def undo_execute(run_id: str) -> RedirectResponse:
         try:
-            with open_db(app.state.db_path) as conn:
+            with protected_mutation(), open_db(app.state.db_path) as conn:
                 n = services.undo_run(
                     conn, run_id, app.state.music_root, features_path=app.state.features_path
                 )

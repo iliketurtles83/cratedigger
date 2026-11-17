@@ -203,7 +203,9 @@ def main() -> None:
     log.info("  Covers renamed / proposed: %d", renamed)
     log.info("  Ambiguous folders flagged: %d", len(review_items))
 
-    if review_items:
+    if review_items and dry_run:
+        log.info("[DRY-RUN] Would append %d review item(s) to review.json", len(review_items))
+    elif review_items:
         review_file = Path("review.json")
         try:
             existing = json.loads(review_file.read_text(encoding="utf-8")) if review_file.exists() else []

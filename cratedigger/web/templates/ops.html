@@ -18,10 +18,12 @@
         <div>
           <div class="card-title">{{ op.title }}</div>
           {% if op.help %}<div class="mono">{{ op.help }}</div>{% endif %}
+          {% if op.can_apply %}<div class="mono">Legacy operation: not undoable</div>{% endif %}
         </div>
         <span class="badge {% if op.risk == 'read_only' %}ok{% elif op.risk == 'network' %}warn{% else %}accent{% endif %}">{{ op.risk|replace('_', ' ') }}</span>
       </div>
-      <form method="post" action="/ops/{{ op.id }}/start" class="op-form">
+      <form method="post" action="/ops/{{ op.id }}/start" class="op-form"
+            onsubmit="return this.elements.mode.value !== 'apply' || confirm('Apply changes? This legacy operation cannot be undone through Cratedigger.');">
         <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         {% for field in op.fields %}
           <label class="op-field">
@@ -32,7 +34,7 @@
                 {% if field.help %}<small>{{ field.help }}</small>{% endif %}
               </span>
             {% elif field.kind == "choice" %}
-              <select name="{{ field.name }}" {% if field.name == "mode" %}required{% endif %}>
+              <select name="{{ field.name }}" {% if field.required %}required{% endif %}>
                 <option value="">Select…</option>
                 {% for choice in field.choices %}
                   <option value="{{ choice }}">{{ choice|replace('-', ' ')|title }}</option>
@@ -41,6 +43,8 @@
             {% else %}
               <input type="{{ 'number' if field.kind in ['integer', 'number'] else 'text' }}"
                      name="{{ field.name }}" value="{{ field.default if field.default is not none else '' }}"
+                     {% if field.kind == 'number' %}step="any"{% endif %}
+                     {% if field.required %}required{% endif %}
                      {% if field.minimum is not none %}min="{{ field.minimum }}"{% endif %}
                      {% if field.maximum is not none %}max="{{ field.maximum }}"{% endif %}
                      {% if field.help %}title="{{ field.help }}"{% endif %}>
@@ -50,7 +54,7 @@
         <label class="op-field">
           <span>Run mode</span>
           <select name="mode">
-            <option value="preview">Preview (safe)</option>
+            <option value="preview">Preview (no library writes)</option>
             {% if op.can_apply %}<option value="apply">Apply changes</option>{% endif %}
           </select>
         </label>

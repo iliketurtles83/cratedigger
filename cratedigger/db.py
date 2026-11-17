@@ -141,9 +141,24 @@ CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 
 CREATE TABLE IF NOT EXISTS job_locks (
-    lock_key         TEXT PRIMARY KEY,
-    job_id           TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE
+    lock_key         TEXT NOT NULL,
+    job_id           TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    PRIMARY KEY (lock_key, job_id)
 );
+
+CREATE TABLE IF NOT EXISTS ui_mutation_locks (
+    lock_key         TEXT PRIMARY KEY,
+    owner_token      TEXT NOT NULL,
+    owner_pid        INTEGER NOT NULL,
+    process_start    TEXT NOT NULL,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ui_resource_changes (
+    lock_key         TEXT NOT NULL,
+    changed_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ui_resource_changes ON ui_resource_changes(lock_key, changed_at);
 """
 
 
@@ -155,6 +170,25 @@ def utc_now_iso() -> str:
 def init_schema(conn: sqlite3.Connection) -> None:
     """Create tables and indexes idempotently."""
     conn.executescript(_SCHEMA_SQL)
+    lock_columns = {row[1]: row[5] for row in conn.execute("PRAGMA table_info(job_locks)")}
+    if lock_columns.get("job_id") != 2:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            lock_columns = {row[1]: row[5] for row in conn.execute("PRAGMA table_info(job_locks)")}
+            if lock_columns.get("job_id") != 2:
+                conn.execute(
+                    "CREATE TABLE job_locks_new ("
+                    "lock_key TEXT NOT NULL, "
+                    "job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, "
+                    "PRIMARY KEY (lock_key, job_id))"
+                )
+                conn.execute("INSERT INTO job_locks_new SELECT lock_key, job_id FROM job_locks")
+                conn.execute("DROP TABLE job_locks")
+                conn.execute("ALTER TABLE job_locks_new RENAME TO job_locks")
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+            raise
     conn.commit()
 
 

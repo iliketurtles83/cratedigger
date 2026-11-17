@@ -115,10 +115,27 @@ feature store; the index may be incomplete or stale between refreshes.
 The Operations page exposes an allowlisted subset of script commands. Jobs run
 as background subprocesses with persistent logs and resource locks; conflicting
 jobs are rejected with a busy-resource message rather than started concurrently.
-File/tag mutations require a successful preview with the same parameters before
-they can be applied. The UI also refuses feature-store jobs while it detects a
-legacy `06_analyze.py` process, so it will not overlap an extraction started
-outside the UI.
+Compatible library readers can run together, while writers and direct UI
+library mutations exclude conflicting jobs. Cancelling a job retains its locks
+until its worker and same-process-group children have stopped; an orphaned
+process group keeps its locks until it exits.
+
+Applying a legacy operation requires a successful matching preview. The job
+page can rerun or apply that specific preview. Its fingerprint includes the
+library root, parameters, operation/config/registry files, and reviewed input
+reports; report inputs are copied into job-local snapshots. UI jobs and direct
+UI mutations invalidate older previews, but changes made by independent scripts
+or other programs are not tracked: review a fresh preview immediately before
+applying. Legacy script operations are not undoable through the UI.
+
+On Linux, the UI checks for an already-running `06_analyze.py` and blocks
+feature-store jobs and library-writing actions while it is detected. This is a
+best-effort check, not a cross-process lock: do not start a standalone extraction
+or other mutating script while UI operations are running. Review status changes
+remain available. Scripts that cannot safely honor `ui --music-root` refuse to
+run when it differs from `config.MUSIC_ROOT`. Report outputs default to
+per-job files under `reports/`, and explicitly supplied report paths must also
+remain there.
 
 The tagging and movement scripts commonly support these flags; consult each
 script's `--help` for its exact options and defaults:

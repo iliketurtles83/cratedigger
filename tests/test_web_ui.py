@@ -36,6 +36,9 @@ def _make_image(path: Path, size: tuple[int, int], color: tuple[int, int, int]) 
 
 class WebUITests(unittest.TestCase):
     def setUp(self) -> None:
+        analysis_patcher = patch("cratedigger.jobs.external_analysis_running", return_value=False)
+        analysis_patcher.start()
+        self.addCleanup(analysis_patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.music_root = self.root / "music"
@@ -161,6 +164,94 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(stream.status_code, 200)
         self.assertIn('"done": true', stream.text)
         self.assertEqual(self.client.get("/jobs/not-found").status_code, 404)
+
+    def test_terminal_log_stream_drains_and_resumes_without_duplicate_chunks(self) -> None:
+        log_path = self.root / "logs" / "long.log"
+        log_path.parent.mkdir(parents=True)
+        content = "x" * 65536 + "last log chunk\n"
+        log_path.write_text(content, encoding="utf-8")
+        with open_db(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, operation_id, params_json, mode, fingerprint, argv_json, locks_json, status, "
+                "log_path, created_at, finished_at) VALUES "
+                "('long', 'tag', '{}', 'preview', 'f', '[]', '[]', 'succeeded', ?, '2026-01-01', '2026-01-01')",
+                (str(log_path),),
+            )
+            conn.commit()
+        detail = self.client.get("/jobs/long", params={"err": "Cannot cancel"})
+        self.assertIn("/jobs/long/events?offset=65536", detail.text)
+        self.assertIn("Cannot cancel", detail.text)
+        stream = self.client.get("/jobs/long/events")
+        events = [json.loads(line[6:]) for line in stream.text.splitlines() if line.startswith("data: ")]
+        self.assertEqual("".join(event.get("log", "") for event in events), content)
+        self.assertTrue(events[-1]["done"])
+        resumed = self.client.get("/jobs/long/events", headers={"last-event-id": "65536"})
+        self.assertIn("last log chunk", resumed.text)
+        self.assertNotIn("x" * 100, resumed.text)
+        self.assertEqual(self.client.get("/jobs/long/events", headers={"last-event-id": "-1"}).status_code, 400)
+
+    def test_apply_and_rerun_use_the_selected_job_parameters(self) -> None:
+        log_path = self.root / "logs" / "preview.log"
+        with open_db(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, operation_id, params_json, mode, fingerprint, argv_json, locks_json, status, "
+                "log_path, created_at, finished_at) VALUES "
+                "('preview', 'tag', ?, 'preview', 'f', '[]', '[]', 'succeeded', ?, '2026-01-01', '2026-01-01')",
+                (json.dumps({"folder": "A", "no_mb": True}), str(log_path)),
+            )
+            conn.commit()
+        page = self.client.get("/jobs/preview")
+        self.assertIn("Apply this preview", page.text)
+        self.assertIn("Run preview again", page.text)
+        with patch("cratedigger.web.app.start_job", return_value="next") as start:
+            applied = self.client.post("/jobs/preview/apply", follow_redirects=False)
+            self.assertIn("/jobs/next", applied.headers["location"])
+            self.assertEqual(start.call_args.kwargs["expected_preview_id"], "preview")
+            self.assertEqual(start.call_args.kwargs["raw_params"], {"folder": "A", "no_mb": True})
+            self.assertEqual(start.call_args.kwargs["mode"], "apply")
+            repeated = self.client.post("/jobs/preview/rerun", follow_redirects=False)
+            self.assertIn("/jobs/next", repeated.headers["location"])
+            self.assertIsNone(start.call_args.kwargs["expected_preview_id"])
+            self.assertEqual(start.call_args.kwargs["mode"], "preview")
+        with open_db(self.db_path) as conn:
+            conn.execute("UPDATE jobs SET status='failed' WHERE id='preview'")
+            conn.commit()
+        with patch("cratedigger.web.app.start_job") as start:
+            refused = self.client.post("/jobs/preview/apply", follow_redirects=False)
+            self.assertIn("Only+a+successful", refused.headers["location"])
+            start.assert_not_called()
+
+    def test_active_extraction_blocks_mutations_but_not_review_status_changes(self) -> None:
+        track = _make_mp3(self.music_root / "A" / "Artist" / "Album" / "01 - Track.mp3")
+        item = self._insert_review(
+            item_key="blocked", queue_type="actionable", reason="no_genre", path=track, payload={}
+        )
+        with patch("cratedigger.jobs.external_analysis_running", return_value=True):
+            mutation = self.client.post(
+                "/review/group-genre",
+                data={"item_ids_csv": str(item), "genre_value": "Rock"},
+                follow_redirects=False,
+            )
+            self.assertIn("Feature+extraction+is+running", mutation.headers["location"])
+            self.assertFalse((read_tags(track) or {}).get("genre"))
+            dismissed = self.client.post(
+                "/review/bulk",
+                data={"action": "dismiss", "item_ids": [str(item)]},
+                follow_redirects=False,
+            )
+            self.assertIn("Dismissed", dismissed.headers["location"])
+        with open_db(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT status FROM review_items WHERE id=?", (item,)).fetchone()[0], "dismissed")
+
+    def test_unavailable_or_uninspectable_library_blocks_direct_mutations(self) -> None:
+        self.app.state.music_root = self.root / "missing"
+        self.assertIn("unavailable or read-only", self.client.get("/review").text)
+        refused = self.client.post("/quarantine/empty", follow_redirects=False)
+        self.assertIn("unavailable+or+mounted+read-only", refused.headers["location"])
+        self.app.state.music_root = self.music_root
+        with patch("cratedigger.web.app.os.statvfs", side_effect=OSError("cannot inspect mount")):
+            refused = self.client.post("/quarantine/empty", follow_redirects=False)
+            self.assertIn("unavailable+or+mounted+read-only", refused.headers["location"])
 
     def test_local_host_and_cross_site_protection(self) -> None:
         client = TestClient(self.app, base_url="http://127.0.0.1:8765")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import re
 import sys
@@ -20,10 +21,10 @@ class ParamSpec:
     label: str
     kind: FieldKind = "text"
     flag: str | None = None
-    default: str | int | bool | None = None
+    default: str | int | float | bool | None = None
     help: str = ""
-    minimum: int | None = None
-    maximum: int | None = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
     choices: tuple[str, ...] = ()
 
 
@@ -74,8 +75,10 @@ def _number(
     return ParamSpec(name, label, "number", f"--{name.replace('_', '-')}", default, minimum=minimum, maximum=maximum)
 
 
-def _bool(name: str, label: str, flag: str | None = None, default: bool = False) -> ParamSpec:
-    return ParamSpec(name, label, "boolean", flag or f"--{name.replace('_', '-')}", default)
+def _bool(
+    name: str, label: str, flag: str | None = None, default: bool = False, help: str = ""
+) -> ParamSpec:
+    return ParamSpec(name, label, "boolean", flag or f"--{name.replace('_', '-')}", default, help=help)
 
 
 def _choice(name: str, label: str, choices: tuple[str, ...]) -> ParamSpec:
@@ -132,7 +135,7 @@ _OPS = (
                   help="Search for tracks similar to a seed query."),
     OperationSpec("audit-beets", "Audit Beets matches", "Metadata", "scripts/audit_beets_matches.py", "read_only",
                   (_text("bucket", "Letter bucket"), _FOLDER, _bool("online", "Query MusicBrainz"),
-                   _text("report", "Report path")), locks=("mb_network",), preview_flag=False,
+                   _text("report", "Report output path")), locks=("music_root:read", "mb_network"), preview_flag=False,
                   live_flags=(), help="Audit unmatched releases; online requests are rate limited."),
     OperationSpec("apply-beets", "Apply reviewed Beets evidence", "Metadata", "scripts/apply_beets_matches.py", "writes_tags",
                   (_REPORT, _text("release_id", "MusicBrainz release ID"), _text("result", "Result path")),
@@ -145,10 +148,11 @@ _OPS = (
                   apply_requires=("fix",), help="Audit tags against a backup and optionally repair."),
     OperationSpec("consolidate", "Consolidate small releases", "Layout", "scripts/consolidate_small_releases.py", "moves_files",
                   (_FOLDER, _bool("fix", "Apply consolidation"), _bool("all", "Include all candidates"),
-                   _int("threshold", "Track threshold", minimum=1, maximum=1000), _REPORT),
+                   _int("threshold", "Track threshold", minimum=1, maximum=1000), _text("report", "Report output path")),
                   locks=("music_root:write",), apply_requires=("fix",), help="Consolidate reviewed small releases."),
     OperationSpec("convert-lists", "Convert curated lists to playlists", "Playlists", "scripts/convert_lists.py", "moves_files",
-                  (_FOLDER, _bool("retag", "Retag tracks"), _bool("remove_duplicates", "Remove duplicates"),
+                  (_FOLDER, _bool("retag", "Retag tracks"),
+                   _bool("remove_duplicates", "Remove duplicates", help="Permanently deletes duplicates; this is not undoable."),
                    _bool("all", "Process all lists"), _LIBRARY_ROOT,
                    _text("playlists_dir", "Playlists directory"), _text("playlist_name", "Playlist name")),
                   locks=("music_root:write",), help="Create playlists from curated list folders."),
@@ -156,7 +160,8 @@ _OPS = (
                   (_FOLDER, _text("bucket", "Letter bucket"), _text("buckets", "Buckets (comma separated)"),
                    _bool("all_buckets", "Process all buckets"), _bool("singles", "Process singles"),
                    _bool("albums_only", "Albums only"), _int("max_size", "Maximum image size", minimum=1, maximum=10000),
-                   _bool("force_lossy_hash", "Allow lossy audio hash"), _LIBRARY_ROOT),
+                   _bool("force_lossy_hash", "Allow whole-file hash changes",
+                         help="Embedding art in Ogg, Opus, or WMA changes audio_hash and player identity."), _LIBRARY_ROOT),
                   locks=("music_root:write", "mb_network"), help="Fetch and normalize album artwork."),
     OperationSpec("genre-playlists", "Generate genre playlists", "Playlists", "scripts/generate_genre_playlists.py", "writes_library",
                   (_bool("fix", "Write playlists"), _int("min_tracks", "Minimum tracks", minimum=1, maximum=100000)),
@@ -171,21 +176,25 @@ _OPS = (
     OperationSpec("reconcile-artists", "Reconcile artist folders", "Artists", "scripts/reconcile_artists.py", "moves_files",
                   (_bool("fix", "Apply reviewed changes"), _int("min_tracks", "Minimum tracks", minimum=1, maximum=10000),
                    _bool("online_release_evidence", "Fetch release evidence"), _bool("online_recording_evidence", "Fetch recording evidence"),
-                   _text("collision_report", "Collision report"), _bool("resolve_collisions", "Resolve reviewed collisions")),
+                   _bool("collision_report", "Produce collision report"), _bool("resolve_collisions", "Resolve reviewed collisions")),
                   locks=("music_root:write", "mb_network"), preview_flag=False, live_flags=("--no-dry-run",),
                   apply_requires=("fix",), help="Reconcile folders with evidence and reviewable reports."),
     OperationSpec("reconcile-genres", "Reconcile genre taxonomy", "Genres", "scripts/reconcile_genres.py", "writes_tags",
-                  (_FOLDER, _bool("fix", "Apply reviewed genre changes"), _REPORT),
+                  (_FOLDER, _bool("fix", "Apply reviewed genre changes"), _text("report", "Report output path")),
                   locks=("music_root:write",), apply_requires=("fix",)),
     OperationSpec("repair-bpm", "Repair BPM tags", "Repair", "scripts/repair_bpm.py", "writes_tags",
-                  (_FOLDER, _bool("suspect_only", "Only inspect suspect BPM values"), _FEATURES,
-                   _text("apply_report", "Reviewed actions report"), _text("actions", "Action selection"),
+                  (_FOLDER, _LIBRARY_ROOT, _bool("suspect_only", "Only inspect suspect BPM values"), _FEATURES,
+                   _text("apply_report", "Reviewed actions report"),
+                   _text("actions", "Action selection", help="Space- or comma-separated BPM repair actions."),
                    _number("tolerance", "Tolerance", default=0.1, minimum=0, maximum=10),
                    _number("min_confidence", "Minimum confidence", default=1.2, minimum=0),
                    _bool("no_clear_beatless", "Keep beatless BPM values"), _bool("fill_missing", "Fill missing BPM"),
-                   _bool("include_whole_hash", "Include whole audio hash"), _int("workers", "Workers", minimum=1, maximum=32),
-                   _int("limit", "Maximum tracks", minimum=1, maximum=100000)),
-                  locks=("music_root:write", "features_store"), help="Audit or repair BPM tags."),
+                   _bool("include_whole_hash", "Include whole-file-hashed tracks",
+                         help="Retagging Ogg, Opus, or WMA changes audio_hash and player identity."),
+                   _int("workers", "Workers", minimum=1, maximum=32),
+                   _int("limit", "Maximum tracks", minimum=1, maximum=100000), _text("report", "Report output path")),
+                  locks=("music_root:write", "features_store"), live_flags=("--fix", "--no-dry-run"),
+                  help="Audit or repair BPM tags."),
     OperationSpec("repair-folder-parse", "Repair folder parsing", "Repair", "scripts/repair_folder_parse.py", "moves_files",
                   (_bool("tags", "Repair tags"), _bool("structure", "Repair structure"), _FOLDER),
                   locks=("music_root:write",), help="Repair folder-parse damage."),
@@ -233,6 +242,8 @@ def _parse_value(spec: ParamSpec, value: Any) -> str | int | float | bool | None
             result = float(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{spec.label} must be a number") from exc
+        if not math.isfinite(result):
+            raise ValueError(f"{spec.label} must be a finite number")
         if spec.minimum is not None and result < spec.minimum:
             raise ValueError(f"{spec.label} must be at least {spec.minimum}")
         if spec.maximum is not None and result > spec.maximum:
@@ -248,7 +259,9 @@ def _parse_value(spec: ParamSpec, value: Any) -> str | int | float | bool | None
     return str(value).strip()
 
 
-def normalize_params(op: OperationSpec, raw: dict[str, Any]) -> dict[str, str | int | float | bool]:
+def normalize_params(
+    op: OperationSpec, raw: dict[str, Any], *, mode: Literal["preview", "apply"] = "preview"
+) -> dict[str, str | int | float | bool]:
     known = {field.name for field in op.fields}
     unknown = set(raw) - known
     if unknown:
@@ -261,9 +274,10 @@ def normalize_params(op: OperationSpec, raw: dict[str, Any]) -> dict[str, str | 
     for required in op.required:
         if not result.get(required):
             raise ValueError(f"{required.replace('_', ' ').title()} is required")
-    for required in op.apply_requires:
-        if not result.get(required):
-            raise ValueError(f"{required.replace('_', ' ').title()} is required to apply this operation")
+    if mode == "apply":
+        for required in op.apply_requires:
+            if not result.get(required):
+                raise ValueError(f"{required.replace('_', ' ').title()} is required to apply this operation")
     return result
 
 
@@ -282,7 +296,7 @@ def build_argv(
         raise ValueError(f"Unknown operation: {op_id}") from exc
     if mode == "apply" and not op.can_apply:
         raise ValueError(f"{op.title} is read-only and has no apply mode")
-    params = normalize_params(op, raw)
+    params = normalize_params(op, raw, mode=mode)
     args = [sys.executable, str((repo_root / op.script).resolve())]
     args.extend(op.fixed_args)
     for field in op.fields:
@@ -292,6 +306,12 @@ def build_argv(
         if field.kind == "boolean":
             if value:
                 args.append(field.flag)
+        elif op.id == "repair-bpm" and field.name == "actions":
+            actions = [item for item in re.split(r"[\s,]+", str(value)) if item]
+            allowed = {"replace_corrupt", "clear_corrupt", "clear_beatless", "update_mismatch", "fill_missing"}
+            if not actions or any(action not in allowed for action in actions):
+                raise ValueError(f"Actions must be selected from: {', '.join(sorted(allowed))}")
+            args.extend([field.flag, *actions])
         else:
             args.extend([field.flag, str(value)])
     if op.id == "route":
@@ -323,6 +343,7 @@ def public_operation(op: OperationSpec) -> dict[str, Any]:
                 "minimum": f.minimum,
                 "maximum": f.maximum,
                 "choices": f.choices,
+                "required": f.name in op.required,
             }
             for f in op.fields
         ],

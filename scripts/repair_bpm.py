@@ -46,6 +46,15 @@ log: logging.Logger = logging.getLogger("repair_bpm")
 WHOLE_FILE_HASH_EXTENSIONS = {".ogg", ".opus", ".wma"}
 
 
+def _scoped_path(path: Path, scope_root: Path | None) -> Path:
+    if scope_root is None:
+        return path
+    resolved = path.resolve()
+    if not resolved.is_relative_to(scope_root.resolve()):
+        raise ValueError(f"Track is outside the selected library root: {resolved}")
+    return resolved
+
+
 def evaluate_bpm_repair(
     path: Path,
     *,
@@ -152,7 +161,9 @@ def evaluate_bpm_repair(
     }
 
 
-def _iter_target_files(root: Path, *, include_whole_hash: bool = False) -> tuple[list[Path], int]:
+def _iter_target_files(
+    root: Path, *, include_whole_hash: bool = False, scope_root: Path | None = None
+) -> tuple[list[Path], int]:
     """Yield eligible audio files under *root*, skipping SKIP_FOLDERS and whole-hash formats."""
     files: list[Path] = []
     skipped_whole_hash = 0
@@ -162,6 +173,7 @@ def _iter_target_files(root: Path, *, include_whole_hash: bool = False) -> tuple
         suffix = path.suffix.lower()
         if suffix not in config.AUDIO_EXTENSIONS:
             continue
+        path = _scoped_path(path, scope_root)
         ctx = get_folder_context(path)
         if ctx.skip or not ctx.needs_bpm:
             continue
@@ -176,6 +188,7 @@ def _iter_suspect_files_from_features(
     features_path: Path,
     *,
     include_whole_hash: bool = False,
+    scope_root: Path | None = None,
 ) -> tuple[list[Path], int]:
     """Select files from *features_path* whose existing bpm_tag looks corrupt or suspect."""
     df = pd.read_pickle(features_path)
@@ -198,7 +211,7 @@ def _iter_suspect_files_from_features(
     skipped_whole_hash = 0
     seen: set[str] = set()
     for p_str in suspects["path"]:
-        p = Path(str(p_str))
+        p = _scoped_path(Path(str(p_str)), scope_root)
         if str(p) in seen or not p.is_file():
             continue
         seen.add(str(p))
@@ -232,10 +245,15 @@ def apply_report(
     dry_run: bool = True,
     actions: Optional[set[str]] = None,
     include_whole_hash: bool = False,
+    scope_root: Path | None = None,
 ) -> dict:
     """Apply (or preview) BPM tag edits from a previously generated JSON report."""
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     changes = payload.get("changes", [])
+    if scope_root is not None:
+        for rec in changes:
+            if not actions or rec.get("action") in actions:
+                _scoped_path(Path(rec["path"]), scope_root)
     applied = 0
     skipped = 0
     for rec in changes:
@@ -243,7 +261,7 @@ def apply_report(
         if actions and action not in actions:
             skipped += 1
             continue
-        path = Path(rec["path"])
+        path = _scoped_path(Path(rec["path"]), scope_root)
         if not path.is_file():
             skipped += 1
             continue
@@ -280,17 +298,20 @@ def run_repair(
     suspect_only: bool = False,
     features_path: Path = config.FEATURES_STORE_PATH,
     workers: int = 1,
+    scope_root: Path | None = None,
 ) -> dict:
     """Audit and optionally repair BPM tags under *target_root* or suspect features."""
     if suspect_only:
         files, skipped_whole_hash = _iter_suspect_files_from_features(
-            features_path, include_whole_hash=include_whole_hash
+            features_path, include_whole_hash=include_whole_hash, scope_root=scope_root
         )
         source_label = f"suspect:{features_path}"
     else:
         assert target_root is not None
         files, skipped_whole_hash = _iter_target_files(
-            target_root, include_whole_hash=include_whole_hash
+            _scoped_path(target_root, scope_root),
+            include_whole_hash=include_whole_hash,
+            scope_root=scope_root,
         )
         source_label = str(target_root)
 
@@ -369,6 +390,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Audit and repair BPM tags using Essentia")
     parser.add_argument("--folder", type=str, default=None,
                         help="Folder relative to MUSIC_ROOT (or absolute path)")
+    parser.add_argument("--library-root", type=Path, default=None,
+                        help="Restrict all target tracks to this library root")
     parser.add_argument("--suspect-only", action="store_true", default=False,
                         help="Target only corrupt/suspect BPM-tagged tracks from features.pkl")
     parser.add_argument("--features", type=Path, default=config.FEATURES_STORE_PATH,
@@ -417,6 +440,7 @@ def main() -> None:
             dry_run=args.dry_run,
             actions=set(args.actions) if args.actions else None,
             include_whole_hash=args.include_whole_hash,
+            scope_root=args.library_root,
         )
         return
 
@@ -445,6 +469,7 @@ def main() -> None:
         suspect_only=args.suspect_only,
         features_path=args.features,
         workers=args.workers,
+        scope_root=args.library_root,
     )
 
 
