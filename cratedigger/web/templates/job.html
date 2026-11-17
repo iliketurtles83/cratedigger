@@ -14,6 +14,12 @@
   <strong>Parameters</strong>
   <pre class="mono" style="white-space: pre-wrap;">{{ job.params | tojson(indent=2) }}</pre>
   {% if job.exit_code is not none %}<div class="mono">Exit code: {{ job.exit_code }}</div>{% endif %}
+  {% if artifacts %}
+    <strong>Reports</strong>
+    <ul>{% for artifact in artifacts %}
+      <li>{{ artifact.label }}: <a href="{{ artifact.url }}">{{ artifact.path }}</a></li>
+    {% endfor %}</ul>
+  {% endif %}
 </div>
 {% if job.status in ["queued", "running", "cancelling"] %}
   <form method="post" action="/jobs/{{ job.id }}/cancel" onsubmit="return confirm('Stop this operation?');">

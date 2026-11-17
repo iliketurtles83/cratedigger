@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Reports — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Reports</h1>
+    <div class="mono">Browse generated evidence under the repository reports directory</div>
+  </div>
+  <a class="btn" href="/ops">Operations</a>
+</div>
+<form method="get" action="/reports" class="inline-form">
+  <label for="report-search">Find a report</label>
+  <input id="report-search" type="text" name="q" value="{{ q }}" placeholder="Filter by path">
+  <button type="submit">Search</button>
+</form>
+<p class="insights-note">{{ "{:,}".format(total) }} matching report files. Reports are point-in-time evidence; review a fresh preview before applying any changes.</p>
+{% if reports %}
+  <div class="card report-scroll">
+    <table>
+      <thead><tr><th>Report</th><th>Size</th><th>Modified (UTC)</th></tr></thead>
+      <tbody>{% for report in reports %}
+        <tr>
+          <td><a href="/reports/view?path={{ report.path | urlencode }}">{{ report.path }}</a></td>
+          <td>{{ "{:,}".format(report.size) }} bytes</td>
+          <td class="mono">{{ report.modified }}</td>
+        </tr>
+      {% endfor %}</tbody>
+    </table>
+  </div>
+  <div class="toolbar">
+    <span class="mono">Page {{ page }} of {{ pages }}</span>
+    <div>
+      {% if page > 1 %}<a class="btn" href="/reports?q={{ q | urlencode }}&amp;page={{ page - 1 }}">Previous</a>{% endif %}
+      {% if page < pages %}<a class="btn" href="/reports?q={{ q | urlencode }}&amp;page={{ page + 1 }}">Next</a>{% endif %}
+    </div>
+  </div>
+{% elif not err %}
+  <div class="card">No report files match. Run an audit or change the search filter.</div>
+{% endif %}
+{% endblock %}

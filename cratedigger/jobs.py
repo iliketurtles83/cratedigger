@@ -377,6 +377,7 @@ def start_job(
     expected_preview_id: str | None = None,
     features_path: Path | None = None,
     analytics_path: Path | None = None,
+    expected_report_digest: str | None = None,
 ) -> str:
     """Validate, persist, lock, and start a registry operation worker."""
     if mode not in {"preview", "apply"}:
@@ -402,6 +403,11 @@ def start_job(
     feature_state = source_file_state(Path(str(params["features"]))) if operation_id == "analytics-snapshot" else None
     report_key = _INPUT_REPORTS.get(operation_id)
     input_reports = {report_key: Path(str(params[report_key])).read_bytes()} if report_key and params.get(report_key) else {}
+    if expected_report_digest is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_report_digest) or len(input_reports) != 1:
+            raise ValueError("Invalid reviewed report fingerprint")
+        if hashlib.sha256(next(iter(input_reports.values()))).hexdigest() != expected_report_digest:
+            raise ValueError("The report changed after it was opened; review it again before previewing")
     fingerprint = _fingerprint(
         operation_id, params, music_root=music_root, repo_root=repo_root, input_reports=input_reports,
         analytics_path=analytics_path, feature_state=feature_state,
@@ -425,6 +431,8 @@ def start_job(
     }
     command_params.update({key: str(path) for key, path in snapshots.items()})
     argv = build_argv(operation_id, command_params, mode=mode, repo_root=repo_root)
+    if operation_id == "repair-bpm" and command_params.get("apply_report"):
+        argv.append("--verify-report-evidence")
     if operation_id == "analytics-snapshot":
         argv.extend((
             "--output", str((analytics_path or DEFAULT_SNAPSHOT_PATH).resolve()),

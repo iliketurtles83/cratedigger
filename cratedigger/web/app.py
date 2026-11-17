@@ -22,7 +22,7 @@ from cratedigger.jobs import (
     cancel_job, get_job, library_mutation_guard, list_jobs, read_job_log, reconcile_jobs, start_job,
 )
 from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
-from cratedigger.web import services
+from cratedigger.web import reports, services
 from cratedigger.web.insights import load_insights
 from cratedigger.web.security import LocalSecurityMiddleware
 
@@ -142,6 +142,163 @@ def create_app(
             },
             status_code=503 if error else 200,
         )
+
+    @app.get("/reports", response_class=HTMLResponse)
+    def reports_page(
+        request: Request,
+        q: str = Query(default="", max_length=200),
+        page: int = Query(default=1, ge=1),
+    ) -> HTMLResponse:
+        error = ""
+        try:
+            matches = reports.list_reports(app.state.repo_root / "reports", query=q.strip())
+        except (OSError, ValueError) as exc:
+            matches = []
+            error = str(exc)
+        total = len(matches)
+        pages = max(1, (total + reports.PAGE_SIZE - 1) // reports.PAGE_SIZE)
+        page = min(page, pages)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "reports.html",
+            {
+                "active_nav": "reports",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "reports": matches[(page - 1) * reports.PAGE_SIZE:page * reports.PAGE_SIZE],
+                "q": q, "total": total, "page": page, "pages": pages,
+                "err": error,
+            },
+            status_code=503 if error else 200,
+        )
+
+    @app.get("/reports/view", response_class=HTMLResponse)
+    def report_page(
+        request: Request,
+        path: str = Query(min_length=1, max_length=4096),
+        view: str = Query(default="table", pattern="^(table|raw)$"),
+        section: str = Query(default="", max_length=500),
+        sort: str = Query(default="", max_length=500),
+        order: str = Query(default="asc", pattern="^(asc|desc)$"),
+        page: int = Query(default=1, ge=1),
+        err: str = Query(default=""),
+    ) -> HTMLResponse:
+        root = app.state.repo_root / "reports"
+        data: dict[str, object] = {
+            "active_nav": "reports",
+            "badges": _nav_badges(app.state.db_path, app.state.music_root),
+            "report": None, "err": err,
+        }
+        status = 200
+        try:
+            source = reports.report_path(root, path)
+            relative = source.relative_to(root.resolve()).as_posix()
+            suffix = source.suffix.lower()
+            text = ""
+            digest = ""
+            summary: list[dict[str, object]] = []
+            sections: dict[str, list[dict[str, object]]] = {}
+            table = None
+            actions: dict[str, object] = {"beets": [], "bpm": False}
+            json_error = ""
+            if suffix in reports.TEXT_TYPES:
+                try:
+                    text, digest = reports.read_report(source)
+                except ValueError as exc:
+                    json_error = str(exc)
+                else:
+                    if suffix == ".json":
+                        try:
+                            payload = json.loads(text)
+                        except json.JSONDecodeError as exc:
+                            json_error = f"Invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+                        else:
+                            summary_data, sections = reports.report_sections(payload)
+                            summary = [
+                                {
+                                    "key": key,
+                                    "nested": isinstance(value, (dict, list)),
+                                    "value": json.dumps(value, ensure_ascii=False, indent=2)
+                                    if isinstance(value, (dict, list)) else value,
+                                }
+                                for key, value in summary_data.items()
+                            ]
+                            table = reports.report_table(
+                                sections, section=section, sort=sort, descending=order == "desc", page=page
+                            )
+                            actions = reports.evidence_actions(payload)
+
+            def url_for_report(**changes: object) -> str:
+                values: dict[str, object] = {
+                    "view": view, "section": section, "sort": sort, "order": order, "page": page,
+                }
+                values.update(changes)
+                return reports.report_url(relative, **values)
+
+            data.update({
+                "report": {"path": relative, "size": source.stat().st_size, "suffix": suffix},
+                "raw_text": text, "digest": digest, "summary": summary, "sections": sections,
+                "table": table, "actions": actions, "view": view,
+                "url_for_report": url_for_report, "report_error": json_error,
+                "image": suffix in reports.IMAGE_TYPES,
+                "text_supported": suffix in reports.TEXT_TYPES,
+            })
+        except (OSError, ValueError) as exc:
+            data["err"] = str(exc)
+            status = 400
+        return _TEMPLATES.TemplateResponse(request, "report.html", data, status_code=status)
+
+    @app.get("/reports/file")
+    def report_file(path: str = Query(min_length=1, max_length=4096), inline: bool = False) -> FileResponse:
+        try:
+            source = reports.report_path(app.state.repo_root / "reports", path)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        media_type = reports.IMAGE_TYPES.get(source.suffix.lower()) if inline else "application/octet-stream"
+        if media_type is None:
+            raise HTTPException(status_code=400, detail="Only supported raster images can be displayed inline")
+        return FileResponse(
+            source,
+            media_type=media_type,
+            filename=None if inline else source.name,
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
+        )
+
+    @app.post("/reports/preview")
+    async def report_preview(request: Request) -> RedirectResponse:
+        form = await request.form()
+        relative = str(form.get("path") or "")
+        try:
+            source = reports.report_path(app.state.repo_root / "reports", relative)
+            if source.suffix.lower() != ".json":
+                raise ValueError("Only supported JSON evidence reports can be previewed")
+            text, digest = reports.read_report(source)
+            expected = str(form.get("digest") or "")
+            if digest != expected:
+                raise ValueError("The report changed after it was opened; review it again before previewing")
+            payload = json.loads(text)
+            actions = reports.evidence_actions(payload)
+            operation_id = str(form.get("operation") or "")
+            if operation_id == "apply-beets":
+                release_id = str(form.get("release_id") or "")
+                if release_id not in {item["release_id"] for item in actions["beets"]}:
+                    raise ValueError("Select a matched release from this report")
+                params = {"report": str(source), "release_id": release_id}
+            elif operation_id == "repair-bpm" and actions["bpm"]:
+                params = {"apply_report": str(source)}
+            else:
+                raise ValueError("This report does not support the selected operation")
+            with open_db(app.state.db_path) as conn:
+                reconcile_jobs(conn)
+                job_id = start_job(
+                    conn,
+                    db_path=app.state.db_path, operation_id=operation_id, raw_params=params, mode="preview",
+                    repo_root=app.state.repo_root, logs_dir=app.state.logs_dir, music_root=app.state.music_root,
+                    features_path=app.state.features_path, analytics_path=app.state.analytics_path,
+                    expected_report_digest=expected,
+                )
+            return _redirect_with_flash(f"/jobs/{job_id}", msg="Reviewed report preview queued")
+        except (OSError, ValueError, RuntimeError) as exc:
+            return _redirect_with_flash(reports.report_url(relative), err=str(exc))
 
     @app.get("/library", response_class=HTMLResponse)
     def library_page(
@@ -268,6 +425,7 @@ def create_app(
                 "operation": OPERATIONS.get(str(job["operation_id"])),
                 "log_text": log_text,
                 "log_offset": log_offset,
+                "artifacts": reports.job_report_artifacts(job, app.state.repo_root / "reports"),
                 "msg": msg,
                 "err": err,
             },

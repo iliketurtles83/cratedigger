@@ -139,6 +139,9 @@ class TestRepairBpmScript(unittest.TestCase):
         by_name = {Path(c["path"]).name: c for c in summary["changes"]}
         self.assertEqual(by_name["01 - Artist - Corrupt.mp3"]["action"], "replace_corrupt")
         self.assertEqual(by_name["01 - Artist - Corrupt.mp3"]["new_bpm"], "88")
+        source = self.mp3_corrupt.stat()
+        self.assertEqual(by_name["01 - Artist - Corrupt.mp3"]["source_ino"], source.st_ino)
+        self.assertEqual(by_name["01 - Artist - Corrupt.mp3"]["source_mtime_ns"], source.st_mtime_ns)
         self.assertEqual(by_name["02 - Artist - Beatless.mp3"]["action"], "clear_beatless")
         self.assertEqual(by_name["02 - Artist - Beatless.mp3"]["new_bpm"], "")
         self.assertEqual(by_name["03 - Artist - Mismatch.mp3"]["action"], "update_mismatch")
@@ -157,6 +160,17 @@ class TestRepairBpmScript(unittest.TestCase):
 
         self.assertEqual(summary["counts"].get("clear_corrupt"), 1)
         mock_write.assert_called_once_with(self.mp3_corrupt, {"bpm": ""}, dry_run=False)
+
+    def test_track_changed_during_analysis_is_not_actionable(self):
+        def change_during_estimate(path, **_kwargs):
+            path.write_bytes(b"changed")
+            return TempoResult(bpm=88.5, confidence=3.1, method="essentia_rhythm2013_mf")
+
+        with patch.object(repair_bpm, "read_tags", return_value={"bpm": "12704", "genre": "Rock"}), \
+             patch.object(repair_bpm, "estimate_tempo", side_effect=change_during_estimate):
+            result = repair_bpm.evaluate_bpm_repair(self.mp3_corrupt)
+        self.assertEqual(result["action"], "skip_source_changed")
+        self.assertNotIn("source_mtime_ns", result)
 
 
 @unittest.skipUnless(

@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Report — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Report</h1>
+    {% if report %}<div class="mono report-path">{{ report.path }} · {{ "{:,}".format(report.size) }} bytes</div>{% endif %}
+  </div>
+  <div>
+    <a class="btn" href="/reports">All reports</a>
+    {% if report %}<a class="btn" href="/reports/file?path={{ report.path | urlencode }}">Download</a>{% endif %}
+  </div>
+</div>
+{% if report %}
+  {% if report_error %}<div class="flash error">{{ report_error }}</div>{% endif %}
+  {% if actions.bpm_needs_audit %}
+    <div class="flash warn">This BPM report is not a dry-run audit with source evidence. Run a fresh BPM audit before previewing it here.</div>
+  {% endif %}
+  {% if actions.beets or actions.bpm %}
+    <section class="card">
+      <h2 class="report-heading">Preview reviewed evidence</h2>
+      <p class="insights-note">These actions start a preview only. Inspect the resulting job before applying; legacy changes are not undoable. If the report changes after this page loads, reopen it before previewing.</p>
+      {% if actions.beets %}
+        <form method="post" action="/reports/preview" class="report-action">
+          <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+          <input type="hidden" name="path" value="{{ report.path }}">
+          <input type="hidden" name="digest" value="{{ digest }}">
+          <input type="hidden" name="operation" value="apply-beets">
+          <label for="release-id">Matched release</label>
+          <select id="release-id" name="release_id" required>
+            <option value="">Select a release…</option>
+            {% for release in actions.beets %}
+              <option value="{{ release.release_id }}">{{ release.release_id }} · {{ release.units|length }} unit(s) · {{ release.tracks }} tracks</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="primary">Preview Beets match</button>
+        </form>
+        <p class="mono">A selected release includes every matched unit with that release ID, not just one folder.</p>
+        <details><summary>Matched units by release</summary>
+          {% for release in actions.beets %}
+            <p><strong>{{ release.release_id }}</strong>: {{ release.units | join(", ") }}</p>
+          {% endfor %}
+        </details>
+      {% endif %}
+      {% if actions.bpm %}
+        <form method="post" action="/reports/preview" class="report-action">
+          <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+          <input type="hidden" name="path" value="{{ report.path }}">
+          <input type="hidden" name="digest" value="{{ digest }}">
+          <input type="hidden" name="operation" value="repair-bpm">
+          <button type="submit" class="primary">Preview BPM repairs</button>
+          <span class="mono">Whole-file-hashed formats are excluded by default.</span>
+        </form>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  {% if image %}
+    <div class="card"><img class="report-image" alt="Report image: {{ report.path }}" src="/reports/file?path={{ report.path | urlencode }}&amp;inline=true"></div>
+  {% elif text_supported %}
+    {% if report.suffix == ".json" and not report_error %}
+      <div class="pills">
+        <a class="pill {% if view == 'table' %}active{% endif %}" href="{{ url_for_report(view='table') }}">Structured</a>
+        <a class="pill {% if view == 'raw' %}active{% endif %}" href="{{ url_for_report(view='raw') }}">Raw JSON</a>
+      </div>
+    {% endif %}
+    {% if view == "raw" or report.suffix != ".json" or report_error %}
+      {% if raw_text %}<pre class="card report-raw">{{ raw_text }}</pre>{% endif %}
+    {% else %}
+      {% if summary %}
+        <section class="card">
+          <h2 class="report-heading">Summary</h2>
+          <div class="report-scroll"><table><tbody>{% for item in summary %}
+            <tr><th>{{ item.key }}</th><td>{% if item.nested %}<pre class="report-json">{{ item.value }}</pre>{% else %}{{ item.value if item.value is not none else "—" }}{% endif %}</td></tr>
+          {% endfor %}</tbody></table></div>
+        </section>
+      {% endif %}
+      {% if table %}
+        <section class="card">
+          <div class="toolbar">
+            <h2 class="report-heading">Records · {{ table.total }}</h2>
+            {% if sections|length > 1 %}
+              <form method="get" action="/reports/view" class="inline-form">
+                <input type="hidden" name="path" value="{{ report.path }}">
+                <label for="report-section">Section</label>
+                <select id="report-section" name="section">{% for section in sections %}
+                  <option value="{{ section }}" {% if section == table.section %}selected{% endif %}>{{ section }}</option>
+                {% endfor %}</select>
+                <button type="submit">Show section</button>
+              </form>
+            {% else %}<span class="mono">{{ table.section }}</span>{% endif %}
+          </div>
+          {% if table.rows %}
+            <div class="report-scroll"><table class="report-table">
+              <thead><tr>{% for column in table.columns %}
+                <th><a href="{{ url_for_report(section=table.section, sort=column, order='desc' if table.sort == column and not table.descending else 'asc', page=1) }}">{{ column }}{% if table.sort == column %} {{ "↓" if table.descending else "↑" }}{% endif %}</a></th>
+              {% endfor %}</tr></thead>
+              <tbody>{% for row in table.rows %}<tr>{% for cell in row %}
+                <td>{% if cell.nested %}<details><summary>View JSON</summary><pre class="report-json">{{ cell.value }}</pre></details>{% else %}{{ cell.value if cell.value is not none else "—" }}{% endif %}</td>
+              {% endfor %}</tr>{% endfor %}</tbody>
+            </table></div>
+            <div class="toolbar">
+              <span class="mono">Page {{ table.page }} of {{ table.pages }}</span>
+              <div>
+                {% if table.page > 1 %}<a class="btn" href="{{ url_for_report(section=table.section, page=table.page - 1) }}">Previous</a>{% endif %}
+                {% if table.page < table.pages %}<a class="btn" href="{{ url_for_report(section=table.section, page=table.page + 1) }}">Next</a>{% endif %}
+              </div>
+            </div>
+          {% else %}<p>No records in this section.</p>{% endif %}
+        </section>
+      {% elif not summary and raw_text %}
+        <pre class="card report-raw">{{ raw_text }}</pre>
+      {% endif %}
+    {% endif %}
+  {% else %}
+    <div class="card">This file type cannot be previewed safely. Download it to inspect it externally.</div>
+  {% endif %}
+{% endif %}
+{% endblock %}

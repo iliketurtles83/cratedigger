@@ -44,6 +44,8 @@ from lib.tempo import estimate_tempo, sanitize_bpm_tag
 log: logging.Logger = logging.getLogger("repair_bpm")
 
 WHOLE_FILE_HASH_EXTENSIONS = {".ogg", ".opus", ".wma"}
+REPAIR_ACTIONS = {"replace_corrupt", "clear_corrupt", "clear_beatless", "update_mismatch", "fill_missing"}
+_EVIDENCE_FIELDS = ("source_dev", "source_ino", "source_size", "source_mtime_ns")
 
 
 def _scoped_path(path: Path, scope_root: Path | None) -> Path:
@@ -55,7 +57,7 @@ def _scoped_path(path: Path, scope_root: Path | None) -> Path:
     return resolved
 
 
-def evaluate_bpm_repair(
+def _evaluate_bpm_repair(
     path: Path,
     *,
     tolerance: float = 0.10,
@@ -161,6 +163,38 @@ def evaluate_bpm_repair(
     }
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+def evaluate_bpm_repair(
+    path: Path,
+    *,
+    tolerance: float = 0.10,
+    min_repair_confidence: float = 1.2,
+    clear_beatless: bool = True,
+    fill_missing: bool = False,
+) -> dict:
+    """Inspect a track and record source identity for actionable decisions."""
+    try:
+        before = _file_identity(path)
+        decision = _evaluate_bpm_repair(
+            path, tolerance=tolerance, min_repair_confidence=min_repair_confidence,
+            clear_beatless=clear_beatless, fill_missing=fill_missing,
+        )
+        after = _file_identity(path)
+    except FileNotFoundError:
+        log.warning("Track disappeared during BPM audit: %s", path)
+        return {"path": str(path), "action": "skip_unreadable"}
+    if before != after:
+        log.warning("Track changed during BPM audit: %s", path)
+        return {"path": str(path), "action": "skip_source_changed"}
+    if decision.get("action") in REPAIR_ACTIONS:
+        decision.update(dict(zip(_EVIDENCE_FIELDS, before)))
+    return decision
+
+
 def _iter_target_files(
     root: Path, *, include_whole_hash: bool = False, scope_root: Path | None = None
 ) -> tuple[list[Path], int]:
@@ -246,10 +280,28 @@ def apply_report(
     actions: Optional[set[str]] = None,
     include_whole_hash: bool = False,
     scope_root: Path | None = None,
+    verify_evidence: bool = False,
 ) -> dict:
     """Apply (or preview) BPM tag edits from a previously generated JSON report."""
     payload = json.loads(report_path.read_text(encoding="utf-8"))
+    if verify_evidence and (not isinstance(payload, dict) or not isinstance(payload.get("changes"), list)):
+        raise ValueError("BPM report has no valid changes list; run a fresh audit")
     changes = payload.get("changes", [])
+    if verify_evidence:
+        if scope_root is None:
+            raise ValueError("Evidence-verified BPM repair requires a library root")
+        seen: set[Path] = set()
+        for rec in changes:
+            if not isinstance(rec, dict):
+                raise ValueError("Invalid BPM report entry; run a fresh audit")
+            if not isinstance(rec.get("action"), str):
+                raise ValueError("Invalid BPM report action; run a fresh audit")
+            if actions and rec.get("action") not in actions:
+                continue
+            path = _verify_report_evidence(rec, scope_root, include_whole_hash=include_whole_hash)
+            if path in seen:
+                raise ValueError(f"BPM report contains a duplicate path: {path}")
+            seen.add(path)
     if scope_root is not None:
         for rec in changes:
             if not actions or rec.get("action") in actions:
@@ -262,6 +314,8 @@ def apply_report(
             skipped += 1
             continue
         path = _scoped_path(Path(rec["path"]), scope_root)
+        if verify_evidence:
+            path = _verify_report_evidence(rec, scope_root, include_whole_hash=include_whole_hash)
         if not path.is_file():
             skipped += 1
             continue
@@ -282,6 +336,42 @@ def apply_report(
         applied += 1
     log.info("Report apply complete (dry_run=%s): applied=%d, skipped=%d", dry_run, applied, skipped)
     return {"dry_run": dry_run, "applied": applied, "skipped": skipped}
+
+
+def _verify_report_evidence(
+    rec: dict, scope_root: Path, *, include_whole_hash: bool
+) -> Path:
+    required = (*_EVIDENCE_FIELDS, "path", "action", "old_bpm", "new_bpm", "genre")
+    if any(field not in rec for field in required):
+        raise ValueError("BPM report lacks source evidence; run a fresh audit")
+    if (
+        not isinstance(rec["action"], str)
+        or rec["action"] not in REPAIR_ACTIONS
+        or not isinstance(rec["path"], str)
+        or not rec["path"]
+    ):
+        raise ValueError("Invalid BPM report entry; run a fresh audit")
+    if any(type(rec[field]) is not int or rec[field] < 0 for field in _EVIDENCE_FIELDS):
+        raise ValueError("BPM report has invalid source evidence; run a fresh audit")
+    if not isinstance(rec["new_bpm"], str) or not (
+        rec["old_bpm"] is None or isinstance(rec["old_bpm"], str)
+    ):
+        raise ValueError("BPM report has invalid tag evidence; run a fresh audit")
+    path = _scoped_path(Path(rec["path"]), scope_root)
+    if not include_whole_hash and path.suffix.lower() in WHOLE_FILE_HASH_EXTENSIONS:
+        return path
+    try:
+        current = _file_identity(path)
+    except FileNotFoundError as exc:
+        raise ValueError(f"Track from BPM report no longer exists: {path}") from exc
+    if current != tuple(rec[field] for field in _EVIDENCE_FIELDS):
+        raise ValueError(f"Track changed since the BPM audit: {path}")
+    tags = read_tags(path)
+    if tags is None:
+        raise ValueError(f"Cannot read tags from BPM report track: {path}")
+    if tags.get("bpm") != rec["old_bpm"] or tags.get("genre") != rec["genre"]:
+        raise ValueError(f"Track tags changed since the BPM audit: {path}")
+    return path
 
 
 def run_repair(
@@ -325,14 +415,6 @@ def run_repair(
 
     counts: dict[str, int] = {}
     changes: list[dict] = []
-    repair_actions = {
-        "replace_corrupt",
-        "clear_corrupt",
-        "clear_beatless",
-        "update_mismatch",
-        "fill_missing",
-    }
-
     if workers > 1 and len(files) > 1:
         tasks = [
             (p, tolerance, min_repair_confidence, clear_beatless, fill_missing)
@@ -357,7 +439,7 @@ def run_repair(
         action = rec["action"]
         counts[action] = counts.get(action, 0) + 1
 
-        if action in repair_actions:
+        if action in REPAIR_ACTIONS:
             changes.append(rec)
             prefix = "[DRY-RUN] " if dry_run else ""
             log.info(
@@ -398,6 +480,8 @@ def main() -> None:
                         help="Feature store pickle for --suspect-only (default: config.FEATURES_STORE_PATH)")
     parser.add_argument("--apply-report", type=Path, default=None,
                         help="Apply changes from a previously saved JSON report")
+    parser.add_argument("--verify-report-evidence", action="store_true",
+                        help="Require unchanged source and tag evidence for report-based repairs")
     parser.add_argument("--actions", nargs="*", default=None,
                         help="Optional action filter when using --apply-report")
     parser.add_argument("--dry-run", action="store_true", default=True,
@@ -441,6 +525,7 @@ def main() -> None:
             actions=set(args.actions) if args.actions else None,
             include_whole_hash=args.include_whole_hash,
             scope_root=args.library_root,
+            verify_evidence=args.verify_report_evidence,
         )
         return
 

@@ -139,6 +139,17 @@ run when it differs from `config.MUSIC_ROOT`. Report outputs default to
 per-job files under `reports/`, and explicitly supplied report paths must also
 remain there.
 
+The Reports page browses files under `reports/`, with searchable listings,
+sortable/paginated JSON tables, a raw view, safe image previews, and downloads.
+Only text up to 5 MiB is rendered in the browser; symbolic links are omitted
+from the listing. Job pages link to available report inputs and outputs. Online
+Beets-match reports and evidence-bearing BPM dry-run reports can start a
+reviewed-report **preview**; applying still requires the matching successful
+job preview. The UI snapshots the reviewed report bytes and refuses changed
+reports. BPM reports also require unchanged source identity, BPM, and genre
+evidence; rerun old audits that lack those fields. This is a conservative stat
+and tag check, not a cryptographic proof against all external changes.
+
 The Insights page reads only a separate SQLite analytics snapshot, never the
 live feature pickle during a page request. After extraction finishes, preview
 **Build insights snapshot** in Operations, then apply that successful preview.
