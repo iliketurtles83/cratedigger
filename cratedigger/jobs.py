@@ -20,12 +20,17 @@ import uuid
 import config
 from cratedigger.analytics import DEFAULT_SNAPSHOT_PATH, source_file_state
 from cratedigger.db import open_db, utc_now_iso
+from cratedigger.feature_backfill import BackfillKind, reviewed_backfill_plan
 from cratedigger.feature_export import export_output_path, output_file_state
 from cratedigger.ops.registry import OPERATIONS, build_argv, normalize_params, validate_scope_value
 from cratedigger.server_sync import reviewed_sync_plan, sync_scope
 
 _ACTIVE = ("queued", "running", "cancelling", "orphaned")
 _INPUT_REPORTS = {"apply-beets": "report", "repair-bpm": "apply_report"}
+_BACKFILLS: dict[str, BackfillKind] = {
+    "recommend-backfill-hashes": "hashes",
+    "recommend-backfill-embeddings": "embeddings",
+}
 
 
 def _process_start(pid: int) -> str | None:
@@ -112,11 +117,9 @@ def _process_matches(pid: int, job_id: str) -> bool:
     return "cratedigger.jobs_worker" in command and job_id in command
 
 
-def external_analysis_running(repo_root: Path, *, proc_root: Path = Path("/proc")) -> bool:
-    """Detect a legacy feature-extraction process not registered as a UI job."""
+def _same_user_commands(proc_root: Path) -> Iterator[list[bytes]]:
     if not proc_root.is_dir():
-        raise RuntimeError("Cannot check for an active feature extraction: /proc is unavailable")
-    script_name = (repo_root / "06_analyze.py").name
+        raise RuntimeError("Cannot check for active feature-store processes: /proc is unavailable")
     for entry in proc_root.iterdir():
         if not entry.name.isdecimal():
             continue
@@ -126,9 +129,28 @@ def external_analysis_running(repo_root: Path, *, proc_root: Path = Path("/proc"
             args = (entry / "cmdline").read_bytes().split(b"\0")
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
+        yield args
+
+
+def external_analysis_running(repo_root: Path, *, proc_root: Path = Path("/proc")) -> bool:
+    """Detect a legacy feature-extraction process not registered as a UI job."""
+    script_name = (repo_root / "06_analyze.py").name
+    for args in _same_user_commands(proc_root):
         for arg in args:
             if arg and Path(os.fsdecode(arg)).name == script_name:
                 return True
+    return False
+
+
+def external_backfill_running(repo_root: Path, *, proc_root: Path = Path("/proc")) -> bool:
+    """Detect standalone legacy recommender backfills, not read-only queries."""
+    script_name = (repo_root / "07_recommend.py").name
+    for args in _same_user_commands(proc_root):
+        if (
+            any(arg and Path(os.fsdecode(arg)).name == script_name for arg in args)
+            and any(arg in {b"--backfill-hashes", b"--backfill-embeddings"} for arg in args)
+        ):
+            return True
     return False
 
 
@@ -137,6 +159,8 @@ def library_mutation_guard(db_path: Path, repo_root: Path) -> Iterator[None]:
     """Serialize direct UI writes with jobs and avoid an external extraction."""
     if external_analysis_running(repo_root):
         raise RuntimeError("Feature extraction is running; wait for it before modifying the library")
+    if external_backfill_running(repo_root):
+        raise RuntimeError("A standalone feature backfill is running; wait for it before modifying the library")
     start = _process_start(os.getpid())
     if start is None:
         raise RuntimeError("Cannot identify the web process for a library mutation lock")
@@ -237,6 +261,18 @@ def _fingerprint(
             repo_root / "scripts" / "build_analytics.py",
             repo_root / "lib" / "recommender.py",
             repo_root / "lib" / "descriptors.py",
+            repo_root / "lib" / "embeddings.py",
+        ))
+    if operation_id in _BACKFILLS:
+        sources.extend((
+            repo_root / "07_recommend.py",
+            repo_root / "cratedigger" / "feature_backfill.py",
+            repo_root / "cratedigger" / "analytics.py",
+            repo_root / "cratedigger" / "job_logs.py",
+            repo_root / "scripts" / "build_analytics.py",
+            repo_root / "lib" / "recommend_backfill.py",
+            repo_root / "lib" / "audiohash.py",
+            repo_root / "lib" / "decode.py",
             repo_root / "lib" / "embeddings.py",
         ))
     if operation_id == "server-sync":
@@ -350,7 +386,7 @@ def _prepare_params(
         params[key] = str(path)
     if params.get("report") and params.get("result") and params["report"] == params["result"]:
         raise ValueError("The result report must not overwrite its input report")
-    if operation_id in {"analytics-snapshot", "recommend-export"}:
+    if operation_id in {"analytics-snapshot", "recommend-export", *_BACKFILLS}:
         source = Path(str(params.get("features") or config.FEATURES_STORE_PATH))
         if not source.is_absolute():
             source = repo_root / source
@@ -426,20 +462,25 @@ def start_job(
     if mode == "apply" and not operation.can_apply:
         raise ValueError("This operation is read-only")
     inputs = dict(raw_params)
-    if operation_id in {"analytics-snapshot", "recommend-export"} and not inputs.get("features") and features_path is not None:
+    if operation_id in {"analytics-snapshot", "recommend-export", *_BACKFILLS} and not inputs.get("features") and features_path is not None:
         inputs["features"] = str(features_path)
     params = dict(normalize_params(operation, inputs, mode=mode))
     locks = list(operation.locks)
-    if ({"music_root:write", "features_store"} & set(locks)) and external_analysis_running(repo_root):
-        raise RuntimeError(
-            "A separate 06_analyze.py process is already running; wait for it before starting this operation"
-        )
+    if {"music_root:write", "features_store"} & set(locks):
+        if external_analysis_running(repo_root):
+            raise RuntimeError(
+                "A separate 06_analyze.py process is already running; wait for it before starting this operation"
+            )
+        if external_backfill_running(repo_root):
+            raise RuntimeError(
+                "A separate 07_recommend.py backfill is already running; wait for it before starting this operation"
+            )
     if _file_fingerprint(Path(config.__file__)) != _LOADED_CONFIG_FINGERPRINT:
         raise RuntimeError("config.py changed after the UI started; restart the UI before running operations")
     params = _prepare_params(operation_id, params, music_root=music_root, repo_root=repo_root)
     feature_state = (
         source_file_state(Path(str(params["features"])))
-        if operation_id in {"analytics-snapshot", "recommend-export"} else None
+        if operation_id in {"analytics-snapshot", "recommend-export", *_BACKFILLS} else None
     )
     export_state = output_file_state(Path(str(params["output"]))) if operation_id == "recommend-export" else None
     sync_source_state = source_file_state(Path(str(params["source"]))) if operation_id == "server-sync" else None
@@ -490,6 +531,8 @@ def start_job(
             "--expected-source-state", json.dumps(feature_state),
             "--expected-output-state", json.dumps(export_state),
         ))
+    if operation_id in _BACKFILLS:
+        argv.extend(("--expected-source-state", json.dumps(feature_state)))
     if operation_id == "server-sync":
         argv.extend((
             "--expected-source-state", json.dumps(sync_source_state),
@@ -531,6 +574,15 @@ def start_job(
             if operation_id == "server-sync":
                 plan = reviewed_sync_plan(
                     Path(preview["log_path"]), logs_dir, Path(str(params["source"])), str(params["dest"])
+                )
+                argv.extend(("--expected-plan", plan))
+            if operation_id in _BACKFILLS:
+                max_embeddings = params.get("max_embeddings")
+                if max_embeddings is not None and type(max_embeddings) is not int:
+                    raise ValueError("Maximum embeddings must be an integer")
+                plan = reviewed_backfill_plan(
+                    Path(preview["log_path"]), logs_dir, Path(str(params["features"])),
+                    _BACKFILLS[operation_id], max_embeddings,
                 )
                 argv.extend(("--expected-plan", plan))
         logs_dir.mkdir(parents=True, exist_ok=True)

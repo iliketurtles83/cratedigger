@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from lib import embeddings
+from lib.recommend_backfill import embedding_candidates
 from lib.embeddings import (
     EMBEDDING_FAILED,
     EMBEDDING_OK,
@@ -95,6 +96,22 @@ class TestRecommendBackfills(unittest.TestCase):
         saved = pd.read_pickle(self.store)
         self.assertEqual(saved.loc[0, "audio_hash"], "h1")
         self.assertEqual(saved.loc[0, "schema_version"], 10)
+
+    def test_strict_backfills_raise_on_unexpected_failures(self):
+        pd.DataFrame([{"path": self.paths["legacy"], "audio_hash": None}]).to_pickle(self.store)
+        original = self.store.read_bytes()
+        with patch.object(recommend, "audio_hash", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(RuntimeError, "Hash backfill failed"):
+                recommend.backfill_audio_hashes(self.store, strict=True)
+        self.assertEqual(self.store.read_bytes(), original)
+        with patch.object(recommend, "extract_embeddings", return_value=EmbeddingResult(EMBEDDING_FAILED, error="boom")):
+            with self.assertRaisesRegex(RuntimeError, "Embedding backfill failed"):
+                recommend.backfill_embeddings(self._frame(), self.store, strict=True)
+
+    def test_candidate_paths_can_be_resolved_against_the_worker_directory(self):
+        frame = pd.DataFrame([{"path": "legacy.flac", "error": None}])
+        available, missing = embedding_candidates(frame, base_dir=self.root)
+        self.assertEqual((available, missing), ([0], []))
 
 
 if __name__ == "__main__":

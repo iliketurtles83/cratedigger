@@ -139,6 +139,32 @@ run when it differs from `config.MUSIC_ROOT`. Report outputs default to
 per-job files under `reports/`, and explicitly supplied report paths must also
 remain there.
 
+After extraction, Operations also offers **Backfill missing audio hashes** and
+**Backfill missing or stale embeddings**. Preview lists candidate counts and a
+sample of paths without computing features or changing the feature store.
+Apply requires the matching preview, runs the existing recommender backfill on
+a temporary copy, and atomically replaces the store only after successful
+validation. Missing paths are reported and skipped. Other hash or retryable
+embedding failures prevent publication; embeddings may download model files.
+The optional maximum limits an embedding run, and these changes are not
+undoable. Rebuild insights and the player export after a successful backfill.
+
+The UI also checks for standalone `07_recommend.py` backfills before
+feature-store jobs and library writes. These Linux process checks and the
+preview's file identity, size, and timestamp checks are best effort, not locks
+or content hashes; do not start independent extraction, backfills, or library
+mutations concurrently. Cancellation before publication leaves the original
+store intact; a late cancellation can occur after replacement. Forced
+termination may leave a temporary `.feature-backfill-*` directory.
+Standalone analytics/export commands still check only for extraction.
+
+For a guarded standalone hash backfill, run
+`python scripts/run_recommend_backfill.py --hashes --dry-run`, then use the
+preview's `sha256` with
+`python scripts/run_recommend_backfill.py --hashes --no-dry-run --expected-plan SHA256`.
+For embeddings, substitute `--embeddings` and optionally add
+`--max-embeddings N` to both commands.
+
 The Reports page browses files under `reports/`, with searchable listings,
 sortable/paginated JSON tables, a raw view, safe image previews, and downloads.
 Only text up to 5 MiB is rendered in the browser; symbolic links are omitted

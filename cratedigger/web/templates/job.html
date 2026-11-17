@@ -18,6 +18,12 @@
       The mirror deletes destination paths absent from the complete source. Review deletions before applying;
       interruption may leave a partially updated destination.
     {% endif %}
+    {% if job.operation_id in ['recommend-backfill-hashes', 'recommend-backfill-embeddings'] %}
+      <div class="flash">
+        Preview lists candidates without computing features. Apply stages and atomically replaces the feature store;
+        failures before publication leave the original intact. Existing exports and insights may need rebuilding.
+      </div>
+    {% endif %}
   </div>
 {% endif %}
 <div class="card">
@@ -50,7 +56,7 @@
       <button type="submit">Run preview again</button>
     </form>
     {% if job.mode == "preview" and job.status == "succeeded" and operation.can_apply %}
-      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('{% if operation.id == 'server-sync' %}Mirror this destination? Files missing from the complete source will be deleted before transfer. This cannot be undone.{% elif operation.legacy %}Apply this preview? This legacy operation cannot be undone through Cratedigger.{% elif operation.id == 'analytics-snapshot' %}Publish this analytics snapshot?{% else %}Publish the player export and replace the existing output? This cannot be undone.{% endif %}');">
+      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('{% if operation.id == 'server-sync' %}Mirror this destination? Files missing from the complete source will be deleted before transfer. This cannot be undone.{% elif operation.id in ['recommend-backfill-hashes', 'recommend-backfill-embeddings'] %}Backfill and replace the feature store? This cannot be undone.{% elif operation.legacy %}Apply this preview? This legacy operation cannot be undone through Cratedigger.{% elif operation.id == 'analytics-snapshot' %}Publish this analytics snapshot?{% else %}Publish the player export and replace the existing output? This cannot be undone.{% endif %}');">
         <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <button class="danger" type="submit">Apply this preview</button>
       </form>

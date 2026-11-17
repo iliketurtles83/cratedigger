@@ -38,7 +38,6 @@ from lib.embeddings import (
     EMBEDDING_OK,
     RETRYABLE_EMBEDDING_STATUSES,
     embedding_fields,
-    embedding_needs_refresh,
     extract_embeddings,
     get_style_classes,
 )
@@ -51,6 +50,7 @@ from lib.recommender import (
     VectorBaker,
     export_features,
 )
+from lib.recommend_backfill import embedding_candidates, missing_hash_positions
 
 log = setup_logger("07_recommend")
 
@@ -71,7 +71,7 @@ def _save_store_atomic(df: pd.DataFrame, store_path: Path) -> None:
     tmp_path.replace(store_path)
 
 
-def backfill_audio_hashes(store_path: Path) -> pd.DataFrame:
+def backfill_audio_hashes(store_path: Path, *, strict: bool = False) -> pd.DataFrame:
     """Ensure all rows in features.pkl have audio_hash populated.
 
     Extraction versions are left untouched: a hash is identity, not a feature recomputation.
@@ -82,14 +82,16 @@ def backfill_audio_hashes(store_path: Path) -> pd.DataFrame:
     updated = 0
     hashes = list(df.get("audio_hash", [None] * len(df)))
 
-    for i, path_str in enumerate(df["path"]):
-        if pd.isna(hashes[i]) or not hashes[i]:
-            try:
-                h = audio_hash(path_str)
-                hashes[i] = h
-                updated += 1
-            except Exception as exc:
-                log.warning("Could not hash %s: %s", Path(path_str).name, exc)
+    for i in missing_hash_positions(df):
+        path_str = df["path"].iloc[i]
+        try:
+            h = audio_hash(path_str)
+            hashes[i] = h
+            updated += 1
+        except Exception as exc:
+            log.warning("Could not hash %s: %s", Path(path_str).name, exc)
+            if strict and not isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+                raise RuntimeError(f"Hash backfill failed for {path_str}: {exc}") from exc
 
     df["audio_hash"] = hashes
 
@@ -102,7 +104,9 @@ def backfill_audio_hashes(store_path: Path) -> pd.DataFrame:
     return df
 
 
-def backfill_embeddings(df: pd.DataFrame, store_path: Path, max_tracks: Optional[int] = None) -> pd.DataFrame:
+def backfill_embeddings(
+    df: pd.DataFrame, store_path: Path, max_tracks: Optional[int] = None, *, strict: bool = False,
+) -> pd.DataFrame:
     """Compute Discogs-EffNet outputs for rows whose embedding is missing, failed, or stale.
 
     Uses the same recipe, provenance, and refresh rules as 06_analyze.py, which
@@ -113,13 +117,7 @@ def backfill_embeddings(df: pd.DataFrame, store_path: Path, max_tracks: Optional
             df[col] = None
         df[col] = df[col].astype(object)
 
-    def _wanted(row: pd.Series) -> bool:
-        if row.get("error") == "duration_exceeds_20min":
-            return False
-        record = {str(key): value for key, value in row.items()}
-        return embedding_needs_refresh(record) and Path(str(row.get("path"))).exists()
-
-    missing_indices = df[df.apply(_wanted, axis=1)].index.tolist()
+    missing_indices, _unavailable = embedding_candidates(df)
 
     if not missing_indices:
         log.info("All tracks already have current embeddings.")
@@ -132,7 +130,10 @@ def backfill_embeddings(df: pd.DataFrame, store_path: Path, max_tracks: Optional
         for idx, i in enumerate(target_indices, start=1):
             path = str(df.at[i, "path"])
             name = Path(path).name
-            fields = embedding_fields(extract_embeddings(path))
+            result = extract_embeddings(path)
+            if strict and result.status in RETRYABLE_EMBEDDING_STATUSES:
+                raise RuntimeError(f"Embedding backfill failed for {path}: {result.error or result.status}")
+            fields = embedding_fields(result)
             if fields["embedding_status"] in RETRYABLE_EMBEDDING_STATUSES and df.at[i, "embedding_status"] == EMBEDDING_OK:
                 log.warning("[%d/%d] Keeping previous embedding for %s: %s", idx, len(target_indices), name, fields["embedding_error"])
                 continue
@@ -627,6 +628,7 @@ def main() -> None:
     parser.add_argument("--backfill-hashes", action="store_true", help="Backfill audio_hash in features.pkl")
     parser.add_argument("--backfill-embeddings", action="store_true", help="Extract pretrained embeddings for features.pkl")
     parser.add_argument("--max-embeddings", type=int, default=None, help="Max tracks to compute embeddings for in this run")
+    parser.add_argument("--strict-backfill", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--evaluate", action="store_true", help="Run 20%% holdout evaluation benchmark")
     parser.add_argument("--tune-weights", action="store_true", help="Search for optimal hybrid vector weights")
     parser.add_argument("--export", action="store_true", help="Export features for phone/server")
@@ -641,7 +643,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.backfill_hashes:
-        backfill_audio_hashes(args.store)
+        backfill_audio_hashes(args.store, strict=args.strict_backfill)
         return
 
     df = _load_features(args.store)
@@ -651,7 +653,7 @@ def main() -> None:
         return
 
     if args.backfill_embeddings:
-        backfill_embeddings(df, args.store, max_tracks=args.max_embeddings)
+        backfill_embeddings(df, args.store, max_tracks=args.max_embeddings, strict=args.strict_backfill)
         return
 
     if args.evaluate:

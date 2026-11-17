@@ -75,6 +75,10 @@ Additive optional fields should be tolerated by consumers.
 The player should use the `audio_hash` value supplied by the export rather than
 reimplementing the hash when possible. The current algorithm is `a1`:
 
+The UI's guarded hash backfill fills missing identities without changing audio
+files or replacing existing hashes. Rebuild the player export after a
+successful backfill so newly identified tracks can be included.
+
 1. Select the audio region based on file type. MP3/MP2 skip ID3v2 headers and
    recognized ID3v1, APEv2, and Lyrics3v2 trailers; FLAC skips leading
    metadata blocks and recognized trailers; MP4/M4A-family files use the first
