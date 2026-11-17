@@ -192,6 +192,38 @@ extractor is detected. The UI additionally fingerprints the source and output
 for its preview/apply gate. **Validate library guardrails** exposes
 `04_move.py --validate-config` as a read-only operation.
 
+**Mirror library to player storage** runs `scripts/server_sync.sh` through a
+guarded preview/apply workflow. The source must be the complete library or a
+complete USB mirror, never a partial batch: `--delete-before` removes
+destination paths missing from it. The form requires an explicit source,
+destination, and complete-source confirmation. It refuses empty sources,
+overlapping paths, filesystem roots, protected local library/repository/home
+roots, and literal loopback SSH destinations. Other host aliases cannot be
+reliably identified as local. Alternate remote destinations use
+`user@host:/absolute/path`; configure non-interactive SSH authentication first.
+
+The preview logs itemized transfers and deletions. Before applying, the worker
+repeats the dry-run and refuses to proceed if the plan or checked root
+identities changed. The plan compares rsync's change lines, sizes, and times,
+not file content hashes. These checks cannot prove a mirror is complete or
+prevent independent changes between preflight and rsync; do not mutate either
+side during a sync. A sync is not atomic, and cancellation or failure may
+leave a partially updated destination. After a successful sync, refresh the
+player on the **remote host**; the UI never performs a local player refresh.
+
+For a guarded standalone sync:
+
+```bash
+python scripts/run_server_sync.py --source /path/to/complete-mirror \
+  --dest user@host:/path --complete-source --dry-run
+# Inspect the itemized output and use the preview's sha256:
+python scripts/run_server_sync.py --source /path/to/complete-mirror \
+  --dest user@host:/path --complete-source --no-dry-run --expected-plan SHA256
+```
+
+The original shell script remains available for existing workflows and does
+not enforce this UI guard.
+
 The tagging and movement scripts commonly support these flags; consult each
 script's `--help` for its exact options and defaults:
 

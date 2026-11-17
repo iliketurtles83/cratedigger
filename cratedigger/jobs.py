@@ -22,6 +22,7 @@ from cratedigger.analytics import DEFAULT_SNAPSHOT_PATH, source_file_state
 from cratedigger.db import open_db, utc_now_iso
 from cratedigger.feature_export import export_output_path, output_file_state
 from cratedigger.ops.registry import OPERATIONS, build_argv, normalize_params, validate_scope_value
+from cratedigger.server_sync import reviewed_sync_plan, sync_scope
 
 _ACTIVE = ("queued", "running", "cancelling", "orphaned")
 _INPUT_REPORTS = {"apply-beets": "report", "repair-bpm": "apply_report"}
@@ -218,6 +219,8 @@ def _fingerprint(
     analytics_path: Path | None = None,
     feature_state: tuple[int, int, int, int] | None = None,
     export_state: tuple[int, int, int, int] | None = None,
+    sync_source_state: tuple[int, int, int, int] | None = None,
+    sync_destination_state: tuple[int, int, int, int] | None = None,
 ) -> str:
     operation = OPERATIONS[operation_id]
     sources = [
@@ -236,6 +239,14 @@ def _fingerprint(
             repo_root / "lib" / "descriptors.py",
             repo_root / "lib" / "embeddings.py",
         ))
+    if operation_id == "server-sync":
+        sources.extend((
+            repo_root / "cratedigger" / "server_sync.py",
+            repo_root / "cratedigger" / "job_logs.py",
+            repo_root / "cratedigger" / "analytics.py",
+            repo_root / "scripts" / "build_analytics.py",
+            repo_root / "scripts" / "server_sync.sh",
+        ))
     inputs = {key: hashlib.sha256(data).hexdigest() for key, data in input_reports.items()}
     payload = json.dumps(
         {
@@ -246,6 +257,8 @@ def _fingerprint(
             "inputs": inputs,
             "feature_store": feature_state,
             "export_output": export_state if operation_id == "recommend-export" else None,
+            "sync_source": sync_source_state if operation_id == "server-sync" else None,
+            "sync_destination": sync_destination_state if operation_id == "server-sync" else None,
             "analytics_output": (
                 str((analytics_path or DEFAULT_SNAPSHOT_PATH).resolve())
                 if operation_id == "analytics-snapshot" else None
@@ -262,7 +275,7 @@ def _prepare_params(
 ) -> dict[str, object]:
     operation = OPERATIONS[operation_id]
     root = music_root.resolve()
-    needs_library = operation_id != "analytics-snapshot" and not operation_id.startswith("recommend-")
+    needs_library = operation_id not in {"analytics-snapshot", "server-sync"} and not operation_id.startswith("recommend-")
     if not root.is_dir() and needs_library:
         raise ValueError(f"Library root does not exist: {root}")
 
@@ -350,6 +363,13 @@ def _prepare_params(
         if output == source or (output.exists() and os.path.samefile(source, output)):
             raise ValueError("The player export must not overwrite the feature store")
         params["output"] = str(output)
+    if operation_id == "server-sync":
+        source, destination, _local_destination = sync_scope(
+            str(params["source"]), str(params["dest"]), complete_source=params["complete_source"] is True,
+            protected_library_root=root,
+        )
+        params["source"] = str(source)
+        params["dest"] = destination
     return params
 
 
@@ -422,6 +442,11 @@ def start_job(
         if operation_id in {"analytics-snapshot", "recommend-export"} else None
     )
     export_state = output_file_state(Path(str(params["output"]))) if operation_id == "recommend-export" else None
+    sync_source_state = source_file_state(Path(str(params["source"]))) if operation_id == "server-sync" else None
+    sync_destination_state = (
+        source_file_state(Path(str(params["dest"])))
+        if operation_id == "server-sync" and Path(str(params["dest"])).is_absolute() else None
+    )
     report_key = _INPUT_REPORTS.get(operation_id)
     input_reports = {report_key: Path(str(params[report_key])).read_bytes()} if report_key and params.get(report_key) else {}
     if expected_report_digest is not None:
@@ -432,6 +457,7 @@ def start_job(
     fingerprint = _fingerprint(
         operation_id, params, music_root=music_root, repo_root=repo_root, input_reports=input_reports,
         analytics_path=analytics_path, feature_state=feature_state, export_state=export_state,
+        sync_source_state=sync_source_state, sync_destination_state=sync_destination_state,
     )
     job_id = uuid.uuid4().hex
     now = utc_now_iso()
@@ -464,6 +490,12 @@ def start_job(
             "--expected-source-state", json.dumps(feature_state),
             "--expected-output-state", json.dumps(export_state),
         ))
+    if operation_id == "server-sync":
+        argv.extend((
+            "--expected-source-state", json.dumps(sync_source_state),
+            "--expected-destination-state", json.dumps(sync_destination_state),
+            "--protected-library-root", str(music_root.resolve()),
+        ))
 
     created_snapshots: list[Path] = []
     conn.execute("BEGIN IMMEDIATE")
@@ -474,7 +506,7 @@ def start_job(
             raise RuntimeError(f"Resource is busy: {busy}")
         if mode == "apply":
             query = (
-                "SELECT id, finished_at FROM jobs WHERE operation_id=? AND mode='preview' AND fingerprint=? "
+                "SELECT id, finished_at, log_path FROM jobs WHERE operation_id=? AND mode='preview' AND fingerprint=? "
                 "AND status='succeeded' AND finished_at IS NOT NULL"
             )
             preview_args: list[str] = [operation_id, fingerprint]
@@ -496,6 +528,11 @@ def start_job(
                 ).fetchone()
                 if newer_job or newer_direct_write:
                     raise ValueError("The library changed after this preview; run a fresh preview before applying")
+            if operation_id == "server-sync":
+                plan = reviewed_sync_plan(
+                    Path(preview["log_path"]), logs_dir, Path(str(params["source"])), str(params["dest"])
+                )
+                argv.extend(("--expected-plan", plan))
         logs_dir.mkdir(parents=True, exist_ok=True)
         for key, path in snapshots.items():
             with path.open("xb") as stream:

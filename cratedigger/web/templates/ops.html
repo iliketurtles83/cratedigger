@@ -37,14 +37,14 @@
         <span class="badge {% if op.risk == 'read_only' %}ok{% elif op.risk == 'network' %}warn{% else %}accent{% endif %}">{{ op.risk|replace('_', ' ') }}</span>
       </div>
       <form method="post" action="/ops/{{ op.id }}/start" class="op-form"
-            onsubmit="return this.elements.mode.value !== 'apply' || confirm('{% if op.legacy %}Apply changes? This legacy operation cannot be undone through Cratedigger.{% elif op.id == 'analytics-snapshot' %}Publish the new analytics snapshot?{% else %}Publish the player export and replace the existing output? This cannot be undone.{% endif %}');">
+            onsubmit="return this.elements.mode.value !== 'apply' || confirm('{% if op.id == 'server-sync' %}Mirror this destination? Files missing from the complete source will be deleted before transfer. This cannot be undone.{% elif op.legacy %}Apply changes? This legacy operation cannot be undone through Cratedigger.{% elif op.id == 'analytics-snapshot' %}Publish the new analytics snapshot?{% else %}Publish the player export and replace the existing output? This cannot be undone.{% endif %}');">
         <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         {% for field in op.fields %}
           <label class="op-field">
             <span>{{ field.label }}</span>
             {% if field.kind == "boolean" %}
               <span class="checkbox-field">
-                <input type="checkbox" name="{{ field.name }}" value="true" {% if field.default %}checked{% endif %}>
+                <input type="checkbox" name="{{ field.name }}" value="true" {% if field.default %}checked{% endif %} {% if field.required %}required{% endif %}>
                 {% if field.help %}<small>{{ field.help }}</small>{% endif %}
               </span>
             {% elif field.kind == "choice" %}

@@ -118,6 +118,8 @@ class WebUITests(unittest.TestCase):
         self.assertIn("Operations", page.text)
         self.assertIn("Process incoming music", page.text)
         self.assertIn("Extract audio features", page.text)
+        self.assertIn("Mirror library to player storage", page.text)
+        self.assertIn("I confirm this source is a complete library mirror", page.text)
 
         with patch("cratedigger.web.app.start_job", return_value="job-abc") as start:
             response = self.client.post(

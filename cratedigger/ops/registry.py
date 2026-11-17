@@ -12,7 +12,7 @@ from typing import Any, Literal
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 FieldKind = Literal["text", "integer", "number", "boolean", "choice"]
-Risk = Literal["read_only", "writes_tags", "moves_files", "writes_library", "writes_features", "writes_analytics", "writes_export", "network"]
+Risk = Literal["read_only", "writes_tags", "moves_files", "writes_library", "writes_features", "writes_analytics", "writes_export", "writes_remote", "network"]
 
 
 @dataclass(frozen=True)
@@ -147,6 +147,13 @@ _OPS = (
                   locks=("features_store", "player_export"),
                   help="Preview validates a temporary player export. Apply replaces the selected output; model heads may be downloaded. Transfer the export separately.",
                   legacy=False),
+    OperationSpec("server-sync", "Mirror library to player storage", "Export/Sync", "scripts/run_server_sync.py", "writes_remote",
+                  (_text("source", "Complete mirror source", help="Existing complete library or complete USB mirror; partial batches are unsafe."),
+                   _text("dest", "Destination", help="Existing absolute local directory or user@host:/absolute/path."),
+                   _bool("complete_source", "I confirm this source is a complete library mirror",
+                         help="Destination files missing from the source will be deleted before transfers.")),
+                  locks=("music_root:read", "server_sync"), required=("source", "dest", "complete_source"),
+                  help="Deletes destination paths missing from the source. Sync is not atomic; interruption can leave partial changes. Refresh the player on the remote host after a successful sync."),
     OperationSpec("audit-beets", "Audit Beets matches", "Metadata", "scripts/audit_beets_matches.py", "read_only",
                   (_text("bucket", "Letter bucket"), _FOLDER, _bool("online", "Query MusicBrainz"),
                    _text("report", "Report output path")), locks=("music_root:read", "mb_network"), preview_flag=False,

@@ -107,6 +107,13 @@ copy of the intended library because `--delete-before` removes destination
 paths missing from the source. It applies the same exclusions for either sync
 hop. It is not safe for a partial USB batch.
 
+The local UI can preview and apply this mirror operation with an explicit
+complete-source confirmation. It checks a repeated itemized rsync dry-run
+against the reviewed plan, but cannot prove completeness or exclude concurrent
+external changes. A failed or cancelled sync may leave partial changes. The UI
+does not refresh the player; refresh it on the player host after a successful
+sync.
+
 Audio paths are owned by cratedigger and organized as letter-bucketed artist
 roots, with special roots such as `0compilations`, `0various`, `0mixes`,
 `0singles`, `0random`, and `#`. The feature export does not contain file paths;

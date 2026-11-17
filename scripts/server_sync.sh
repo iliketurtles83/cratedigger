@@ -19,11 +19,22 @@ set -euo pipefail
 SOURCE="/media/jack/buffer/audio/"
 DEST="${MUSIC_SERVER_DEST:-}"
 DRY_RUN=false
+ITEMIZE_PLAN=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --help|-h)
+            echo "Usage: $0 [--dry-run] [--source DIR] [--dest DEST]"
+            echo "The source must be a complete mirror; destination paths missing from it are deleted."
+            echo "--itemize-plan emits a machine-readable plan and requires --dry-run."
+            exit 0
+            ;;
         --dry-run|-n)
             DRY_RUN=true
+            shift
+            ;;
+        --itemize-plan)
+            ITEMIZE_PLAN=true
             shift
             ;;
         --source)
@@ -41,6 +52,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ "$ITEMIZE_PLAN" = true ] && [ "$DRY_RUN" = false ]; then
+    echo "ERROR: --itemize-plan requires --dry-run." >&2
+    exit 1
+fi
 
 if [ -z "$DEST" ]; then
     echo "ERROR: Destination not specified. Set MUSIC_SERVER_DEST in environment or pass --dest." >&2
@@ -72,7 +88,13 @@ if [ "$DRY_RUN" = true ]; then
     RSYNC_FLAGS+=(--dry-run)
     echo "[DRY-RUN] Simulating sync..."
 fi
+if [ "$ITEMIZE_PLAN" = true ]; then
+    RSYNC_FLAGS+=(--itemize-changes "--out-format=@@sync-change %i|%l|%M|%n%L")
+fi
 
-rsync "${RSYNC_FLAGS[@]}" "$SOURCE" "$DEST"
+rsync "${RSYNC_FLAGS[@]}" -- "$SOURCE" "$DEST"
 
 echo "Sync completed successfully."
+if [ "$DRY_RUN" = false ]; then
+    echo "Refresh the player on the remote host after the sync; no local refresh was run."
+fi

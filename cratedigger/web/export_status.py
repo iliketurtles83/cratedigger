@@ -8,11 +8,11 @@ from typing import Any
 
 from cratedigger.analytics import source_file_state
 from cratedigger.feature_export import export_output_path, output_file_state
+from cratedigger.job_logs import read_log_tail
 from lib.descriptors import DESCRIPTOR_RECIPE, DESCRIPTOR_SCALE
 from lib.recommender import RECIPE_VERSION
 
 _MARKER = "@@export-result "
-_TAIL_BYTES = 65536
 
 
 def _file_state(value: Any) -> tuple[int, int, int, int]:
@@ -22,17 +22,7 @@ def _file_state(value: Any) -> tuple[int, int, int, int]:
 
 
 def _read_summary(log_path: Path, logs_dir: Path) -> dict[str, Any]:
-    log_path = log_path.resolve()
-    if not log_path.is_relative_to(logs_dir.resolve()):
-        raise ValueError("Job log is outside the configured log directory")
-    with log_path.open("rb") as stream:
-        stream.seek(0, 2)
-        start = max(0, stream.tell() - _TAIL_BYTES)
-        stream.seek(start)
-        if start:
-            stream.readline()
-        lines = stream.read().decode("utf-8").splitlines()
-    for line in reversed(lines):
+    for line in reversed(read_log_tail(log_path, logs_dir)):
         if line.startswith(_MARKER):
             payload = json.loads(line[len(_MARKER):])
             if not isinstance(payload, dict):
