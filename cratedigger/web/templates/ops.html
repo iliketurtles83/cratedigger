@@ -9,6 +9,20 @@
   </div>
   <a class="btn" href="/jobs">Job history</a>
 </div>
+<div class="card" role="status">
+  <strong>Player export</strong>
+  {% if export_status %}
+    <span class="badge {% if export_status.state == 'current' %}ok{% else %}warn{% endif %}">{{ export_status.state }}</span>
+    <div class="mono">{{ export_status.message }}</div>
+    {% if export_status.get('track_count') is not none %}
+      <div class="mono">{{ export_status.track_count }} {{ 'track' if export_status.track_count == 1 else 'tracks' }} exported; {{ export_status.excluded_count }} excluded.</div>
+    {% endif %}
+    <div class="mono">Identity checks use file metadata and cannot detect every external change.</div>
+    <a href="/jobs/{{ export_status.job_id }}">Last validated export job</a>
+  {% else %}
+    <div class="mono">No UI-validated export has been published yet. Existing CLI exports are not inspected.</div>
+  {% endif %}
+</div>
 {% for group, operations in groups.items() %}
   <h2 style="font-size: 16px; margin: 22px 0 10px;">{{ group }}</h2>
   <div class="ops-grid">
@@ -23,7 +37,7 @@
         <span class="badge {% if op.risk == 'read_only' %}ok{% elif op.risk == 'network' %}warn{% else %}accent{% endif %}">{{ op.risk|replace('_', ' ') }}</span>
       </div>
       <form method="post" action="/ops/{{ op.id }}/start" class="op-form"
-            onsubmit="return this.elements.mode.value !== 'apply' || confirm('{% if op.legacy %}Apply changes? This legacy operation cannot be undone through Cratedigger.{% else %}Publish the new analytics snapshot?{% endif %}');">
+            onsubmit="return this.elements.mode.value !== 'apply' || confirm('{% if op.legacy %}Apply changes? This legacy operation cannot be undone through Cratedigger.{% elif op.id == 'analytics-snapshot' %}Publish the new analytics snapshot?{% else %}Publish the player export and replace the existing output? This cannot be undone.{% endif %}');">
         <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         {% for field in op.fields %}
           <label class="op-field">
@@ -48,6 +62,7 @@
                      {% if field.minimum is not none %}min="{{ field.minimum }}"{% endif %}
                      {% if field.maximum is not none %}max="{{ field.maximum }}"{% endif %}
                      {% if field.help %}title="{{ field.help }}"{% endif %}>
+              {% if field.help %}<small>{{ field.help }}</small>{% endif %}
             {% endif %}
           </label>
         {% endfor %}

@@ -20,6 +20,7 @@ import uuid
 import config
 from cratedigger.analytics import DEFAULT_SNAPSHOT_PATH, source_file_state
 from cratedigger.db import open_db, utc_now_iso
+from cratedigger.feature_export import export_output_path, output_file_state
 from cratedigger.ops.registry import OPERATIONS, build_argv, normalize_params, validate_scope_value
 
 _ACTIVE = ("queued", "running", "cancelling", "orphaned")
@@ -216,6 +217,7 @@ def _fingerprint(
     input_reports: dict[str, bytes],
     analytics_path: Path | None = None,
     feature_state: tuple[int, int, int, int] | None = None,
+    export_state: tuple[int, int, int, int] | None = None,
 ) -> str:
     operation = OPERATIONS[operation_id]
     sources = [
@@ -225,6 +227,15 @@ def _fingerprint(
     ]
     if operation_id == "analytics-snapshot":
         sources.extend((repo_root / "cratedigger" / "analytics.py", repo_root / "lib" / "recommender.py"))
+    if operation_id == "recommend-export":
+        sources.extend((
+            repo_root / "cratedigger" / "feature_export.py",
+            repo_root / "cratedigger" / "analytics.py",
+            repo_root / "scripts" / "build_analytics.py",
+            repo_root / "lib" / "recommender.py",
+            repo_root / "lib" / "descriptors.py",
+            repo_root / "lib" / "embeddings.py",
+        ))
     inputs = {key: hashlib.sha256(data).hexdigest() for key, data in input_reports.items()}
     payload = json.dumps(
         {
@@ -234,6 +245,7 @@ def _fingerprint(
             "sources": [_file_fingerprint(source) for source in sources],
             "inputs": inputs,
             "feature_store": feature_state,
+            "export_output": export_state if operation_id == "recommend-export" else None,
             "analytics_output": (
                 str((analytics_path or DEFAULT_SNAPSHOT_PATH).resolve())
                 if operation_id == "analytics-snapshot" else None
@@ -325,7 +337,7 @@ def _prepare_params(
         params[key] = str(path)
     if params.get("report") and params.get("result") and params["report"] == params["result"]:
         raise ValueError("The result report must not overwrite its input report")
-    if operation_id == "analytics-snapshot":
+    if operation_id in {"analytics-snapshot", "recommend-export"}:
         source = Path(str(params.get("features") or config.FEATURES_STORE_PATH))
         if not source.is_absolute():
             source = repo_root / source
@@ -333,6 +345,11 @@ def _prepare_params(
         if not source.is_file():
             raise ValueError(f"Feature store does not exist: {source}")
         params["features"] = str(source)
+    if operation_id == "recommend-export":
+        output = export_output_path(str(params.get("output") or ""), repo_root)
+        if output == source or (output.exists() and os.path.samefile(source, output)):
+            raise ValueError("The player export must not overwrite the feature store")
+        params["output"] = str(output)
     return params
 
 
@@ -389,7 +406,7 @@ def start_job(
     if mode == "apply" and not operation.can_apply:
         raise ValueError("This operation is read-only")
     inputs = dict(raw_params)
-    if operation_id == "analytics-snapshot" and not inputs.get("features") and features_path is not None:
+    if operation_id in {"analytics-snapshot", "recommend-export"} and not inputs.get("features") and features_path is not None:
         inputs["features"] = str(features_path)
     params = dict(normalize_params(operation, inputs, mode=mode))
     locks = list(operation.locks)
@@ -400,7 +417,11 @@ def start_job(
     if _file_fingerprint(Path(config.__file__)) != _LOADED_CONFIG_FINGERPRINT:
         raise RuntimeError("config.py changed after the UI started; restart the UI before running operations")
     params = _prepare_params(operation_id, params, music_root=music_root, repo_root=repo_root)
-    feature_state = source_file_state(Path(str(params["features"]))) if operation_id == "analytics-snapshot" else None
+    feature_state = (
+        source_file_state(Path(str(params["features"])))
+        if operation_id in {"analytics-snapshot", "recommend-export"} else None
+    )
+    export_state = output_file_state(Path(str(params["output"]))) if operation_id == "recommend-export" else None
     report_key = _INPUT_REPORTS.get(operation_id)
     input_reports = {report_key: Path(str(params[report_key])).read_bytes()} if report_key and params.get(report_key) else {}
     if expected_report_digest is not None:
@@ -410,7 +431,7 @@ def start_job(
             raise ValueError("The report changed after it was opened; review it again before previewing")
     fingerprint = _fingerprint(
         operation_id, params, music_root=music_root, repo_root=repo_root, input_reports=input_reports,
-        analytics_path=analytics_path, feature_state=feature_state,
+        analytics_path=analytics_path, feature_state=feature_state, export_state=export_state,
     )
     job_id = uuid.uuid4().hex
     now = utc_now_iso()
@@ -437,6 +458,11 @@ def start_job(
         argv.extend((
             "--output", str((analytics_path or DEFAULT_SNAPSHOT_PATH).resolve()),
             "--expected-source-state", json.dumps(feature_state),
+        ))
+    if operation_id == "recommend-export":
+        argv.extend((
+            "--expected-source-state", json.dumps(feature_state),
+            "--expected-output-state", json.dumps(export_state),
         ))
 
     created_snapshots: list[Path] = []

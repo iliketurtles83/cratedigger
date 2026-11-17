@@ -19,6 +19,13 @@ gzip-compressed UTF-8 JSON document; another suffix produces plain UTF-8 JSON.
 The current manual handoff to the player host is separate from the audio
 library sync.
 
+The local UI can preview and publish the same export through **Export features
+for the player**. It checks the current contract before an atomic publish and
+reports whether the source or published file has changed since the last
+successful UI export. Those freshness checks use file metadata rather than a
+content hash. They do not validate exports produced outside the UI or deliver
+the export to the player host.
+
 The top-level JSON object contains:
 
 | Field | Meaning |

@@ -20,6 +20,12 @@
       <li>{{ artifact.label }}: <a href="{{ artifact.url }}">{{ artifact.path }}</a></li>
     {% endfor %}</ul>
   {% endif %}
+  {% if export_status %}
+    <strong>Player export</strong>
+    <div class="mono">{{ export_status.message }}</div>
+    <div class="mono">Identity checks use file metadata and cannot detect every external change.</div>
+    {% if export_status.available %}<a href="/jobs/{{ job.id }}/export">Download current export</a>{% endif %}
+  {% endif %}
 </div>
 {% if job.status in ["queued", "running", "cancelling"] %}
   <form method="post" action="/jobs/{{ job.id }}/cancel" onsubmit="return confirm('Stop this operation?');">
@@ -34,7 +40,7 @@
       <button type="submit">Run preview again</button>
     </form>
     {% if job.mode == "preview" and job.status == "succeeded" and operation.can_apply %}
-      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('{% if operation.legacy %}Apply this preview? This legacy operation cannot be undone through Cratedigger.{% else %}Publish this analytics snapshot?{% endif %}');">
+      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('{% if operation.legacy %}Apply this preview? This legacy operation cannot be undone through Cratedigger.{% elif operation.id == 'analytics-snapshot' %}Publish this analytics snapshot?{% else %}Publish the player export and replace the existing output? This cannot be undone.{% endif %}');">
         <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <button class="danger" type="submit">Apply this preview</button>
       </form>

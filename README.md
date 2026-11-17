@@ -166,6 +166,32 @@ The equivalent standalone commands are
 already-running `06_analyze.py` is detected. This check is best effort, so do
 not start extraction concurrently. Only use a trusted feature pickle.
 
+After extraction finishes, Operations can also **Export features for the
+player**. Its preview builds and validates a temporary export without replacing
+the current output. Apply requires that preview and atomically publishes the
+validated JSON; the feature store is never changed. The default destination is
+`features_export.json.gz`; alternate UI destinations must be `.json` or
+`.json.gz` files under `reports/exports/`. Preview and apply can download
+SHA-256-verified descriptor model heads if they are missing.
+
+The export job reports the track and exclusion counts and checks the current
+player contract, including vector dimensions, identity, descriptor metadata,
+and finite values. The Operations page shows freshness for the last successful
+UI export and its job page can download the current output. Freshness compares
+file identity and timestamps, not content hashes, so it cannot detect every
+external change; a missing log or replaced file is reported explicitly. Exports
+created directly by the CLI are not included in this status. Transfer the
+export to the player host separately; this action does not sync audio or
+refresh the player.
+
+The equivalent standalone commands are
+`python scripts/export_features.py --dry-run` and, after reviewing the preview,
+`python scripts/export_features.py --no-dry-run`. These also accept
+`--features PATH` and `--output PATH` and refuse to read while an already-running
+extractor is detected. The UI additionally fingerprints the source and output
+for its preview/apply gate. **Validate library guardrails** exposes
+`04_move.py --validate-config` as a read-only operation.
+
 The tagging and movement scripts commonly support these flags; consult each
 script's `--help` for its exact options and defaults:
 

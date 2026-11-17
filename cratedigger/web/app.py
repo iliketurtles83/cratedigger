@@ -23,6 +23,7 @@ from cratedigger.jobs import (
 )
 from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
 from cratedigger.web import reports, services
+from cratedigger.web.export_status import export_job_status
 from cratedigger.web.insights import load_insights
 from cratedigger.web.security import LocalSecurityMiddleware
 
@@ -344,6 +345,11 @@ def create_app(
         with open_db(app.state.db_path) as conn:
             reconcile_jobs(conn)
             recent = list_jobs(conn, limit=8)
+            last_export = conn.execute(
+                "SELECT id FROM jobs WHERE operation_id='recommend-export' AND mode='apply' AND status='succeeded' "
+                "ORDER BY finished_at DESC LIMIT 1"
+            ).fetchone()
+            export_job = get_job(conn, last_export["id"]) if last_export else None
         return _TEMPLATES.TemplateResponse(
             request,
             "ops.html",
@@ -352,6 +358,9 @@ def create_app(
                 "badges": _nav_badges(app.state.db_path, app.state.music_root),
                 "groups": groups,
                 "recent_jobs": recent,
+                "export_status": export_job_status(
+                    export_job, app.state.logs_dir, app.state.repo_root, app.state.features_path
+                ) if export_job else None,
                 "msg": msg,
                 "err": err,
             },
@@ -426,9 +435,28 @@ def create_app(
                 "log_text": log_text,
                 "log_offset": log_offset,
                 "artifacts": reports.job_report_artifacts(job, app.state.repo_root / "reports"),
+                "export_status": export_job_status(job, app.state.logs_dir, app.state.repo_root, app.state.features_path),
                 "msg": msg,
                 "err": err,
             },
+        )
+
+    @app.get("/jobs/{job_id}/export")
+    def job_export(job_id: str) -> FileResponse:
+        with open_db(app.state.db_path) as conn:
+            job = get_job(conn, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Export job not found")
+        status = export_job_status(job, app.state.logs_dir, app.state.repo_root, app.state.features_path)
+        if not status or not status["available"]:
+            raise HTTPException(status_code=404, detail="Export output is unavailable")
+        path = Path(status["output"])
+        return FileResponse(
+            path,
+            media_type="application/gzip" if path.name.endswith(".gz") else "application/json",
+            filename=path.name,
+            content_disposition_type="attachment",
+            headers={"X-Content-Type-Options": "nosniff"},
         )
 
     @app.post("/jobs/{job_id}/cancel")

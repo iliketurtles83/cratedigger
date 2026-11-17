@@ -132,7 +132,8 @@ class PersistentJobsTests(unittest.TestCase):
             with patch("cratedigger.jobs.external_analysis_running", return_value=True):
                 with open_db(root / "state.db") as conn:
                     for operation_id, params in (
-                        ("analyze", {}), ("recommend-evaluate", {}), ("normalize-covers", {})
+                        ("analyze", {}), ("recommend-evaluate", {}), ("recommend-export", {}),
+                        ("normalize-covers", {})
                     ):
                         with self.subTest(operation_id=operation_id), self.assertRaisesRegex(
                             RuntimeError, "separate 06_analyze.py process"

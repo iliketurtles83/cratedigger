@@ -12,7 +12,7 @@ from typing import Any, Literal
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 FieldKind = Literal["text", "integer", "number", "boolean", "choice"]
-Risk = Literal["read_only", "writes_tags", "moves_files", "writes_library", "writes_features", "writes_analytics", "network"]
+Risk = Literal["read_only", "writes_tags", "moves_files", "writes_library", "writes_features", "writes_analytics", "writes_export", "network"]
 
 
 @dataclass(frozen=True)
@@ -112,6 +112,9 @@ _OPS = (
                    _FOLDER),
                   locks=("music_root:write",), required=("route_mode",),
                   help="Run one selected 04_move operation mode."),
+    OperationSpec("validate-config", "Validate library guardrails", "Layout", "04_move.py", "read_only",
+                  fixed_args=("--validate-config",), locks=("music_root:read",), preview_flag=False, live_flags=(),
+                  help="Report mismatched folder settings and unclassified top-level folders."),
     OperationSpec("analyze", "Extract audio features", "Analysis", "06_analyze.py", "writes_features",
                   (_FOLDER, _text("output", "Feature store output"), _bool("force", "Re-analyze all tracks"),
                    _int("workers", "Workers", minimum=1, maximum=32),
@@ -138,6 +141,12 @@ _OPS = (
                    _int("top_n", "Number of results", default=5, minimum=1, maximum=1000)),
                   preview_flag=False, locks=("features_store",), required=("seed",),
                   help="Search for tracks similar to a seed query."),
+    OperationSpec("recommend-export", "Export features for the player", "Export/Sync", "scripts/export_features.py", "writes_export",
+                  (_FEATURES, _text("output", "Export output",
+                                    help="Default: features_export.json.gz. Alternate .json or .json.gz files must be under reports/exports.")),
+                  locks=("features_store", "player_export"),
+                  help="Preview validates a temporary player export. Apply replaces the selected output; model heads may be downloaded. Transfer the export separately.",
+                  legacy=False),
     OperationSpec("audit-beets", "Audit Beets matches", "Metadata", "scripts/audit_beets_matches.py", "read_only",
                   (_text("bucket", "Letter bucket"), _FOLDER, _bool("online", "Query MusicBrainz"),
                    _text("report", "Report output path")), locks=("music_root:read", "mb_network"), preview_flag=False,

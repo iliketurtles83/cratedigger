@@ -9,7 +9,7 @@ import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -397,12 +397,14 @@ def export_features(
     baker: Optional[VectorBaker] = None,
     model_version: str = RECIPE_VERSION,
     descriptor_runners: Optional[Mapping[str, Any]] = None,
+    validator: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
     """Export feature store to a compact gzipped JSON format for the phone/server.
 
     Descriptor columns are always recomputed from ``audio_embedding`` (replacing
     any legacy proxy columns).  Rows without a usable embedding, or decoded for
     less than ``MIN_EXPORT_DECODE_COVERAGE`` of their length, are left out.
+    If supplied, ``validator`` checks the final payload before strict JSON is written.
     """
     df = deduplicate_features_by_audio_hash(df)
     if "audio_hash" in df.columns:
@@ -461,7 +463,9 @@ def export_features(
         "tracks": tracks,
     }
 
-    raw_json = json.dumps(payload, ensure_ascii=False)
+    if validator is not None:
+        validator(payload)
+    raw_json = json.dumps(payload, ensure_ascii=False, allow_nan=validator is None)
 
     target_path = output_path.resolve()
     with tempfile.TemporaryDirectory(prefix=".cratedigger-export-", dir=target_path.parent) as temp_dir:
