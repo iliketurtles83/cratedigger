@@ -41,7 +41,8 @@ class TestDatabaseAndMigration(unittest.TestCase):
                     "size": 1234,
                     "artist_tag": "Artist",
                     "album_tag": "Debut",
-                    "track_tag": "Song title",
+                    "track_tag": "1",
+                    "title_tag": "Song title",
                     "year_tag": "2010",
                     "genre_tag": "Indie",
                     "rating": 1.0,
@@ -61,12 +62,25 @@ class TestDatabaseAndMigration(unittest.TestCase):
                     "/music/A/Artist/Artist - Debut (2010)/01 - Artist - Song.mp3",
                 )
                 self.assertEqual(track["title"], "Song title")
-                df = df.drop(columns=["track_tag"])
+                df = df.drop(columns=["title_tag"])
                 df.to_pickle(features_path)
                 sync_features_into_db(conn, features_path)
                 self.assertEqual(
                     conn.execute("SELECT title FROM tracks WHERE audio_hash = 'a1:1111'").fetchone()["title"],
                     "Song title",
+                )
+                conn.execute("UPDATE tracks SET title='1' WHERE audio_hash='a1:1111'")
+                conn.commit()
+                sync_features_into_db(conn, features_path)
+                self.assertEqual(
+                    conn.execute("SELECT title FROM tracks WHERE audio_hash = 'a1:1111'").fetchone()["title"],
+                    "1",
+                )
+                conn.execute("DELETE FROM tracks")
+                conn.commit()
+                sync_features_into_db(conn, features_path)
+                self.assertIsNone(
+                    conn.execute("SELECT title FROM tracks WHERE audio_hash = 'a1:1111'").fetchone()["title"]
                 )
                 paths = conn.execute(
                     "SELECT path, is_canonical FROM track_paths WHERE audio_hash = 'a1:1111' ORDER BY is_canonical DESC"

@@ -28,7 +28,7 @@
       <button type="submit">Run preview again</button>
     </form>
     {% if job.mode == "preview" and job.status == "succeeded" and operation.can_apply %}
-      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('Apply this preview? This legacy operation cannot be undone through Cratedigger.');">
+      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('{% if operation.legacy %}Apply this preview? This legacy operation cannot be undone through Cratedigger.{% else %}Publish this analytics snapshot?{% endif %}');">
         <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <button class="danger" type="submit">Apply this preview</button>
       </form>

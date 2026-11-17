@@ -12,7 +12,7 @@ from typing import Any, Literal
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 FieldKind = Literal["text", "integer", "number", "boolean", "choice"]
-Risk = Literal["read_only", "writes_tags", "moves_files", "writes_library", "writes_features", "network"]
+Risk = Literal["read_only", "writes_tags", "moves_files", "writes_library", "writes_features", "writes_analytics", "network"]
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,7 @@ class OperationSpec:
     apply_requires: tuple[str, ...] = ()
     required: tuple[str, ...] = ()
     help: str = ""
+    legacy: bool = True
 
     @property
     def can_apply(self) -> bool:
@@ -118,6 +119,10 @@ _OPS = (
                    _int("model_threads", "Model threads", minimum=1, maximum=32)),
                   locks=("features_store", "music_root:read"), preview_flag=True, live_flags=(),
                   help="Incrementally extract audio features; the preview performs a dry run."),
+    OperationSpec("analytics-snapshot", "Build insights snapshot", "Analysis", "scripts/build_analytics.py", "writes_analytics",
+                  (_FEATURES,), locks=("features_store", "analytics_store"),
+                  help="Create a derived SQLite snapshot without changing the feature store. Wait for extraction to finish.",
+                  legacy=False),
     OperationSpec("recommend-evaluate", "Evaluate recommender quality", "Analysis", "07_recommend.py", "read_only",
                   (_text("store", "Feature store"),), fixed_args=("--evaluate",), preview_flag=False,
                   locks=("features_store",), help="Run the holdout evaluation without changing the feature store."),
@@ -333,6 +338,7 @@ def public_operation(op: OperationSpec) -> dict[str, Any]:
         "risk": op.risk,
         "help": op.help,
         "can_apply": op.can_apply,
+        "legacy": op.legacy,
         "fields": [
             {
                 "name": f.name,

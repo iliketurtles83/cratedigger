@@ -18,6 +18,7 @@ from typing import Iterator
 import uuid
 
 import config
+from cratedigger.analytics import DEFAULT_SNAPSHOT_PATH, source_file_state
 from cratedigger.db import open_db, utc_now_iso
 from cratedigger.ops.registry import OPERATIONS, build_argv, normalize_params, validate_scope_value
 
@@ -213,13 +214,17 @@ def _fingerprint(
     music_root: Path,
     repo_root: Path,
     input_reports: dict[str, bytes],
+    analytics_path: Path | None = None,
+    feature_state: tuple[int, int, int, int] | None = None,
 ) -> str:
     operation = OPERATIONS[operation_id]
-    sources = (
+    sources = [
         repo_root / operation.script,
         repo_root / "cratedigger" / "ops" / "registry.py",
         Path(config.__file__),
-    )
+    ]
+    if operation_id == "analytics-snapshot":
+        sources.extend((repo_root / "cratedigger" / "analytics.py", repo_root / "lib" / "recommender.py"))
     inputs = {key: hashlib.sha256(data).hexdigest() for key, data in input_reports.items()}
     payload = json.dumps(
         {
@@ -228,6 +233,11 @@ def _fingerprint(
             "music_root": str(music_root.resolve()),
             "sources": [_file_fingerprint(source) for source in sources],
             "inputs": inputs,
+            "feature_store": feature_state,
+            "analytics_output": (
+                str((analytics_path or DEFAULT_SNAPSHOT_PATH).resolve())
+                if operation_id == "analytics-snapshot" else None
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -240,13 +250,14 @@ def _prepare_params(
 ) -> dict[str, object]:
     operation = OPERATIONS[operation_id]
     root = music_root.resolve()
-    if not root.is_dir() and not operation_id.startswith("recommend-"):
+    needs_library = operation_id != "analytics-snapshot" and not operation_id.startswith("recommend-")
+    if not root.is_dir() and needs_library:
         raise ValueError(f"Library root does not exist: {root}")
 
     fields = {field.name for field in operation.fields}
     root_field = "library_root" if "library_root" in fields else "target_root" if "target_root" in fields else None
     supports_override = root_field is not None and operation_id not in {"convert-lists", "retag-lists", "repair-bpm"}
-    if not supports_override and not operation_id.startswith("recommend-") and root != Path(config.MUSIC_ROOT).resolve():
+    if not supports_override and needs_library and root != Path(config.MUSIC_ROOT).resolve():
         raise ValueError(
             "This operation uses config.MUSIC_ROOT and cannot run with a different UI library root"
         )
@@ -314,6 +325,14 @@ def _prepare_params(
         params[key] = str(path)
     if params.get("report") and params.get("result") and params["report"] == params["result"]:
         raise ValueError("The result report must not overwrite its input report")
+    if operation_id == "analytics-snapshot":
+        source = Path(str(params.get("features") or config.FEATURES_STORE_PATH))
+        if not source.is_absolute():
+            source = repo_root / source
+        source = source.resolve()
+        if not source.is_file():
+            raise ValueError(f"Feature store does not exist: {source}")
+        params["features"] = str(source)
     return params
 
 
@@ -356,6 +375,8 @@ def start_job(
     logs_dir: Path,
     music_root: Path,
     expected_preview_id: str | None = None,
+    features_path: Path | None = None,
+    analytics_path: Path | None = None,
 ) -> str:
     """Validate, persist, lock, and start a registry operation worker."""
     if mode not in {"preview", "apply"}:
@@ -366,7 +387,10 @@ def start_job(
         raise ValueError(f"Unknown operation: {operation_id}") from exc
     if mode == "apply" and not operation.can_apply:
         raise ValueError("This operation is read-only")
-    params = dict(normalize_params(operation, raw_params, mode=mode))
+    inputs = dict(raw_params)
+    if operation_id == "analytics-snapshot" and not inputs.get("features") and features_path is not None:
+        inputs["features"] = str(features_path)
+    params = dict(normalize_params(operation, inputs, mode=mode))
     locks = list(operation.locks)
     if ({"music_root:write", "features_store"} & set(locks)) and external_analysis_running(repo_root):
         raise RuntimeError(
@@ -375,10 +399,12 @@ def start_job(
     if _file_fingerprint(Path(config.__file__)) != _LOADED_CONFIG_FINGERPRINT:
         raise RuntimeError("config.py changed after the UI started; restart the UI before running operations")
     params = _prepare_params(operation_id, params, music_root=music_root, repo_root=repo_root)
+    feature_state = source_file_state(Path(str(params["features"]))) if operation_id == "analytics-snapshot" else None
     report_key = _INPUT_REPORTS.get(operation_id)
     input_reports = {report_key: Path(str(params[report_key])).read_bytes()} if report_key and params.get(report_key) else {}
     fingerprint = _fingerprint(
-        operation_id, params, music_root=music_root, repo_root=repo_root, input_reports=input_reports
+        operation_id, params, music_root=music_root, repo_root=repo_root, input_reports=input_reports,
+        analytics_path=analytics_path, feature_state=feature_state,
     )
     job_id = uuid.uuid4().hex
     now = utc_now_iso()
@@ -399,6 +425,11 @@ def start_job(
     }
     command_params.update({key: str(path) for key, path in snapshots.items()})
     argv = build_argv(operation_id, command_params, mode=mode, repo_root=repo_root)
+    if operation_id == "analytics-snapshot":
+        argv.extend((
+            "--output", str((analytics_path or DEFAULT_SNAPSHOT_PATH).resolve()),
+            "--expected-source-state", json.dumps(feature_state),
+        ))
 
     created_snapshots: list[Path] = []
     conn.execute("BEGIN IMMEDIATE")

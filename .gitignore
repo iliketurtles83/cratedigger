@@ -22,6 +22,7 @@ __pycache__/
 *.[nN][pP][yY]
 *.[nN][pP][zZ]
 /models/
+/analytics/
 .ipynb_checkpoints/
 features_export.json.gz
 features_export.json.gz.*

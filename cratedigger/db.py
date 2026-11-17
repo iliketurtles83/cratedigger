@@ -302,6 +302,8 @@ def sync_features_into_db(
         rating = float(rating_val) if pd.notna(rating_val) else None
         dur_val = row.get("duration_ms")
         duration_ms = int(dur_val) if pd.notna(dur_val) else None
+        title_val = row.get("title_tag")
+        title = str(title_val) if pd.notna(title_val) else None
         fmt = Path(p_str).suffix.lower().lstrip(".") if p_str else None
         conn.execute(
             """
@@ -326,7 +328,7 @@ def sync_features_into_db(
                 p_str,
                 str(row["artist_tag"]) if pd.notna(row.get("artist_tag")) else None,
                 str(row["album_tag"]) if pd.notna(row.get("album_tag")) else None,
-                str(row["track_tag"]) if pd.notna(row.get("track_tag")) else None,
+                title,
                 str(row["year_tag"]) if pd.notna(row.get("year_tag")) else None,
                 str(row["genre_tag"]) if pd.notna(row.get("genre_tag")) else None,
                 rating,

@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Insights — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Library insights</h1>
+    <div class="mono">Visualizations from a separate, read-only analytics snapshot</div>
+  </div>
+  <a class="btn" href="/ops#op-analytics-snapshot">Build or refresh snapshot</a>
+</div>
+
+{% if insights %}
+  <p class="insights-note">
+    Snapshot built {{ insights.metadata.generated_at }}. It represents {{ "{:,}".format(insights.tracks) }}
+    unique audio hashes from {{ "{:,}".format(insights.metadata.source_rows) }} feature-store rows;
+    {{ "{:,}".format(insights.metadata.duplicate_rows) }} duplicate rows and
+    {{ "{:,}".format(insights.metadata.unhashed_rows) }} rows without an audio hash are excluded.
+    This is not a live filesystem count. Rebuild after extraction finishes to see newer data.
+  </p>
+
+  <div class="insight-metrics">
+    <section class="card insight-metric"><span>Unique tracks</span><strong>{{ "{:,}".format(insights.tracks) }}</strong></section>
+    <section class="card insight-metric"><span>Tagged artists</span><strong>{{ "{:,}".format(insights.artists) }}</strong></section>
+    <section class="card insight-metric"><span>Tagged artist / album pairs</span><strong>{{ "{:,}".format(insights.albums) }}</strong></section>
+    <section class="card insight-metric"><span>Known duration</span><strong>{{ "{:,.1f}".format(insights.duration_ms / 3600000) }} h</strong><small>{{ "{:,}".format(insights.duration_tracks) }} tracks with duration</small></section>
+    <section class="card insight-metric"><span>Known file size</span><strong>{{ "{:,.1f}".format(insights.bytes / 1073741824) }} GiB</strong><small>{{ "{:,}".format(insights.sized_tracks) }} tracks with size</small></section>
+    <section class="card insight-metric"><span>Extraction errors recorded</span><strong>{{ "{:,}".format(insights.errors) }}</strong></section>
+  </div>
+
+  <div class="insight-grid">
+    <section class="card">
+      <h2>Genres</h2>
+      <p class="mono">Top-level genres · top 10 · share of unique tracks</p>
+      {% for item in insights.genres %}
+        <div class="insight-row">
+          <div class="insight-row-label"><span>{{ item.label }}</span><span>{{ "{:,}".format(item.count) }} · {{ item.percent }}%</span></div>
+          <div class="insight-bar"><span style="width: {{ item.percent }}%"></span></div>
+        </div>
+      {% else %}<p>No tracks in this snapshot.</p>{% endfor %}
+    </section>
+    <section class="card">
+      <h2>Formats</h2>
+      <p class="mono">Canonical path extension · share of unique tracks</p>
+      {% for item in insights.formats %}
+        <div class="insight-row">
+          <div class="insight-row-label"><span>{{ item.label }}</span><span>{{ "{:,}".format(item.count) }} · {{ item.percent }}%</span></div>
+          <div class="insight-bar"><span style="width: {{ item.percent }}%"></span></div>
+        </div>
+      {% else %}<p>No tracks in this snapshot.</p>{% endfor %}
+    </section>
+    <section class="card">
+      <h2>Feature schema coverage</h2>
+      <p class="mono">Versions represented in this snapshot; errors are shown separately.</p>
+      {% if insights.schemas %}
+        <table>
+          <thead><tr><th>Schema</th><th>Tracks</th><th>Errors</th></tr></thead>
+          <tbody>{% for schema in insights.schemas %}
+            <tr><td>{{ "v" ~ schema.version if schema.version is not none else "Unknown" }}</td><td>{{ "{:,}".format(schema.count) }}</td><td>{{ "{:,}".format(schema.errors) }}</td></tr>
+          {% endfor %}</tbody>
+        </table>
+      {% else %}<p>No analyzed tracks in this snapshot.</p>{% endif %}
+    </section>
+  </div>
+
+  <section class="card" id="genre-history">
+    <div class="toolbar">
+      <div>
+        <h2>Genre over release time</h2>
+        <div class="mono">100% stacked by release year · {{ "{:,}".format(insights.timeline.dated_tracks) }} dated tracks</div>
+      </div>
+      <form method="get" action="/insights#genre-history" class="inline-form">
+        <label for="genre-tier">Genre level</label>
+        <select id="genre-tier" name="tier">
+          <option value="1" {% if tier == 1 %}selected{% endif %}>Top-level</option>
+          <option value="2" {% if tier == 2 %}selected{% endif %}>Second-level</option>
+        </select>
+        <label for="genre-count">Top genres</label>
+        <select id="genre-count" name="top_n">
+          {% for count in range(1, 11) %}<option value="{{ count }}" {% if top_n == count %}selected{% endif %}>{{ count }}</option>{% endfor %}
+        </select>
+        <button type="submit">Update chart</button>
+      </form>
+    </div>
+    <p class="insights-note">{{ "{:,}".format(insights.undated_tracks) }} tracks have an unknown or out-of-range release year and are omitted. Each populated year totals 100%; blank years have no dated tracks.</p>
+    {% if insights.timeline.years %}
+      <div class="insight-legend">
+        {% for item in insights.timeline.legend %}
+          <span><i style="background: {{ item.color }}"></i>{{ item.label }} <small>({{ "{:,}".format(item.count) }})</small></span>
+        {% endfor %}
+      </div>
+      <div class="timeline-scroll" aria-label="Genre share by release year">
+        <div class="timeline-chart">
+          {% for year in insights.timeline.years %}
+            <div class="timeline-year">
+              <div class="timeline-stack {% if not year.total %}empty{% endif %}" role="img" tabindex="0" aria-label="{{ year.description }}" title="{{ year.description }}">
+                {% for segment in year.segments %}
+                  <span style="height: {{ segment.percent }}%; background: {{ segment.color }}" title="{{ segment.label }}: {{ segment.count }} ({{ segment.percent }}%)"></span>
+                {% endfor %}
+              </div>
+              <span class="timeline-label">{% if loop.first or loop.last or year.year % 5 == 0 %}{{ year.year }}{% endif %}</span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% else %}
+      <p>No usable release years are available in this snapshot.</p>
+    {% endif %}
+  </section>
+{% elif not err %}
+  <div class="card">
+    <h2>No analytics snapshot yet</h2>
+    <p>The insights pages never read the live feature store. Once extraction has finished, preview and apply <a href="/ops#op-analytics-snapshot">Build insights snapshot</a> to populate this page.</p>
+  </div>
+{% else %}
+  <p>Rebuild the snapshot after resolving the error above.</p>
+{% endif %}
+{% endblock %}

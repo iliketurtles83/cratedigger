@@ -16,12 +16,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import config
+from cratedigger.analytics import DEFAULT_SNAPSHOT_PATH
 from cratedigger.db import DEFAULT_DB_PATH, open_db
 from cratedigger.jobs import (
     cancel_job, get_job, library_mutation_guard, list_jobs, read_job_log, reconcile_jobs, start_job,
 )
 from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
 from cratedigger.web import services
+from cratedigger.web.insights import load_insights
 from cratedigger.web.security import LocalSecurityMiddleware
 
 _WEB_DIR = Path(__file__).resolve().parent
@@ -89,6 +91,7 @@ def create_app(
     music_root: Path | None = None,
     features_path: Path | None = None,
     logs_dir: Path | None = None,
+    analytics_path: Path | None = None,
 ) -> FastAPI:
     """Create configured FastAPI app instance."""
     resolved_db = Path(db_path or DEFAULT_DB_PATH)
@@ -102,6 +105,7 @@ def create_app(
     app.state.features_path = resolved_features
     app.state.repo_root = REPOSITORY_ROOT
     app.state.logs_dir = Path(logs_dir or REPOSITORY_ROOT / "logs" / "jobs")
+    app.state.analytics_path = Path(analytics_path or DEFAULT_SNAPSHOT_PATH)
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")), name="static")
 
     def protected_mutation() -> AbstractContextManager[None]:
@@ -112,6 +116,32 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def root() -> RedirectResponse:
         return RedirectResponse(url="/review", status_code=302)
+
+    @app.get("/insights", response_class=HTMLResponse)
+    def insights_page(
+        request: Request,
+        tier: int = Query(default=1, ge=1, le=2),
+        top_n: int = Query(default=6, ge=1, le=10),
+    ) -> HTMLResponse:
+        error = ""
+        try:
+            data = load_insights(app.state.analytics_path, tier=tier, top_n=top_n)
+        except ValueError as exc:
+            data = None
+            error = str(exc)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "insights.html",
+            {
+                "active_nav": "insights",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "insights": data,
+                "tier": tier,
+                "top_n": top_n,
+                "err": error,
+            },
+            status_code=503 if error else 200,
+        )
 
     @app.get("/library", response_class=HTMLResponse)
     def library_page(
@@ -192,6 +222,8 @@ def create_app(
                     repo_root=app.state.repo_root,
                     logs_dir=app.state.logs_dir,
                     music_root=app.state.music_root,
+                    features_path=app.state.features_path,
+                    analytics_path=app.state.analytics_path,
                 )
             return _redirect_with_flash(f"/jobs/{job_id}", msg=f"{mode.title()} job queued")
         except (OSError, ValueError, RuntimeError) as exc:
@@ -278,6 +310,8 @@ def create_app(
                     logs_dir=app.state.logs_dir,
                     music_root=app.state.music_root,
                     expected_preview_id=job_id if mode == "apply" else None,
+                    features_path=app.state.features_path,
+                    analytics_path=app.state.analytics_path,
                 )
             return _redirect_with_flash(f"/jobs/{next_id}", msg=f"{mode.title()} job queued")
         except (OSError, ValueError, RuntimeError) as exc:

@@ -39,7 +39,7 @@ Local configuration and operational data are ignored by Git. These include
 `config.py`, `.env`, `features.pkl` and its checkpoints/backups,
 `features_export.json.gz`, `review.json`, `review.log`, and `cratedigger.db`.
 Reports, archived logs, downloaded models, the virtual environment, generated
-arrays, and audio files are also ignored. They may still be valuable or in use:
+arrays, the derived `analytics/` snapshot, and audio files are also ignored. They may still be valuable or in use:
 do not delete them merely because they are ignored. Deliberately reviewed
 audio test fixtures may be tracked under `tests/fixtures/`.
 
@@ -110,7 +110,9 @@ localhost-only; it is not intended for LAN access or reverse-proxy exposure.
 POST requests require a session CSRF token, and browser sessions expire when
 the server restarts. The Library page browses the SQLite index rather than
 scanning files live. Use `cratedigger sync-features` to refresh it from the
-feature store; the index may be incomplete or stale between refreshes.
+feature store only after extraction has stopped; that CLI command does not
+coordinate with an independent extractor. The index may be incomplete or stale
+between refreshes.
 
 The Operations page exposes an allowlisted subset of script commands. Jobs run
 as background subprocesses with persistent logs and resource locks; conflicting
@@ -136,6 +138,22 @@ remain available. Scripts that cannot safely honor `ui --music-root` refuse to
 run when it differs from `config.MUSIC_ROOT`. Report outputs default to
 per-job files under `reports/`, and explicitly supplied report paths must also
 remain there.
+
+The Insights page reads only a separate SQLite analytics snapshot, never the
+live feature pickle during a page request. After extraction finishes, preview
+**Build insights snapshot** in Operations, then apply that successful preview.
+The snapshot is atomically replaced and does not modify the source feature
+store; rebuild it after extraction to see newer results. Counts are per unique
+`audio_hash`, reflect the feature-store snapshot rather than a live scan, and
+exclude rows without a hash. Genre history uses valid release years and reports
+undated tracks separately. The schema breakdown shows observed versions and
+recorded extraction errors, not an assertion that all tracks are current.
+
+The equivalent standalone commands are
+`python scripts/build_analytics.py --dry-run` and, after reviewing the preview,
+`python scripts/build_analytics.py --no-dry-run`. Both refuse to read while an
+already-running `06_analyze.py` is detected. This check is best effort, so do
+not start extraction concurrently. Only use a trusted feature pickle.
 
 The tagging and movement scripts commonly support these flags; consult each
 script's `--help` for its exact options and defaults:

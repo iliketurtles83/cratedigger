@@ -13,17 +13,17 @@
   <h2 style="font-size: 16px; margin: 22px 0 10px;">{{ group }}</h2>
   <div class="ops-grid">
   {% for op in operations %}
-    <section class="card op-card">
+    <section class="card op-card" id="op-{{ op.id }}">
       <div class="card-head">
         <div>
           <div class="card-title">{{ op.title }}</div>
           {% if op.help %}<div class="mono">{{ op.help }}</div>{% endif %}
-          {% if op.can_apply %}<div class="mono">Legacy operation: not undoable</div>{% endif %}
+          {% if op.can_apply and op.legacy %}<div class="mono">Legacy operation: not undoable</div>{% endif %}
         </div>
         <span class="badge {% if op.risk == 'read_only' %}ok{% elif op.risk == 'network' %}warn{% else %}accent{% endif %}">{{ op.risk|replace('_', ' ') }}</span>
       </div>
       <form method="post" action="/ops/{{ op.id }}/start" class="op-form"
-            onsubmit="return this.elements.mode.value !== 'apply' || confirm('Apply changes? This legacy operation cannot be undone through Cratedigger.');">
+            onsubmit="return this.elements.mode.value !== 'apply' || confirm('{% if op.legacy %}Apply changes? This legacy operation cannot be undone through Cratedigger.{% else %}Publish the new analytics snapshot?{% endif %}');">
         <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         {% for field in op.fields %}
           <label class="op-field">
