@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing, redirect_stderr, redirect_stdout
 from io import StringIO
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -282,6 +283,10 @@ class InsightsPageTests(unittest.TestCase):
             self.assertIn(text, response.text)
         self.assertNotIn("First song", response.text)
         self.assertIn('href="/ops#op-analytics-snapshot"', response.text)
+        for name in ("style.css", "app.js"):
+            version = hashlib.sha256((REPOSITORY_ROOT / "cratedigger/web/static" / name).read_bytes()).hexdigest()[:12]
+            self.assertIn(f'/static/{name}?v={version}', response.text)
+        self.assertEqual(response.headers["vary"], "X-Chart-Partial")
         self.assertEqual(self.client.get("/insights?top_n=11").status_code, 422)
 
     def test_snapshot_operation_uses_the_app_paths(self) -> None:
@@ -295,6 +300,32 @@ class InsightsPageTests(unittest.TestCase):
         self.assertEqual(response.status_code, 303)
         self.assertEqual(start.call_args.kwargs["features_path"], self.source)
         self.assertEqual(start.call_args.kwargs["analytics_path"], self.output)
+
+    def test_chart_updates_return_only_the_chart_without_page_styles(self) -> None:
+        build_snapshot(self.source, self.output, dry_run=False)
+        with patch("pandas.read_pickle", side_effect=AssertionError("page loaded the feature store")):
+            for tier, top_n in ((1, 1), (1, 10), (2, 2)):
+                response = self.client.get(
+                    "/insights", params={"tier": tier, "top_n": top_n},
+                    headers={"X-Chart-Partial": "genre-history"},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["vary"], "X-Chart-Partial")
+                self.assertIn('id="genre-history"', response.text)
+                self.assertIn("data-genre-chart", response.text)
+                self.assertNotIn("<html", response.text)
+                self.assertNotIn("<link", response.text)
+                self.assertNotIn("<style", response.text)
+                self.assertNotIn("Library insights", response.text)
+                self.assertIn(f'value="{top_n}" selected', response.text)
+
+    def test_chart_update_failures_are_explicit_and_do_not_return_a_full_page(self) -> None:
+        self.output.write_bytes(b"not sqlite")
+        response = self.client.get("/insights", headers={"X-Chart-Partial": "genre-history"})
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Cannot read analytics snapshot", response.text)
+        self.assertIn('role="alert"', response.text)
+        self.assertNotIn("<html", response.text)
 
     def test_metadata_corruption_is_reported_instead_of_rendered(self) -> None:
         build_snapshot(self.source, self.output, dry_run=False)

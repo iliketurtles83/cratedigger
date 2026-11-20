@@ -188,7 +188,10 @@ are not followed. Inspection supports UTF-8 playlists up to 32 MiB, 200,000
 entries, and 8,192 characters per line.
 
 The Insights page reads only a separate SQLite analytics snapshot, never the
-live feature pickle during a page request. After extraction finishes, preview
+live feature pickle during a page request. Genre-chart filters update only the
+chart when JavaScript is available, preserving the surrounding page and its
+colors; ordinary GET navigation remains available without JavaScript.
+After extraction finishes, preview
 **Build insights snapshot** in Operations, then apply that successful preview.
 The snapshot is atomically replaced and does not modify the source feature
 store; rebuild it after extraction to see newer results. Counts are per unique

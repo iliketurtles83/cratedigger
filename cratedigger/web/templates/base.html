@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Cratedigger{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_versions['style.css'] }}">
 </head>
 <body>
   <header class="topbar">
@@ -48,6 +48,6 @@
     {% block content %}{% endblock %}
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v={{ asset_versions['app.js'] }}"></script>
 </body>
 </html>

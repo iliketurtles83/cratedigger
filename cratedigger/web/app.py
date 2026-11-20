@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AbstractContextManager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,10 @@ from cratedigger.web.sound_profile import load_sound_profile
 
 _WEB_DIR = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
+_TEMPLATES.env.globals["asset_versions"] = {
+    name: hashlib.sha256((_WEB_DIR / "static" / name).read_bytes()).hexdigest()[:12]
+    for name in ("style.css", "app.js")
+}
 
 
 def _is_music_root_readonly(music_root: Path) -> bool:
@@ -220,7 +225,7 @@ def create_app(
             error = str(exc)
         return _TEMPLATES.TemplateResponse(
             request,
-            "insights.html",
+            "genre_history.html" if request.headers.get("x-chart-partial") == "genre-history" else "insights.html",
             {
                 "active_nav": "insights",
                 "badges": _nav_badges(app.state.db_path, app.state.music_root),
@@ -232,6 +237,7 @@ def create_app(
                 "top_n": top_n,
                 "err": error,
             },
+            headers={"Vary": "X-Chart-Partial"},
             status_code=503 if error else 200,
         )
 
