@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -16,7 +17,7 @@ import numpy as np
 
 from cratedigger.analytics import build_snapshot
 from cratedigger.db import open_db
-from cratedigger.jobs import get_job, start_job
+from cratedigger.jobs import get_job, read_job_log, reconcile_jobs, start_job
 from cratedigger.ops.registry import REPOSITORY_ROOT
 from cratedigger.playlist_builder import create_playlist, playlist_filename, preview_playlist, read_plan, write_plan
 from cratedigger.web.app import create_app
@@ -277,6 +278,50 @@ class PlaylistBuilderTests(unittest.TestCase):
             result = subprocess.run(applied["argv"], cwd=REPOSITORY_ROOT, capture_output=True, text=True, check=True)
             self.assertIn("@@playlist-result", result.stdout)
         self.assertEqual(inspect_playlist(self.music, "Seed & Friends.m3u8")["total"], 2)
+
+    def _wait_for_job(self, job_id: str) -> dict:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            with open_db(self.db) as conn:
+                reconcile_jobs(conn)
+                job = get_job(conn, job_id)
+            if job["status"] in {"succeeded", "failed", "cancelled", "stale", "orphaned"}:
+                return job
+            time.sleep(0.2)
+        self.fail(f"Job {job_id} did not finish")
+
+    def test_ui_preview_then_apply_saves_new_default_playlist_and_refuses_reuse(self) -> None:
+        self.client.get("/playlists/build?seed=seed")
+        page = self.client.get("/playlists/build?seed=seed")
+        self.assertIn('name="count" value="42"', page.text)
+        csrf = self.client.cookies["cratedigger_session"]
+        response = self.client.post("/playlists/build/preview", data={
+            "csrf_token": csrf, "seed": "seed", "name": "UI Saved",
+        }, follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        preview_id = response.headers["location"].split("/jobs/")[1].split("?")[0]
+        preview = self._wait_for_job(preview_id)
+        self.assertEqual(preview["status"], "succeeded", read_job_log(str(preview["log_path"]), allowed_dir=self.logs)[0])
+        self.assertFalse((self.music / "Playlists").exists())
+        report = json.loads(Path(preview["params"]["report"]).read_text(encoding="utf-8"))
+        self.assertEqual(report["requested"], 42)
+
+        applied = self.client.post(f"/jobs/{preview_id}/apply", data={"csrf_token": csrf}, follow_redirects=False)
+        self.assertEqual(applied.status_code, 303)
+        apply_id = applied.headers["location"].split("/jobs/")[1].split("?")[0]
+        self.assertNotEqual(apply_id, preview_id)
+        job = self._wait_for_job(apply_id)
+        self.assertEqual(job["status"], "succeeded", read_job_log(str(job["log_path"]), allowed_dir=self.logs)[0])
+        target = self.music / "Playlists" / "UI Saved.m3u8"
+        saved = target.read_bytes()
+        self.assertEqual(inspect_playlist(self.music, target.name)["total"], len(report["tracks"]))
+
+        again = self.client.post("/playlists/build/preview", data={
+            "csrf_token": csrf, "seed": "seed", "name": "ui saved",
+        }, follow_redirects=True)
+        self.assertIn("already exists", again.text)
+        self.assertEqual(target.read_bytes(), saved)
+        self.assertEqual(sorted(path.name for path in target.parent.iterdir()), ["UI Saved.m3u8"])
 
 
 if __name__ == "__main__":
