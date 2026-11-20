@@ -22,7 +22,7 @@ from cratedigger.jobs import (
     cancel_job, get_job, library_mutation_guard, list_jobs, read_job_log, reconcile_jobs, start_job,
 )
 from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
-from cratedigger.web import reports, services
+from cratedigger.web import playlists, reports, services
 from cratedigger.web.analysis_health import load_analysis_health
 from cratedigger.web.export_status import export_job_status
 from cratedigger.web.insights import load_insights, snapshot_freshness
@@ -146,6 +146,61 @@ def create_app(
         if _is_music_root_readonly(app.state.music_root):
             raise RuntimeError("The music library is unavailable or mounted read-only")
         return library_mutation_guard(app.state.db_path, app.state.repo_root)
+
+    @app.get("/playlists", response_class=HTMLResponse)
+    def playlists_page(
+        request: Request,
+        q: str = Query(default="", max_length=200),
+        page: int = Query(default=1, ge=1),
+    ) -> HTMLResponse:
+        q = q.strip()
+        error = ""
+        try:
+            listing = playlists.list_playlists(app.state.music_root, query=q, page=page)
+        except ValueError as exc:
+            listing = None
+            error = str(exc)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "playlists.html",
+            {
+                "active_nav": "playlists",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "listing": listing,
+                "q": q,
+                "err": error,
+            },
+            status_code=503 if error else 200,
+        )
+
+    @app.get("/playlists/view", response_class=HTMLResponse)
+    def playlist_page(
+        request: Request,
+        path: str = Query(..., max_length=1024),
+        kind: Literal["all", "available", "missing", "blocked", "unsupported", "inaccessible", "duplicates"] = "all",
+        q: str = Query(default="", max_length=200),
+        page: int = Query(default=1, ge=1),
+    ) -> HTMLResponse:
+        q = q.strip()
+        error = ""
+        try:
+            playlist = playlists.inspect_playlist(app.state.music_root, path, kind=kind, query=q, page=page)
+        except ValueError as exc:
+            playlist = None
+            error = str(exc)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "playlist.html",
+            {
+                "active_nav": "playlists",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "playlist": playlist,
+                "kind": kind,
+                "q": q,
+                "err": error,
+            },
+            status_code=400 if error else 200,
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def root() -> RedirectResponse:

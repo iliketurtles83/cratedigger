@@ -179,6 +179,14 @@ reports. BPM reports also require unchanged source identity, BPM, and genre
 evidence; rerun old audits that lack those fields. This is a conservative stat
 and tag check, not a cryptographic proof against all external changes.
 
+The Playlists page browses `.m3u8` files under the library's `Playlists/`
+directory. Open a playlist to search its ordered entries, inspect missing,
+duplicate, unsupported, or external paths, and preview available audio.
+Inspection never edits playlists or checks audio content hashes. Symbolic-linked
+playlist files and folders are skipped; external and outside-library entries
+are not followed. Inspection supports UTF-8 playlists up to 32 MiB, 200,000
+entries, and 8,192 characters per line.
+
 The Insights page reads only a separate SQLite analytics snapshot, never the
 live feature pickle during a page request. After extraction finishes, preview
 **Build insights snapshot** in Operations, then apply that successful preview.

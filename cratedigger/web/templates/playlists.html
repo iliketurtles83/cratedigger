@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Playlists — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Playlists</h1>
+    <div class="mono">Browse M3U8 files in the library's Playlists directory</div>
+  </div>
+  <div class="insight-links">
+    <a class="btn" href="/ops#op-genre-playlists">Preview genre playlists</a>
+    <a class="btn" href="/ops#op-convert-lists">Preview list conversion</a>
+  </div>
+</div>
+<p class="insights-note">Inspection is read-only. Open a playlist to check its entries, duplicates, and unavailable files.
+  Symbolic-linked playlist files and folders are not followed.</p>
+{% if listing and listing.exists %}
+  <form method="get" action="/playlists" class="inline-form">
+    <label for="playlist-search">Find a playlist</label>
+    <input id="playlist-search" type="text" name="q" value="{{ q }}" maxlength="200" placeholder="Filter by name">
+    <button type="submit">Search</button>
+    {% if q %}<a class="btn" href="/playlists">Clear</a>{% endif %}
+  </form>
+  <p class="insights-note">{{ "{:,}".format(listing.total) }} matching {{ 'playlist' if listing.total == 1 else 'playlists' }}.
+    {% if listing.skipped_links %}{{ "{:,}".format(listing.skipped_links) }} symbolic {{ 'link was' if listing.skipped_links == 1 else 'links were' }} skipped.{% endif %}</p>
+  {% if listing.entries %}
+    <div class="card report-scroll">
+      <table>
+        <thead><tr><th>Playlist</th><th>Size</th><th>Modified (UTC)</th></tr></thead>
+        <tbody>{% for item in listing.entries %}
+          <tr>
+            <td class="playlist-path"><a href="/playlists/view?path={{ item.path|urlencode }}">{{ item.path }}</a></td>
+            <td>{{ "{:,}".format(item.size) }} bytes</td>
+            <td class="mono">{{ item.modified }}</td>
+          </tr>
+        {% endfor %}</tbody>
+      </table>
+    </div>
+    {% if listing.pages > 1 %}
+      <div class="pagination">
+        {% if listing.page > 1 %}<a class="btn" href="/playlists?q={{ q|urlencode }}&amp;page={{ listing.page - 1 }}">Previous</a>{% endif %}
+        <span class="mono">Page {{ listing.page }} of {{ listing.pages }}</span>
+        {% if listing.page < listing.pages %}<a class="btn" href="/playlists?q={{ q|urlencode }}&amp;page={{ listing.page + 1 }}">Next</a>{% endif %}
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="card">No M3U8 playlists match this search.</div>
+  {% endif %}
+{% elif listing %}
+  <div class="card">The library does not have a Playlists directory yet. Review a playlist-generation preview before creating one.</div>
+{% endif %}
+{% endblock %}

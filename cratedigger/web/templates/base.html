@@ -9,8 +9,9 @@
 <body>
   <header class="topbar">
     <div class="brand">Cratedigger</div>
-    <nav class="nav">
+    <nav class="nav" aria-label="Main navigation" tabindex="0">
       <a href="/library" class="{% if active_nav == 'library' %}active{% endif %}">Library</a>
+      <a href="/playlists" class="{% if active_nav == 'playlists' %}active{% endif %}">Playlists</a>
       <a href="/insights" class="{% if active_nav == 'insights' %}active{% endif %}">Insights</a>
       <a href="/ops" class="{% if active_nav == 'ops' %}active{% endif %}">Operations</a>
       <a href="/jobs" class="{% if active_nav == 'jobs' %}active{% endif %}">Jobs</a>

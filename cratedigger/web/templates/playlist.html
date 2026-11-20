@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Playlist — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Playlist inspection</h1>
+    {% if playlist %}<div class="mono playlist-path">{{ playlist.path }}</div>{% endif %}
+  </div>
+  <a class="btn" href="/playlists">Back to playlists</a>
+</div>
+{% if playlist %}
+  <p class="insights-note">Read-only, point-in-time path checks: an available file has not been verified against its audio hash.
+    External URLs and paths outside this library are not inspected or played. Duplicate counts are additional occurrences
+    and can overlap other categories.</p>
+  {% if playlist.orphaned_labels %}
+    <div class="flash warn">{{ playlist.orphaned_labels }} EXTINF {{ 'label has' if playlist.orphaned_labels == 1 else 'labels have' }} no following entry.</div>
+  {% endif %}
+  <div class="pills">
+    {% for value, label, count in [
+      ('all', 'All entries', playlist.total),
+      ('available', 'Available', playlist.counts.available),
+      ('missing', 'Missing', playlist.counts.missing),
+      ('blocked', 'Outside / external', playlist.counts.blocked),
+      ('unsupported', 'Unsupported', playlist.counts.unsupported),
+      ('inaccessible', 'Inaccessible', playlist.counts.inaccessible),
+      ('duplicates', 'Duplicates', playlist.duplicates)
+    ] %}
+      <a class="pill {% if kind == value %}active{% endif %}" href="/playlists/view?path={{ playlist.path|urlencode }}&amp;kind={{ value }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}">
+        {{ label }} <span class="badge">{{ "{:,}".format(count) }}</span>
+      </a>
+    {% endfor %}
+  </div>
+  <form method="get" action="/playlists/view" class="inline-form">
+    <input type="hidden" name="path" value="{{ playlist.path }}">
+    <input type="hidden" name="kind" value="{{ kind }}">
+    <label for="playlist-entry-search">Search entries</label>
+    <input id="playlist-entry-search" type="text" name="q" value="{{ q }}" maxlength="200" placeholder="Title or path">
+    <button type="submit">Search</button>
+    {% if q %}<a class="btn" href="/playlists/view?path={{ playlist.path|urlencode }}&amp;kind={{ kind }}">Clear</a>{% endif %}
+  </form>
+  <p class="mono">{{ "{:,}".format(playlist.matched) }} matching {{ 'entry' if playlist.matched == 1 else 'entries' }} · page {{ playlist.page }} of {{ playlist.pages }}</p>
+  {% if playlist.entries %}
+    <div class="card">
+      <ol class="playlist-list">
+        {% for entry in playlist.entries %}
+          <li class="playlist-entry">
+            <strong>{{ entry.number }}. {{ entry.title }}</strong>
+            <span class="badge {% if entry.status == 'available' %}ok{% else %}warn{% endif %}">{{ entry.status }}</span>
+            {% if entry.duplicate %}<span class="badge">duplicate</span>{% endif %}
+            <div class="mono playlist-path">{{ entry.path }}</div>
+            {% if entry.audio_url %}
+              <audio controls preload="none" src="{{ entry.audio_url }}" aria-label="Play {{ entry.title }}"></audio>
+            {% else %}<div class="mono">{{ entry.reason }}</div>{% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+    </div>
+    {% if playlist.pages > 1 %}
+      <div class="pagination">
+        {% if playlist.page > 1 %}<a class="btn" href="/playlists/view?path={{ playlist.path|urlencode }}&amp;kind={{ kind }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}&amp;page={{ playlist.page - 1 }}">Previous</a>{% endif %}
+        <span class="mono">Page {{ playlist.page }} of {{ playlist.pages }}</span>
+        {% if playlist.page < playlist.pages %}<a class="btn" href="/playlists/view?path={{ playlist.path|urlencode }}&amp;kind={{ kind }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}&amp;page={{ playlist.page + 1 }}">Next</a>{% endif %}
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="card">No playlist entries match these filters.</div>
+  {% endif %}
+{% endif %}
+{% endblock %}
