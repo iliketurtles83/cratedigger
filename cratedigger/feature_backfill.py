@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal
 import pandas as pd
 
 from cratedigger.analytics import source_file_state
+from cratedigger.fingerprints import sha256_file
 from cratedigger.job_logs import read_log_tail
 from cratedigger.ops.registry import REPOSITORY_ROOT
 from lib.recommend_backfill import embedding_candidates, missing_hash_positions
@@ -34,6 +35,7 @@ class _CandidatePlan:
     available: int
     skipped: int
     source_state: FileState
+    source_sha256: str
     digest: str
 
 
@@ -57,11 +59,13 @@ def _track_state(value: str) -> FileState | None:
 
 
 def _digest_entries(
-    kind: BackfillKind, max_embeddings: int | None, available: int, source_state: FileState,
+    kind: BackfillKind, max_embeddings: int | None, available: int, source_state: FileState, source_sha256: str,
     entries: tuple[tuple[str, str, FileState | None], ...],
 ) -> str:
     digest = hashlib.sha256()
-    header = json.dumps([kind, max_embeddings, available, source_state], separators=(",", ":")).encode("utf-8")
+    header = json.dumps(
+        [kind, max_embeddings, available, source_state, source_sha256], separators=(",", ":")
+    ).encode("utf-8")
     digest.update(len(header).to_bytes(8, "big"))
     digest.update(header)
     for entry in entries:
@@ -72,7 +76,7 @@ def _digest_entries(
 
 
 def _inspect_candidates(
-    frame: pd.DataFrame, kind: BackfillKind, max_embeddings: int | None, source_state: FileState,
+    frame: pd.DataFrame, kind: BackfillKind, max_embeddings: int | None, source_state: FileState, source_sha256: str,
 ) -> _CandidatePlan:
     if "path" not in frame.columns:
         raise ValueError("Feature store is missing the path column")
@@ -99,14 +103,18 @@ def _inspect_candidates(
         available = len(wanted)
         skipped = len(missing)
     return _CandidatePlan(
-        tuple(indices), entries, available, skipped, source_state,
-        _digest_entries(kind, max_embeddings, available, source_state, entries),
+        tuple(indices), entries, available, skipped, source_state, source_sha256,
+        _digest_entries(kind, max_embeddings, available, source_state, source_sha256, entries),
     )
 
 
 def _current_digest(plan: _CandidatePlan, kind: BackfillKind, max_embeddings: int | None) -> str:
     entries = tuple((role, path, _track_state(path)) for role, path, _state in plan.entries)
-    return _digest_entries(kind, max_embeddings, plan.available, plan.source_state, entries)
+    return _digest_entries(kind, max_embeddings, plan.available, plan.source_state, plan.source_sha256, entries)
+
+
+def _source_unchanged(source: Path, state: FileState, digest: str) -> bool:
+    return source_file_state(source) == state and sha256_file(source) == digest and source_file_state(source) == state
 
 
 def reviewed_backfill_plan(
@@ -161,13 +169,17 @@ def run_guarded_backfill(
     source_state = source_file_state(source)
     if expected_source_state is not None and source_state != expected_source_state:
         raise RuntimeError("Feature store changed after the job was queued; no backfill was written")
+    source_sha256 = sha256_file(source)
     frame = pd.read_pickle(source)
     if not isinstance(frame, pd.DataFrame):
         raise ValueError("Feature store does not contain a pandas DataFrame")
-    plan = _inspect_candidates(frame, kind, max_embeddings, source_state)
+    plan = _inspect_candidates(frame, kind, max_embeddings, source_state, source_sha256)
     row_count = len(frame)
     del frame
-    if source_file_state(source) != source_state or _current_digest(plan, kind, max_embeddings) != plan.digest:
+    if (
+        not _source_unchanged(source, source_state, source_sha256)
+        or _current_digest(plan, kind, max_embeddings) != plan.digest
+    ):
         raise RuntimeError("Feature store or track files changed during preview; no backfill was written")
     check_extraction()
 
@@ -198,7 +210,11 @@ def run_guarded_backfill(
     with tempfile.TemporaryDirectory(prefix=".feature-backfill-", dir=source.parent) as temp_dir:
         staged = Path(temp_dir) / source.name
         shutil.copyfile(source, staged)
-        if _current_digest(plan, kind, max_embeddings) != plan.digest or source_file_state(source) != source_state:
+        if (
+            _current_digest(plan, kind, max_embeddings) != plan.digest
+            or source_file_state(source) != source_state
+            or sha256_file(staged) != source_sha256
+        ):
             raise RuntimeError("Feature store or track files changed while staging; no backfill was published")
         check_extraction()
         command = [
@@ -225,7 +241,10 @@ def run_guarded_backfill(
                 raise RuntimeError("Backfill left a selected embedding incomplete; no changes were published")
             updated = selected_count
         del result
-        if _current_digest(plan, kind, max_embeddings) != plan.digest or source_file_state(source) != source_state:
+        if (
+            _current_digest(plan, kind, max_embeddings) != plan.digest
+            or not _source_unchanged(source, source_state, source_sha256)
+        ):
             raise RuntimeError("Feature store or track files changed during backfill; no changes were published")
         check_extraction()
         if updated:

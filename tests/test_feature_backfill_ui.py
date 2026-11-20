@@ -7,6 +7,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -20,6 +21,7 @@ import pandas as pd
 from cratedigger.analytics import source_file_state
 from cratedigger.db import open_db
 from cratedigger.feature_backfill import BackfillKind, reviewed_backfill_plan, run_guarded_backfill
+from cratedigger.fingerprints import sha256_file
 from cratedigger.jobs import external_backfill_running, library_mutation_guard, start_job
 from cratedigger.ops.registry import REPOSITORY_ROOT, build_argv
 from cratedigger.web.app import create_app
@@ -52,6 +54,19 @@ class GuardedBackfillTests(unittest.TestCase):
     def assert_no_stage(self) -> None:
         self.assertEqual(list(self.root.glob(".feature-backfill-*")), [])
 
+    def rewrite_store_preserving_identity(self) -> bytes:
+        before = self.store.stat()
+        identity = source_file_state(self.store)
+        original = self.store.read_bytes()
+        frame = pd.read_pickle(self.store)
+        frame.loc[2, "schema_version"] = 99
+        frame.to_pickle(self.store)
+        os.utime(self.store, ns=(before.st_atime_ns, before.st_mtime_ns))
+        changed = self.store.read_bytes()
+        self.assertNotEqual(changed, original)
+        self.assertEqual(source_file_state(self.store), identity)
+        return changed
+
     def test_hash_preview_and_apply_only_publish_successful_changes(self) -> None:
         original = self.store.read_bytes()
         audio_before = self.audio.read_bytes()
@@ -83,7 +98,7 @@ class GuardedBackfillTests(unittest.TestCase):
     def test_changed_track_or_newly_available_path_invalidates_preview(self) -> None:
         original = self.store.read_bytes()
         plan, _ = self.preview()
-        self.audio.write_bytes(b"changed audio")
+        self.audio.write_bytes(b"changed audio with a different size")
         with redirect_stdout(StringIO()), self.assertRaisesRegex(RuntimeError, "plan changed"):
             run_guarded_backfill(self.store, "hashes", dry_run=False, expected_plan=plan["sha256"])
         self.assertEqual(self.store.read_bytes(), original)
@@ -96,12 +111,64 @@ class GuardedBackfillTests(unittest.TestCase):
 
     def test_standalone_preview_binds_the_feature_store_even_if_candidates_are_unchanged(self) -> None:
         plan, _ = self.preview()
-        frame = pd.read_pickle(self.store)
-        frame.loc[2, "schema_version"] = 99
-        frame.to_pickle(self.store)
-        external_change = self.store.read_bytes()
+        external_change = self.rewrite_store_preserving_identity()
         with redirect_stdout(StringIO()), self.assertRaisesRegex(RuntimeError, "plan changed"):
             run_guarded_backfill(self.store, "hashes", dry_run=False, expected_plan=plan["sha256"])
+        self.assertEqual(self.store.read_bytes(), external_change)
+        self.assert_no_stage()
+
+    def test_feature_store_changed_while_inspecting_is_rejected(self) -> None:
+        calls = 0
+
+        def change_after_hash(path: Path) -> str:
+            nonlocal calls
+            digest = sha256_file(path)
+            calls += 1
+            if calls == 1:
+                self.rewrite_store_preserving_identity()
+            return digest
+
+        with patch("cratedigger.feature_backfill.sha256_file", side_effect=change_after_hash):
+            with self.assertRaisesRegex(RuntimeError, "changed during preview"):
+                self.preview()
+        self.assert_no_stage()
+
+    def test_changed_staged_copy_is_rejected_before_starting_backfill(self) -> None:
+        plan, _ = self.preview()
+        original = self.store.read_bytes()
+        copyfile = shutil.copyfile
+
+        def corrupt_copy(source: Path, destination: Path) -> Path:
+            copied = copyfile(source, destination)
+            data = bytearray(destination.read_bytes())
+            data[-1] ^= 1
+            destination.write_bytes(data)
+            return copied
+
+        with patch("cratedigger.feature_backfill.shutil.copyfile", side_effect=corrupt_copy), patch(
+            "cratedigger.feature_backfill.subprocess.run", side_effect=AssertionError("unexpected process")
+        ), redirect_stdout(StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "changed while staging"):
+                run_guarded_backfill(self.store, "hashes", dry_run=False, expected_plan=plan["sha256"])
+        self.assertEqual(self.store.read_bytes(), original)
+        self.assert_no_stage()
+
+    def test_same_identity_feature_store_change_during_backfill_prevents_publication(self) -> None:
+        plan, _ = self.preview()
+        external_change = b""
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+            nonlocal external_change
+            staged = Path(command[command.index("--store") + 1])
+            frame = pd.read_pickle(staged)
+            frame.at[0, "audio_hash"] = "a1:fixture"
+            frame.to_pickle(staged)
+            external_change = self.rewrite_store_preserving_identity()
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("cratedigger.feature_backfill.subprocess.run", side_effect=fake_run), redirect_stdout(StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "changed during backfill"):
+                run_guarded_backfill(self.store, "hashes", dry_run=False, expected_plan=plan["sha256"])
         self.assertEqual(self.store.read_bytes(), external_change)
         self.assert_no_stage()
 

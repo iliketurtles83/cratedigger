@@ -149,10 +149,12 @@ embedding failures prevent publication; embeddings may download model files.
 The optional maximum limits an embedding run, and these changes are not
 undoable. Rebuild insights and the player export after a successful backfill.
 
-The UI also checks for standalone `07_recommend.py` backfills before
-feature-store jobs and library writes. These Linux process checks and the
-preview's file identity, size, and timestamp checks are best effort, not locks
-or content hashes; do not start independent extraction, backfills, or library
+The backfill preview fingerprints the feature store's contents with SHA-256;
+the staged copy and source are checked again before publication. Candidate
+audio files are checked by file identity, size, and timestamp, not content
+hashes. The UI also checks for standalone `07_recommend.py` backfills before
+feature-store jobs and library writes. These checks are best effort, not
+cross-process locks; do not start independent extraction, backfills, or library
 mutations concurrently. Cancellation before publication leaves the original
 store intact; a late cancellation can occur after replacement. Forced
 termination may leave a temporary `.feature-backfill-*` directory.

@@ -22,6 +22,7 @@ from cratedigger.analytics import DEFAULT_SNAPSHOT_PATH, source_file_state
 from cratedigger.db import open_db, utc_now_iso
 from cratedigger.feature_backfill import BackfillKind, reviewed_backfill_plan
 from cratedigger.feature_export import export_output_path, output_file_state
+from cratedigger.fingerprints import sha256_file
 from cratedigger.ops.registry import OPERATIONS, build_argv, normalize_params, validate_scope_value
 from cratedigger.server_sync import reviewed_sync_plan, sync_scope
 
@@ -225,12 +226,7 @@ def reconcile_jobs(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _file_fingerprint(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-_LOADED_CONFIG_FINGERPRINT = _file_fingerprint(Path(config.__file__))
+_LOADED_CONFIG_FINGERPRINT = sha256_file(Path(config.__file__))
 
 
 def _fingerprint(
@@ -272,6 +268,7 @@ def _fingerprint(
         sources.extend((
             repo_root / "07_recommend.py",
             repo_root / "cratedigger" / "feature_backfill.py",
+            repo_root / "cratedigger" / "fingerprints.py",
             repo_root / "cratedigger" / "analytics.py",
             repo_root / "cratedigger" / "job_logs.py",
             repo_root / "scripts" / "build_analytics.py",
@@ -294,7 +291,7 @@ def _fingerprint(
             "operation": operation_id,
             "params": params,
             "music_root": str(music_root.resolve()),
-            "sources": [_file_fingerprint(source) for source in sources],
+            "sources": [sha256_file(source) for source in sources],
             "inputs": inputs,
             "feature_store": feature_state,
             "export_output": export_state if operation_id == "recommend-export" else None,
@@ -480,7 +477,7 @@ def start_job(
             raise RuntimeError(
                 "A separate 07_recommend.py backfill is already running; wait for it before starting this operation"
             )
-    if _file_fingerprint(Path(config.__file__)) != _LOADED_CONFIG_FINGERPRINT:
+    if sha256_file(Path(config.__file__)) != _LOADED_CONFIG_FINGERPRINT:
         raise RuntimeError("config.py changed after the UI started; restart the UI before running operations")
     params = _prepare_params(operation_id, params, music_root=music_root, repo_root=repo_root)
     feature_state = (
