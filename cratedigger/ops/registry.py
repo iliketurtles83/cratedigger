@@ -124,7 +124,7 @@ _OPS = (
                   help="Incrementally extract audio features; the preview performs a dry run."),
     OperationSpec("analytics-snapshot", "Build insights snapshot", "Analysis", "scripts/build_analytics.py", "writes_analytics",
                   (_FEATURES,), locks=("features_store", "analytics_store"),
-                  help="Create a derived SQLite snapshot without changing the feature store. Wait for extraction to finish.",
+                  help="Create a derived SQLite snapshot and player-compatible similarity vectors without changing the feature store. Model heads may download; wait for extraction to finish.",
                   legacy=False),
     OperationSpec("recommend-backfill-hashes", "Backfill missing audio hashes", "Analysis", "scripts/run_recommend_backfill.py", "writes_features",
                   (_FEATURES,), fixed_args=("--hashes",), locks=("features_store", "music_root:read"),

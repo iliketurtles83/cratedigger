@@ -156,7 +156,8 @@ or content hashes; do not start independent extraction, backfills, or library
 mutations concurrently. Cancellation before publication leaves the original
 store intact; a late cancellation can occur after replacement. Forced
 termination may leave a temporary `.feature-backfill-*` directory.
-Standalone analytics/export commands still check only for extraction.
+The standalone analytics command checks for both extraction and backfills;
+the standalone export command still checks only for extraction.
 
 For a guarded standalone hash backfill, run
 `python scripts/run_recommend_backfill.py --hashes --dry-run`, then use the
@@ -184,13 +185,30 @@ store; rebuild it after extraction to see newer results. Counts are per unique
 `audio_hash`, reflect the feature-store snapshot rather than a live scan, and
 exclude rows without a hash. Genre history uses valid release years and reports
 undated tracks separately. The schema breakdown shows observed versions and
-recorded extraction errors, not an assertion that all tracks are current.
+recorded extraction errors, not an assertion that all tracks are current. A
+freshness badge compares file identity, size, and modification time, not file
+contents.
+
+The similarity explorer searches snapshot tracks and ranks neighbors by cosine
+similarity using the player's weighted vector recipe and learned descriptors.
+It reports eligible and excluded tracks, offers audio previews inside the
+configured library root, and is also linked from the Library page. Paths and
+tags reflect the snapshot; a file may have moved or changed. The in-memory
+index is rebuilt when the snapshot file changes, with a 256 MiB vector limit
+and a 300,000-track limit. The explorer warns if its stored recipe no longer
+matches the current one; its full-precision scores can differ slightly from
+the player's quantized scores.
+Snapshots from the previous schema still show the dashboard but must be
+rebuilt for similarity. The preview counts eligible tracks; applying also
+computes vectors, requires `onnxruntime` from the `audio` extra, and may
+download SHA-256-verified descriptor model heads.
 
 The equivalent standalone commands are
 `python scripts/build_analytics.py --dry-run` and, after reviewing the preview,
 `python scripts/build_analytics.py --no-dry-run`. Both refuse to read while an
-already-running `06_analyze.py` is detected. This check is best effort, so do
-not start extraction concurrently. Only use a trusted feature pickle.
+already-running `06_analyze.py` or `07_recommend.py` backfill is detected.
+These checks are best effort, so do not start either concurrently. Only use a
+trusted feature pickle.
 
 After extraction finishes, Operations can also **Export features for the
 player**. Its preview builds and validates a temporary export without replacing

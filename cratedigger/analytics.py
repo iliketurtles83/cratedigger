@@ -11,14 +11,17 @@ from pathlib import Path
 import re
 import sqlite3
 import tempfile
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 import pandas as pd
 
-from lib.recommender import deduplicate_features_by_audio_hash
+from lib.descriptors import DESCRIPTOR_COLUMNS, DESCRIPTOR_RECIPE, attach_descriptors
+from lib.embeddings import STYLE_DIM
+from lib.recommender import RECIPE_VERSION, VectorBaker, deduplicate_features_by_audio_hash, exportable_mask
 
-SNAPSHOT_VERSION = 2
+SNAPSHOT_VERSION = 3
+SIMILARITY_DIMS = 410
 DEFAULT_SNAPSHOT_PATH = Path(__file__).resolve().parents[1] / "analytics" / "library.sqlite3"
 
 _SCHEMA = """
@@ -54,6 +57,24 @@ CREATE TABLE tracks (
 CREATE INDEX idx_tracks_year ON tracks(release_year);
 CREATE INDEX idx_tracks_genre1_year ON tracks(genre_tier1, release_year);
 CREATE INDEX idx_tracks_genre2_year ON tracks(genre_tier2, release_year);
+CREATE TABLE similarity_vectors (
+    audio_hash TEXT PRIMARY KEY REFERENCES tracks(audio_hash),
+    vector BLOB NOT NULL,
+    happy REAL,
+    sad REAL,
+    relaxed REAL,
+    aggressive REAL,
+    party REAL,
+    acousticness REAL,
+    electronic REAL,
+    danceability REAL,
+    instrumentalness REAL,
+    tonal REAL,
+    energy REAL,
+    valence REAL,
+    approachability REAL,
+    engagement REAL
+);
 CREATE TABLE summary (
     tracks INTEGER NOT NULL,
     artists INTEGER NOT NULL,
@@ -143,12 +164,21 @@ def _genre_tiers(genre: str | None) -> tuple[str | None, str | None]:
     return parts[0], " / ".join(parts[:2])
 
 
-def _snapshot_rows(frame: pd.DataFrame) -> tuple[list[tuple[Any, ...]], dict[str, int]]:
+def _canonical_features(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     if "audio_hash" not in frame.columns:
         raise ValueError("Feature store is missing the audio_hash column")
     valid = frame["audio_hash"].map(lambda value: isinstance(value, str) and bool(value.strip()))
     hashed = frame.loc[valid].reset_index(drop=True)
     canonical = deduplicate_features_by_audio_hash(hashed)
+    return canonical, {
+        "source_rows": len(frame),
+        "unique_tracks": len(canonical),
+        "duplicate_rows": len(hashed) - len(canonical),
+        "unhashed_rows": len(frame) - len(hashed),
+    }
+
+
+def _snapshot_rows(canonical: pd.DataFrame) -> list[tuple[Any, ...]]:
     rows = []
     for _, row in canonical.iterrows():
         path = _text(row.get("path"), "path")
@@ -183,12 +213,60 @@ def _snapshot_rows(frame: pd.DataFrame) -> tuple[list[tuple[Any, ...]], dict[str
             _text(row.get("signal_status"), "signal_status"),
             _text(row.get("analyzed_at"), "analyzed_at"),
         ))
-    return rows, {
-        "source_rows": len(frame),
-        "unique_tracks": len(rows),
-        "duplicate_rows": len(hashed) - len(rows),
-        "unhashed_rows": len(frame) - len(hashed),
+    return rows
+
+
+def _similarity_candidates(canonical: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    eligible = exportable_mask(canonical)
+    if "embedding" not in canonical.columns:
+        return canonical.iloc[0:0], {
+            "similarity_tracks": 0, "similarity_excluded": len(canonical), "similarity_invalid": 0,
+        }
+
+    def usable_style(value: Any) -> bool:
+        if not isinstance(value, np.ndarray) or value.shape != (STYLE_DIM,):
+            return False
+        with np.errstate(over="ignore", invalid="ignore"):
+            style = value.astype(np.float32)
+            norm = np.linalg.norm(style)
+        return bool(np.isfinite(style).all() and np.isfinite(norm) and norm > 1e-9)
+
+    usable = canonical["embedding"].map(usable_style)
+    invalid = int((eligible & ~usable).sum())
+    selected = canonical.loc[eligible & usable]
+    return selected, {
+        "similarity_tracks": len(selected),
+        "similarity_excluded": len(canonical) - len(selected),
+        "similarity_invalid": invalid,
     }
+
+
+def _similarity_rows(candidates: pd.DataFrame) -> Iterator[tuple[Any, ...]]:
+    if candidates.empty:
+        return
+    try:
+        enriched = attach_descriptors(candidates)
+    except ModuleNotFoundError as exc:
+        if exc.name == "onnxruntime":
+            raise RuntimeError("Similarity vector generation requires onnxruntime from the audio extra") from exc
+        raise
+    baker = VectorBaker()
+    baker.fit_scalars(enriched)
+    for _, row in enriched.iterrows():
+        record = row.to_dict()
+        record["bpm"] = _number(row.get("bpm"), "bpm")
+        record["key"] = _scalar(row.get("key"), "key")
+        record["mode"] = _scalar(row.get("mode"), "mode")
+        vector = baker.bake_vector(record)
+        if vector.shape != (SIMILARITY_DIMS,) or not np.isfinite(vector).all():
+            raise ValueError(f"Invalid similarity vector for audio hash {row['audio_hash']}")
+        if not math.isclose(float(np.linalg.norm(vector)), 1.0, rel_tol=1e-5, abs_tol=1e-5):
+            raise ValueError(f"Similarity vector is not normalized for audio hash {row['audio_hash']}")
+        yield (
+            row["audio_hash"],
+            vector.astype("<f4", copy=False).tobytes(),
+            *(_number(row.get(field), field) for field in DESCRIPTOR_COLUMNS),
+        )
 
 
 def _populate_aggregates(conn: sqlite3.Connection) -> None:
@@ -251,12 +329,18 @@ def build_snapshot(
         raise ValueError("Feature store does not contain a pandas DataFrame")
     if source_file_state(source) != signature:
         raise RuntimeError("Feature store changed while reading; no snapshot was written")
-    rows, counts = _snapshot_rows(frame)
+    canonical, counts = _canonical_features(frame)
+    del frame
+    rows = _snapshot_rows(canonical)
+    candidates, similarity_counts = _similarity_candidates(canonical)
+    counts.update(similarity_counts)
     generated_at = datetime.now(timezone.utc).isoformat()
     summary: dict[str, Any] = {
         **counts,
         "generated_at": generated_at,
         "source": str(source),
+        "source_dev": signature[0],
+        "source_ino": signature[1],
         "source_size": signature[2],
         "source_mtime_ns": signature[3],
         "output": str(output),
@@ -278,8 +362,13 @@ def build_snapshot(
                 "snapshot_version": SNAPSHOT_VERSION,
                 "generated_at": generated_at,
                 "source": str(source),
+                "source_dev": signature[0],
+                "source_ino": signature[1],
                 "source_size": signature[2],
                 "source_mtime_ns": signature[3],
+                "similarity_dims": SIMILARITY_DIMS,
+                "similarity_recipe": RECIPE_VERSION,
+                "descriptor_recipe": DESCRIPTOR_RECIPE,
                 **counts,
             }
             conn.executemany(
@@ -288,6 +377,12 @@ def build_snapshot(
             )
             placeholders = ",".join("?" for _ in range(26))
             conn.executemany(f"INSERT INTO tracks VALUES ({placeholders})", rows)
+            vector_columns = ("audio_hash", "vector", *DESCRIPTOR_COLUMNS)
+            vector_placeholders = ",".join("?" for _ in vector_columns)
+            conn.executemany(
+                f"INSERT INTO similarity_vectors ({','.join(vector_columns)}) VALUES ({vector_placeholders})",
+                _similarity_rows(candidates),
+            )
             _populate_aggregates(conn)
             conn.commit()
         if source_file_state(source) != signature:

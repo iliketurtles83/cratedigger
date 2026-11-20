@@ -253,7 +253,12 @@ def _fingerprint(
         Path(config.__file__),
     ]
     if operation_id == "analytics-snapshot":
-        sources.extend((repo_root / "cratedigger" / "analytics.py", repo_root / "lib" / "recommender.py"))
+        sources.extend((
+            repo_root / "cratedigger" / "analytics.py",
+            repo_root / "lib" / "recommender.py",
+            repo_root / "lib" / "descriptors.py",
+            repo_root / "lib" / "embeddings.py",
+        ))
     if operation_id == "recommend-export":
         sources.extend((
             repo_root / "cratedigger" / "feature_export.py",

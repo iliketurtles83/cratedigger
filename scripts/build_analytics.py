@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import config
 from cratedigger.analytics import DEFAULT_SNAPSHOT_PATH, build_snapshot
-from cratedigger.jobs import external_analysis_running
+from cratedigger.jobs import external_analysis_running, external_backfill_running
 
 
 def _parse_source_state(value: str) -> tuple[int, int, int, int]:
@@ -38,6 +38,8 @@ def main() -> None:
     args = parser.parse_args()
     if external_analysis_running(REPO_ROOT):
         parser.error("Feature extraction is running; wait for it to finish before reading the feature store")
+    if external_backfill_running(REPO_ROOT):
+        parser.error("A feature backfill is running; wait for it to finish before reading the feature store")
     summary = build_snapshot(
         args.features, args.output, dry_run=not args.no_dry_run, expected_source_state=args.expected_source_state
     )

@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Similarity — Cratedigger{% endblock %}
+
+{% macro track_card(track, show_score=false, show_action=true) %}
+  <li class="similarity-track">
+    <div class="similarity-heading">
+      <div>
+        <strong>{{ track.title }}</strong>
+        <div>{{ track.artist or 'Unknown artist' }}{% if track.album %} · {{ track.album }}{% endif %}</div>
+        <div class="mono">{{ track.genre or 'Unknown genre' }}</div>
+      </div>
+      <div class="similarity-actions">
+        {% if show_score %}<span class="badge">Cosine {{ "%.3f"|format(track.score) }}</span>{% endif %}
+        {% if show_action and track.eligible %}<a class="btn" href="/insights/similarity?seed={{ track.audio_hash|urlencode }}">Find similar</a>
+        {% elif not track.eligible %}<span class="badge warn">No similarity vector</span>{% endif %}
+      </div>
+    </div>
+    {% if track.audio_url %}
+      <audio controls preload="none" src="{{ track.audio_url }}" aria-label="Play {{ track.title }}"></audio>
+    {% else %}<div class="mono">{{ track.audio_problem }}</div>{% endif %}
+  </li>
+{% endmacro %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Find similar tracks</h1>
+    <div class="mono">Search the analytics snapshot and explore its nearest neighbors</div>
+  </div>
+  <a class="btn" href="/insights">Back to insights</a>
+</div>
+{% if index %}
+  <div class="toolbar">
+    <div><span class="badge {% if freshness.state == 'current' %}ok{% else %}warn{% endif %}">{{ freshness.state }}</span>
+      <span class="mono">{{ freshness.message }} File metadata cannot detect every external change.</span></div>
+    <a class="btn" href="/ops#op-analytics-snapshot">Refresh snapshot</a>
+  </div>
+  {% if index.metadata.snapshot_version < 3 %}
+    <div class="card">This older snapshot does not contain similarity vectors. Preview and apply <a href="/ops#op-analytics-snapshot">Build insights snapshot</a> to enable this explorer.</div>
+  {% else %}
+    {% if not index.uses_current_recipe %}
+      <div class="flash warn">This snapshot uses an older similarity or descriptor recipe. Rebuild it to match the current player recipe.</div>
+    {% endif %}
+    <p class="insights-note">
+      {{ "{:,}".format(index.metadata.similarity_tracks) }} of {{ "{:,}".format(index.metadata.unique_tracks) }}
+      tracks are eligible; {{ "{:,}".format(index.metadata.similarity_excluded) }} lack usable audio features.
+      {% if index.metadata.similarity_invalid %}{{ "{:,}".format(index.metadata.similarity_invalid) }} {{ 'has a malformed style vector' if index.metadata.similarity_invalid == 1 else 'have malformed style vectors' }}.{% endif %}
+      Results use cosine similarity of the player vector recipe before player-side quantization, not a match percentage.
+      Audio previews use the paths recorded in this snapshot; files may have moved or changed.
+    </p>
+    <form method="get" action="/insights/similarity" class="inline-form similarity-search">
+      <label for="similarity-query">Artist, album, title, genre or path</label>
+      <input id="similarity-query" type="text" name="q" value="{{ q }}" maxlength="200" placeholder="Search tracks">
+      <button type="submit">Search</button>
+      {% if q or selected %}<a class="btn" href="/insights/similarity">Clear</a>{% endif %}
+    </form>
+
+    {% if seed_error %}<div class="flash warn">{{ seed_error }}</div>{% endif %}
+    {% if selected %}
+      <section class="card">
+        <h2 class="similarity-section-title">Selected track</h2>
+        <ul class="similarity-list">{{ track_card(selected, show_action=false) }}</ul>
+        {% if not selected.eligible %}
+          <p>This track has no usable similarity vector in the snapshot.</p>
+        {% endif %}
+      </section>
+      {% if selected.eligible %}
+        <section class="card">
+          <h2 class="similarity-section-title">More like this</h2>
+          {% if neighbors %}<ol class="similarity-list">{% for track in neighbors %}{{ track_card(track, true) }}{% endfor %}</ol>
+          {% else %}<p>No other eligible tracks are available in this snapshot.</p>{% endif %}
+        </section>
+      {% endif %}
+    {% endif %}
+
+    {% if q %}
+      <section class="card">
+        <h2 class="similarity-section-title">Search results</h2>
+        <p class="mono">{{ "{:,}".format(total) }} matching {{ 'track' if total == 1 else 'tracks' }}{% if total > search_limit %}; showing the first {{ search_limit }}. Refine your search to see others{% endif %}.</p>
+        {% if matches %}<ul class="similarity-list">{% for track in matches %}{{ track_card(track) }}{% endfor %}</ul>
+        {% else %}<p>No tracks match this search.</p>{% endif %}
+      </section>
+    {% elif not selected and not seed_error %}
+      <div class="card">Search for a track above, or use “Find similar” in the library browser.</div>
+    {% endif %}
+  {% endif %}
+{% elif not err %}
+  <div class="card">No analytics snapshot yet. Preview and apply <a href="/ops#op-analytics-snapshot">Build insights snapshot</a> after extraction finishes.</div>
+{% else %}
+  <p>Rebuild the snapshot after resolving the error above.</p>
+{% endif %}
+{% endblock %}

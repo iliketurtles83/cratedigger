@@ -9,7 +9,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from cratedigger.analytics import SNAPSHOT_VERSION
+from cratedigger.analytics import SIMILARITY_DIMS, SNAPSHOT_VERSION, source_file_state
 
 _COLORS = (
     "#65b9ff", "#ffad66", "#7cdda4", "#e593df", "#e7d270",
@@ -17,9 +17,9 @@ _COLORS = (
 )
 
 
-def _read_metadata(conn: sqlite3.Connection) -> dict[str, Any]:
+def read_snapshot_metadata(conn: sqlite3.Connection) -> dict[str, Any]:
     metadata = {row["key"]: json.loads(row["value"]) for row in conn.execute("SELECT key, value FROM metadata")}
-    if metadata.get("snapshot_version") != SNAPSHOT_VERSION:
+    if type(metadata.get("snapshot_version")) is not int or metadata["snapshot_version"] not in (2, SNAPSHOT_VERSION):
         raise ValueError("Unsupported analytics snapshot version; rebuild the snapshot")
     for key in ("generated_at", "source_rows", "unique_tracks", "duplicate_rows", "unhashed_rows"):
         if key not in metadata:
@@ -31,7 +31,40 @@ def _read_metadata(conn: sqlite3.Connection) -> dict[str, Any]:
             raise ValueError(f"Analytics snapshot has an invalid count: {key}")
     if metadata["source_rows"] != metadata["unique_tracks"] + metadata["duplicate_rows"] + metadata["unhashed_rows"]:
         raise ValueError("Analytics snapshot counts are inconsistent; rebuild the snapshot")
+    if metadata["snapshot_version"] == SNAPSHOT_VERSION:
+        for key in ("similarity_tracks", "similarity_excluded", "similarity_invalid"):
+            if type(metadata.get(key)) is not int or metadata[key] < 0:
+                raise ValueError(f"Analytics snapshot has an invalid count: {key}")
+        if (
+            metadata["similarity_tracks"] + metadata["similarity_excluded"] != metadata["unique_tracks"]
+            or metadata["similarity_invalid"] > metadata["similarity_excluded"]
+            or metadata.get("similarity_dims") != SIMILARITY_DIMS
+            or not isinstance(metadata.get("similarity_recipe"), str)
+            or not isinstance(metadata.get("descriptor_recipe"), str)
+        ):
+            raise ValueError("Analytics snapshot similarity metadata is inconsistent; rebuild the snapshot")
     return metadata
+
+
+def snapshot_freshness(metadata: dict[str, Any], features_path: Path, repo_root: Path) -> dict[str, str]:
+    """Compare snapshot and source metadata without opening the feature store."""
+    try:
+        source = metadata.get("source")
+        if not isinstance(source, str) or not source:
+            raise ValueError("snapshot source is missing")
+        configured = features_path if features_path.is_absolute() else repo_root / features_path
+        if Path(source).resolve() != configured.resolve():
+            return {"state": "changed", "message": "This snapshot used a different feature store."}
+        current = source_file_state(configured)
+        expected = (metadata.get("source_size"), metadata.get("source_mtime_ns"))
+        if current[2:] != expected:
+            return {"state": "changed", "message": "The feature store changed since this snapshot was built."}
+        if metadata["snapshot_version"] == SNAPSHOT_VERSION:
+            if current[:2] != (metadata.get("source_dev"), metadata.get("source_ino")):
+                return {"state": "changed", "message": "The feature store was replaced since this snapshot was built."}
+        return {"state": "current", "message": "The feature store's file identity has not changed."}
+    except (OSError, ValueError, TypeError) as exc:
+        return {"state": "unknown", "message": f"Cannot verify snapshot freshness: {exc}"}
 
 
 def _counts(conn: sqlite3.Connection, column: str, *, total: int, limit: int = 10) -> list[dict[str, Any]]:
@@ -113,7 +146,7 @@ def load_insights(snapshot_path: Path, *, tier: int = 1, top_n: int = 6) -> dict
     try:
         with closing(sqlite3.connect(uri, uri=True)) as conn:
             conn.row_factory = sqlite3.Row
-            metadata = _read_metadata(conn)
+            metadata = read_snapshot_metadata(conn)
             row = conn.execute(
                 "SELECT tracks, artists, albums, duration_ms, duration_tracks, bytes, sized_tracks, errors "
                 "FROM summary"

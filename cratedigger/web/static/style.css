@@ -241,6 +241,14 @@ audio { width: 100%; height: 32px; margin-top: 6px; }
 .timeline-stack span { flex: none; display: block; }
 .timeline-stack:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 .timeline-label { display: block; height: 20px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.similarity-search { margin: 16px 0; }
+.similarity-search input { flex: 1 1 220px; }
+.similarity-section-title { margin: 0 0 10px; font-size: 16px; }
+.similarity-list { list-style: none; padding: 0; margin: 0; }
+.similarity-track { padding: 10px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.similarity-heading { display: flex; justify-content: space-between; gap: 12px; }
+.similarity-actions { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-end; gap: 6px; }
+.similarity-track audio { max-width: 430px; }
 .report-scroll { overflow-x: auto; }
 .report-heading { margin: 0; font-size: 16px; }
 .report-path { overflow-wrap: anywhere; }

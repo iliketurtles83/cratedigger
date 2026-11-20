@@ -24,8 +24,9 @@ from cratedigger.jobs import (
 from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
 from cratedigger.web import reports, services
 from cratedigger.web.export_status import export_job_status
-from cratedigger.web.insights import load_insights
+from cratedigger.web.insights import load_insights, snapshot_freshness
 from cratedigger.web.security import LocalSecurityMiddleware
+from cratedigger.web.similarity import SEARCH_LIMIT, SimilarityCache, SnapshotTrack
 
 _WEB_DIR = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
@@ -86,6 +87,35 @@ def _nav_badges(db_path: Path, music_root: Path) -> dict[str, object]:
     }
 
 
+def _similarity_track(track: SnapshotTrack, music_root: Path) -> dict[str, object]:
+    audio_url = ""
+    audio_problem = "No audio path recorded in the snapshot"
+    if track.path:
+        try:
+            path = services.resolve_safe_path(track.path, music_root)
+            if not path.is_file():
+                audio_problem = "Audio file is unavailable"
+            elif path.suffix.lower() not in config.AUDIO_EXTENSIONS:
+                audio_problem = "Audio format is not supported"
+            else:
+                audio_url = "/media/audio?" + urlencode({"path": str(path)})
+                audio_problem = ""
+        except ValueError:
+            audio_problem = "Audio path is outside the configured library"
+        except (OSError, RuntimeError) as exc:
+            audio_problem = f"Cannot access audio file: {exc}"
+    return {
+        "audio_hash": track.audio_hash,
+        "title": track.display_title,
+        "artist": track.artist,
+        "album": track.album,
+        "genre": track.genre,
+        "eligible": track.vector_index is not None,
+        "audio_url": audio_url,
+        "audio_problem": audio_problem,
+    }
+
+
 def create_app(
     *,
     db_path: Path | None = None,
@@ -107,6 +137,7 @@ def create_app(
     app.state.repo_root = REPOSITORY_ROOT
     app.state.logs_dir = Path(logs_dir or REPOSITORY_ROOT / "logs" / "jobs")
     app.state.analytics_path = Path(analytics_path or DEFAULT_SNAPSHOT_PATH)
+    app.state.similarity_cache = SimilarityCache()
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")), name="static")
 
     def protected_mutation() -> AbstractContextManager[None]:
@@ -137,8 +168,65 @@ def create_app(
                 "active_nav": "insights",
                 "badges": _nav_badges(app.state.db_path, app.state.music_root),
                 "insights": data,
+                "freshness": snapshot_freshness(
+                    data["metadata"], app.state.features_path, app.state.repo_root
+                ) if data else None,
                 "tier": tier,
                 "top_n": top_n,
+                "err": error,
+            },
+            status_code=503 if error else 200,
+        )
+
+    @app.get("/insights/similarity", response_class=HTMLResponse)
+    def similarity_page(
+        request: Request,
+        q: str = Query(default="", max_length=200),
+        seed: str = Query(default="", max_length=256),
+    ) -> HTMLResponse:
+        error = ""
+        index = None
+        selected = None
+        seed_error = ""
+        matches: list[dict[str, object]] = []
+        neighbors: list[dict[str, object]] = []
+        total = 0
+        q = q.strip()
+        try:
+            index = app.state.similarity_cache.get(app.state.analytics_path)
+            if index and index.metadata["snapshot_version"] >= 3:
+                hits, total = index.search(q)
+                matches = [_similarity_track(track, app.state.music_root) for track in hits]
+                if seed:
+                    track = index.by_hash.get(seed)
+                    if track is None:
+                        seed_error = "This track is not in the snapshot. Rebuild insights after updating the feature store."
+                    else:
+                        selected = _similarity_track(track, app.state.music_root)
+                        neighbors = [
+                            {**_similarity_track(neighbor, app.state.music_root), "score": score}
+                            for neighbor, score in index.neighbors(track)
+                        ]
+        except ValueError as exc:
+            index = None
+            error = str(exc)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "similarity.html",
+            {
+                "active_nav": "insights",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "index": index,
+                "freshness": snapshot_freshness(
+                    index.metadata, app.state.features_path, app.state.repo_root
+                ) if index else None,
+                "q": q,
+                "selected": selected,
+                "seed_error": seed_error,
+                "matches": matches,
+                "total": total,
+                "search_limit": SEARCH_LIMIT,
+                "neighbors": neighbors,
                 "err": error,
             },
             status_code=503 if error else 200,

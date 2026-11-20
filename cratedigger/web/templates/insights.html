@@ -11,6 +11,11 @@
 </div>
 
 {% if insights %}
+  <div class="toolbar">
+    <div><span class="badge {% if freshness.state == 'current' %}ok{% else %}warn{% endif %}">{{ freshness.state }}</span>
+      <span class="mono">{{ freshness.message }} File metadata cannot detect every external change.</span></div>
+    <a class="btn" href="/insights/similarity">Explore similar tracks</a>
+  </div>
   <p class="insights-note">
     Snapshot built {{ insights.metadata.generated_at }}. It represents {{ "{:,}".format(insights.tracks) }}
     unique audio hashes from {{ "{:,}".format(insights.metadata.source_rows) }} feature-store rows;
@@ -27,6 +32,15 @@
     <section class="card insight-metric"><span>Known file size</span><strong>{{ "{:,.1f}".format(insights.bytes / 1073741824) }} GiB</strong><small>{{ "{:,}".format(insights.sized_tracks) }} tracks with size</small></section>
     <section class="card insight-metric"><span>Extraction errors recorded</span><strong>{{ "{:,}".format(insights.errors) }}</strong></section>
   </div>
+
+  {% if insights.metadata.snapshot_version >= 3 %}
+    <p class="mono">{{ "{:,}".format(insights.metadata.similarity_tracks) }} of {{ "{:,}".format(insights.tracks) }}
+      tracks have player-compatible similarity vectors; {{ "{:,}".format(insights.metadata.similarity_excluded) }}
+      are excluded for missing or unusable audio features.
+      {% if insights.metadata.similarity_invalid %}{{ "{:,}".format(insights.metadata.similarity_invalid) }} {{ 'has a malformed style vector' if insights.metadata.similarity_invalid == 1 else 'have malformed style vectors' }}.{% endif %}</p>
+  {% else %}
+    <p class="mono">Rebuild this older snapshot to enable similarity exploration.</p>
+  {% endif %}
 
   <div class="insight-grid">
     <section class="card">
