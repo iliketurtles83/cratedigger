@@ -65,6 +65,7 @@
         <ul class="similarity-list">{{ track_card(selected, show_action=false) }}</ul>
         {% if not selected.eligible %}
           <p>This track has no usable similarity vector in the snapshot.</p>
+          <a href="/insights/analysis-health?q={{ selected.audio_hash|urlencode }}">Inspect extraction evidence</a>
         {% endif %}
       </section>
       {% if selected.eligible %}

@@ -7,7 +7,7 @@ from contextlib import AbstractContextManager
 import json
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
@@ -23,6 +23,7 @@ from cratedigger.jobs import (
 )
 from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
 from cratedigger.web import reports, services
+from cratedigger.web.analysis_health import load_analysis_health
 from cratedigger.web.export_status import export_job_status
 from cratedigger.web.insights import load_insights, snapshot_freshness
 from cratedigger.web.security import LocalSecurityMiddleware
@@ -251,6 +252,37 @@ def create_app(
                 "freshness": snapshot_freshness(
                     data["metadata"], app.state.features_path, app.state.repo_root
                 ) if data else None,
+                "err": error,
+            },
+            status_code=503 if error else 200,
+        )
+
+    @app.get("/insights/analysis-health", response_class=HTMLResponse)
+    def analysis_health_page(
+        request: Request,
+        kind: Literal["all", "error", "truncated", "silent", "excluded"] = Query(default="all"),
+        q: str = Query(default="", max_length=200),
+        page: int = Query(default=1, ge=1),
+    ) -> HTMLResponse:
+        error = ""
+        q = q.strip()
+        try:
+            data = load_analysis_health(app.state.analytics_path, kind=kind, query=q, page=page)
+        except ValueError as exc:
+            data = None
+            error = str(exc)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "analysis_health.html",
+            {
+                "active_nav": "insights",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "health": data,
+                "freshness": snapshot_freshness(
+                    data["metadata"], app.state.features_path, app.state.repo_root
+                ) if data else None,
+                "kind": kind,
+                "q": q,
                 "err": error,
             },
             status_code=503 if error else 200,

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Analysis health — Cratedigger{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Analysis health</h1>
+    <div class="mono">Inspect extraction evidence from the read-only analytics snapshot</div>
+  </div>
+  <div class="insight-links">
+    <a class="btn" href="/insights">Back to insights</a>
+    <a class="btn" href="/ops#op-analyze">Preview feature extraction</a>
+  </div>
+</div>
+{% if health %}
+  <div class="toolbar">
+    <div><span class="badge {% if freshness.state == 'current' %}ok{% else %}warn{% endif %}">{{ freshness.state }}</span>
+      <span class="mono">{{ freshness.message }} File metadata cannot detect every external change.</span></div>
+    <a class="btn" href="/ops#op-analytics-snapshot">Refresh snapshot</a>
+  </div>
+  <p class="insights-note">Snapshot built {{ health.metadata.generated_at }} for {{ "{:,}".format(health.tracks) }}
+    unique audio hashes. Category counts cover the entire snapshot and overlap: one track may appear in several categories.
+    This is point-in-time evidence,
+    separate from the dismissible <a href="/health">Library Health queue</a>; rebuild the snapshot after changes.</p>
+  <div class="pills">
+    {% for value, label in [('all', 'All flagged'), ('error', 'Recorded errors'), ('truncated', 'Truncated signals'), ('silent', 'Silent signals')] %}
+      <a class="pill {% if kind == value %}active{% endif %}" href="/insights/analysis-health?kind={{ value }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}">
+        {{ label }} <span class="badge">{{ "{:,}".format(health.counts[value]) }}</span>
+      </a>
+    {% endfor %}
+    {% if health.has_vectors %}
+      <a class="pill {% if kind == 'excluded' %}active{% endif %}" href="/insights/analysis-health?kind=excluded{% if q %}&amp;q={{ q|urlencode }}{% endif %}">
+        No similarity vector <span class="badge">{{ "{:,}".format(health.counts.excluded) }}</span>
+      </a>
+    {% else %}
+      <span class="pill">Similarity exclusions unavailable in this older snapshot</span>
+    {% endif %}
+  </div>
+  <form method="get" action="/insights/analysis-health" class="inline-form">
+    <input type="hidden" name="kind" value="{{ kind }}">
+    <label for="analysis-query">Search evidence</label>
+    <input id="analysis-query" type="text" name="q" value="{{ q }}" maxlength="200" placeholder="Artist, track, path, hash or error">
+    <button type="submit">Search</button>
+    {% if q %}<a class="btn" href="/insights/analysis-health?kind={{ kind }}">Clear</a>{% endif %}
+  </form>
+  <p class="insights-note">Missing vectors may be expected for silent or very short decodes, or caused by failed features.
+    Review the existing <a href="/ops#op-recommend-backfill-embeddings">embedding backfill preview</a> before deciding whether to repair anything.
+    None of these links automatically changes audio or the feature store.</p>
+
+  {% if health.unavailable_filter %}
+    <div class="card">This older snapshot does not contain similarity exclusions. Rebuild the snapshot to inspect them.</div>
+  {% elif health.entries %}
+    <p class="mono">{{ "{:,}".format(health.total) }} matching {{ 'track' if health.total == 1 else 'tracks' }} · page {{ health.page }} of {{ health.pages }}</p>
+    {% for track in health.entries %}
+      <article class="card analysis-item">
+        <div class="toolbar">
+          <div>
+            <strong>{{ track.title }}</strong>
+            <div>{{ track.artist or 'Unknown artist' }}{% if track.album %} · {{ track.album }}{% endif %}</div>
+          </div>
+          <div class="insight-links">
+            {% if track.path %}<a class="btn" href="/library?q={{ track.path|urlencode }}">Find in library</a>{% endif %}
+            <a class="btn" href="/insights/similarity?seed={{ track.audio_hash|urlencode }}">Similarity</a>
+          </div>
+        </div>
+        <div class="pills">
+          {% if track.error %}<span class="badge warn">Recorded error</span>{% endif %}
+          {% if track.signal_status == 'truncated' %}<span class="badge warn">Truncated signal</span>{% endif %}
+          {% if track.signal_status == 'silent' %}<span class="badge">Silent signal</span>{% endif %}
+          {% if track.has_vector is sameas false %}<span class="badge">No similarity vector</span>{% endif %}
+          <span class="badge">Signal: {{ track.signal_status }}</span>
+          {% if track.coverage is not none %}<span class="badge">Decode coverage: {{ "%.1f"|format(track.coverage * 100) }}%</span>{% endif %}
+        </div>
+        <div class="mono analysis-path">{{ track.path or 'No path recorded' }}</div>
+        <div class="mono analysis-path">Audio hash: {{ track.audio_hash }}</div>
+        {% if track.error %}<details><summary>Recorded error</summary><pre class="analysis-error">{{ track.error }}</pre></details>{% endif %}
+      </article>
+    {% endfor %}
+    {% if health.pages > 1 %}
+      <div class="pagination">
+        {% if health.page > 1 %}<a class="btn" href="/insights/analysis-health?kind={{ kind }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}&amp;page={{ health.page - 1 }}">Previous</a>{% endif %}
+        <span class="mono">Page {{ health.page }} of {{ health.pages }}</span>
+        {% if health.page < health.pages %}<a class="btn" href="/insights/analysis-health?kind={{ kind }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}&amp;page={{ health.page + 1 }}">Next</a>{% endif %}
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="card">No snapshot evidence matches this filter.</div>
+  {% endif %}
+{% elif not err %}
+  <div class="card">No analytics snapshot yet. Preview and apply <a href="/ops#op-analytics-snapshot">Build insights snapshot</a> after extraction finishes.</div>
+{% else %}
+  <p>Rebuild the snapshot after resolving the error above.</p>
+{% endif %}
+{% endblock %}

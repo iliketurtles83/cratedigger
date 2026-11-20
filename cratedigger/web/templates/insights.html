@@ -17,6 +17,7 @@
     <div class="insight-links">
       <a class="btn" href="/insights/profile">Explore musical features</a>
       <a class="btn" href="/insights/similarity">Explore similar tracks</a>
+      <a class="btn" href="/insights/analysis-health">Inspect analysis health</a>
     </div>
   </div>
   <p class="insights-note">
@@ -33,7 +34,7 @@
     <section class="card insight-metric"><span>Tagged artist / album pairs</span><strong>{{ "{:,}".format(insights.albums) }}</strong></section>
     <section class="card insight-metric"><span>Known duration</span><strong>{{ "{:,.1f}".format(insights.duration_ms / 3600000) }} h</strong><small>{{ "{:,}".format(insights.duration_tracks) }} tracks with duration</small></section>
     <section class="card insight-metric"><span>Known file size</span><strong>{{ "{:,.1f}".format(insights.bytes / 1073741824) }} GiB</strong><small>{{ "{:,}".format(insights.sized_tracks) }} tracks with size</small></section>
-    <section class="card insight-metric"><span>Extraction errors recorded</span><strong>{{ "{:,}".format(insights.errors) }}</strong></section>
+    <section class="card insight-metric"><span>Extraction errors recorded</span><strong><a href="/insights/analysis-health?kind=error">{{ "{:,}".format(insights.errors) }}</a></strong></section>
   </div>
 
   {% if insights.metadata.snapshot_version >= 3 %}

@@ -195,6 +195,13 @@ tracks. Tempo, key, and mood are estimates; learned scores are model-derived
 rather than calibrated mood labels. Older snapshots still show tempo, key, and
 loudness, but need rebuilding for learned descriptors.
 
+Analysis health lists recorded extraction errors, truncated or silent signals,
+and tracks excluded from similarity, with searchable, paginated snapshot
+evidence. Categories can overlap; silent or short tracks do not necessarily
+need repair. This is separate from the dismissible Library Health queue. Use
+the linked extraction or embedding-backfill operations to review a preview
+before making changes, then rebuild the snapshot.
+
 The similarity explorer searches snapshot tracks and ranks neighbors by cosine
 similarity using the player's weighted vector recipe and learned descriptors.
 It reports eligible and excluded tracks, offers audio previews inside the

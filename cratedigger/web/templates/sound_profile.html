@@ -29,7 +29,10 @@
   <div class="toolbar">
     <div><span class="badge {% if freshness.state == 'current' %}ok{% else %}warn{% endif %}">{{ freshness.state }}</span>
       <span class="mono">{{ freshness.message }} File metadata cannot detect every external change.</span></div>
-    <a class="btn" href="/ops#op-analytics-snapshot">Refresh snapshot</a>
+    <div class="insight-links">
+      <a class="btn" href="/insights/analysis-health">Inspect analysis health</a>
+      <a class="btn" href="/ops#op-analytics-snapshot">Refresh snapshot</a>
+    </div>
   </div>
   <p class="insights-note">Snapshot built {{ profile.metadata.generated_at }} for {{ "{:,}".format(profile.tracks) }}
     unique audio hashes. These are recorded estimates, not a live filesystem scan.</p>

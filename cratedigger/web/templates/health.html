@@ -20,6 +20,7 @@
     <input type="text" name="q" value="{{ q }}" placeholder="Filter path or notice...">
     <button type="submit">Filter</button>
     {% if q %}<a class="btn" href="/health?status={{ status }}{% if reason %}&reason={{ reason|urlencode }}{% endif %}">Clear</a>{% endif %}
+    <a class="btn" href="/insights/analysis-health">Analysis evidence</a>
   </form>
 </div>
 
