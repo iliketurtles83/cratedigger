@@ -27,6 +27,7 @@ from cratedigger.web.export_status import export_job_status
 from cratedigger.web.insights import load_insights, snapshot_freshness
 from cratedigger.web.security import LocalSecurityMiddleware
 from cratedigger.web.similarity import SEARCH_LIMIT, SimilarityCache, SnapshotTrack
+from cratedigger.web.sound_profile import load_sound_profile
 
 _WEB_DIR = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
@@ -227,6 +228,29 @@ def create_app(
                 "total": total,
                 "search_limit": SEARCH_LIMIT,
                 "neighbors": neighbors,
+                "err": error,
+            },
+            status_code=503 if error else 200,
+        )
+
+    @app.get("/insights/profile", response_class=HTMLResponse)
+    def sound_profile_page(request: Request) -> HTMLResponse:
+        error = ""
+        try:
+            data = load_sound_profile(app.state.analytics_path)
+        except ValueError as exc:
+            data = None
+            error = str(exc)
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "sound_profile.html",
+            {
+                "active_nav": "insights",
+                "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "profile": data,
+                "freshness": snapshot_freshness(
+                    data["metadata"], app.state.features_path, app.state.repo_root
+                ) if data else None,
                 "err": error,
             },
             status_code=503 if error else 200,

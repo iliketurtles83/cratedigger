@@ -219,6 +219,7 @@ audio { width: 100%; height: 32px; margin-top: 6px; }
 
 .page-title { margin: 0; font-size: 20px; }
 .insights-note { color: var(--muted); line-height: 1.6; }
+.insight-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .insight-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 12px; }
 .insight-metric { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .insight-metric span, .insight-metric small { color: var(--muted); }
@@ -249,6 +250,22 @@ audio { width: 100%; height: 32px; margin-top: 6px; }
 .similarity-heading { display: flex; justify-content: space-between; gap: 12px; }
 .similarity-actions { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-end; gap: 6px; }
 .similarity-track audio { max-width: 430px; }
+.profile-heading { margin: 0; font-size: 16px; }
+.profile-legend { display: flex; flex-wrap: wrap; gap: 16px; color: var(--muted); font-size: 12px; }
+.profile-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.profile-legend i { width: 10px; height: 10px; border-radius: 2px; }
+.profile-major { background: #65b9ff; }
+.profile-minor { background: #e593df; }
+.profile-unknown { background: #7e8798; }
+.profile-scroll { overflow-x: auto; }
+.profile-scroll:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.profile-keys { min-width: 500px; }
+.profile-key-bar { display: flex; width: 100%; height: 9px; background: var(--surface-2); overflow: hidden; border-radius: 6px; }
+.profile-key-bar span { height: 100%; }
+.profile-heatmap { min-width: 760px; table-layout: fixed; }
+.profile-heatmap caption { color: var(--muted); margin: 12px 0; text-align: left; }
+.profile-heatmap th, .profile-heatmap td { text-align: center; border: 1px solid var(--border); padding: 8px 3px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.profile-heatmap th:first-child { width: 105px; }
 .report-scroll { overflow-x: auto; }
 .report-heading { margin: 0; font-size: 16px; }
 .report-path { overflow-wrap: anywhere; }

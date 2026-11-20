@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Musical features — Cratedigger{% endblock %}
+
+{% macro histogram(data, unit) %}
+  <p class="mono">{{ "{:,}".format(data.known) }} of {{ "{:,}".format(profile.tracks) }} tracks available;
+    {{ "{:,}".format(data.excluded) }} omitted. Percentages use available values; bars are scaled to the largest bin.</p>
+  {% if data.known %}
+    {% for bin in data.bins %}
+      <div class="insight-row">
+        <div class="insight-row-label"><span>{{ bin.label }} {{ unit }}</span><span>{{ "{:,}".format(bin.count) }} · {{ bin.percent_label }}</span></div>
+        <div class="insight-bar" role="img" aria-label="{{ bin.label }} {{ unit }}: {{ bin.count }} tracks, {{ bin.percent_label }} of available values"><span style="width: {{ bin.width }}%"></span></div>
+      </div>
+    {% endfor %}
+  {% else %}<p>No usable values are available in this snapshot.</p>{% endif %}
+{% endmacro %}
+
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Musical features</h1>
+    <div class="mono">Tempo, key, loudness and learned mood scores from the analytics snapshot</div>
+  </div>
+  <div class="insight-links">
+    <a class="btn" href="/insights/similarity">Find similar tracks</a>
+    <a class="btn" href="/insights">Back to insights</a>
+  </div>
+</div>
+{% if profile %}
+  <div class="toolbar">
+    <div><span class="badge {% if freshness.state == 'current' %}ok{% else %}warn{% endif %}">{{ freshness.state }}</span>
+      <span class="mono">{{ freshness.message }} File metadata cannot detect every external change.</span></div>
+    <a class="btn" href="/ops#op-analytics-snapshot">Refresh snapshot</a>
+  </div>
+  <p class="insights-note">Snapshot built {{ profile.metadata.generated_at }} for {{ "{:,}".format(profile.tracks) }}
+    unique audio hashes. These are recorded estimates, not a live filesystem scan.</p>
+
+  <div class="insight-grid">
+    <section class="card">
+      <h2 class="profile-heading">Tempo distribution</h2>
+      <p class="insights-note">Estimated BPM can be interpreted at half or double time; missing and nonpositive values are omitted.</p>
+      {{ histogram(profile.tempo, 'BPM') }}
+    </section>
+    <section class="card">
+      <h2 class="profile-heading">Integrated loudness</h2>
+      <p class="insights-note">Track-level integrated loudness in LUFS; more negative values are quieter. No audio is changed.</p>
+      {{ histogram(profile.loudness, 'LUFS') }}
+    </section>
+  </div>
+
+  <section class="card">
+    <h2 class="profile-heading">Musical keys</h2>
+    <p class="mono">{{ "{:,}".format(profile.musical_keys.known) }} of {{ "{:,}".format(profile.tracks) }} tracks have a recognized key;
+      {{ "{:,}".format(profile.musical_keys.excluded) }} are missing or unrecognized. Bars are scaled to the largest key.</p>
+    <p class="insights-note">Keys are arranged around the circle of fifths. The key and mode are estimates; unknown modes are shown separately.</p>
+    {% if profile.musical_keys.known %}
+      <div class="profile-legend">
+        <span><i class="profile-major"></i>Major</span><span><i class="profile-minor"></i>Minor</span><span><i class="profile-unknown"></i>Unknown mode</span>
+      </div>
+      <div class="profile-scroll" role="region" tabindex="0" aria-label="Musical keys table, scroll horizontally">
+        <table class="profile-keys">
+          <thead><tr><th scope="col">Key</th><th scope="col">Relative count</th><th scope="col">Major</th><th scope="col">Minor</th><th scope="col">Unknown mode</th></tr></thead>
+          <tbody>{% for key in profile.musical_keys.rows %}
+            <tr>
+              <th scope="row">{{ key.key }}</th>
+              <td><div class="profile-key-bar" role="img" aria-label="{{ key.key }}: {{ key.major }} major, {{ key.minor }} minor, {{ key.unknown }} unknown mode">
+                <span class="profile-major" style="width: {{ key.major_width }}%"></span><span class="profile-minor" style="width: {{ key.minor_width }}%"></span><span class="profile-unknown" style="width: {{ key.unknown_width }}%"></span>
+              </div></td>
+              <td>{{ "{:,}".format(key.major) }}</td><td>{{ "{:,}".format(key.minor) }}</td><td>{{ "{:,}".format(key.unknown) }}</td>
+            </tr>
+          {% endfor %}</tbody>
+        </table>
+      </div>
+    {% else %}<p>No recognized keys are available in this snapshot.</p>{% endif %}
+  </section>
+
+  <section class="card">
+    <h2 class="profile-heading">Energy and valence</h2>
+    {% if not profile.mood.available %}
+      <p>This older snapshot does not contain learned descriptors. Rebuild the snapshot to see this chart.</p>
+    {% else %}
+      {% if not profile.mood.current_recipe %}
+        <div class="flash warn">These descriptors use an older recipe. Rebuild the snapshot to use the current recipe.</div>
+      {% endif %}
+      <p class="mono">{{ "{:,}".format(profile.mood.known) }} of {{ "{:,}".format(profile.tracks) }} tracks have both scores;
+        {{ "{:,}".format(profile.mood.excluded) }} omitted. Among {{ "{:,}".format(profile.mood.eligible) }} similarity-eligible tracks,
+        {{ "{:,}".format(profile.mood.missing_from_eligible) }} lack one or both descriptors.</p>
+      <p class="insights-note">Model-derived scores range from 0 to 1 and are not calibrated mood labels. Energy combines
+        aggressive, party and relaxed predictions; valence combines happy and sad predictions. Each cell is a track count.
+        Bins include their lower bound and exclude their upper bound, except the last bin includes 1.
+        Scroll horizontally on narrow screens to see all bins.</p>
+      {% if profile.mood.known %}
+        <div class="profile-scroll" role="region" tabindex="0" aria-label="Energy and valence heatmap, scroll horizontally">
+          <table class="profile-heatmap">
+            <caption>Energy: high to low from top to bottom · Valence: low to high from left to right</caption>
+            <thead><tr><th scope="col">Energy / Valence</th>{% for label in profile.mood.labels %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead>
+            <tbody>{% for row in profile.mood.rows %}
+              <tr><th scope="row">{{ row.label }}</th>{% for cell in row.cells %}
+                <td title="{{ cell.label }}" aria-label="{{ cell.label }}" style="background: rgba(93, 169, 255, {{ cell.opacity }}); color: {{ cell.text_color }};">{{ cell.count }}</td>
+              {% endfor %}</tr>
+            {% endfor %}</tbody>
+          </table>
+        </div>
+      {% else %}<p>No tracks have both learned descriptors in this snapshot.</p>{% endif %}
+    {% endif %}
+  </section>
+{% elif not err %}
+  <div class="card">No analytics snapshot yet. Preview and apply <a href="/ops#op-analytics-snapshot">Build insights snapshot</a> after extraction finishes.</div>
+{% else %}
+  <p>Rebuild the snapshot after resolving the error above.</p>
+{% endif %}
+{% endblock %}

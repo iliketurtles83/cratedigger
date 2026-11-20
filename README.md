@@ -189,6 +189,12 @@ recorded extraction errors, not an assertion that all tracks are current. A
 freshness badge compares file identity, size, and modification time, not file
 contents.
 
+The Musical features page visualizes recorded BPM, musical keys, integrated
+loudness, and an energy/valence heatmap. Each chart reports coverage and omitted
+tracks. Tempo, key, and mood are estimates; learned scores are model-derived
+rather than calibrated mood labels. Older snapshots still show tempo, key, and
+loudness, but need rebuilding for learned descriptors.
+
 The similarity explorer searches snapshot tracks and ranks neighbors by cosine
 similarity using the player's weighted vector recipe and learned descriptors.
 It reports eligible and excluded tracks, offers audio previews inside the
