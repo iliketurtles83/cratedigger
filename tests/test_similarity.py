@@ -203,7 +203,8 @@ class SimilarityTests(unittest.TestCase):
         self.assertEqual(index.neighbors(index.by_hash["silent"]), [])
         self.assertFalse(index.vectors.flags.writeable)
         with self.assertRaisesRegex(ValueError, "limit"):
-            index.neighbors(seed, limit=31)
+            index.neighbors(seed, limit=201)
+        self.assertEqual(len(index.neighbors(seed, limit=42)), 3)
 
     def test_cache_invalidates_when_snapshot_is_atomically_replaced(self) -> None:
         self.build()

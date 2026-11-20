@@ -23,6 +23,9 @@ from cratedigger.jobs import (
     cancel_job, get_job, library_mutation_guard, list_jobs, read_job_log, reconcile_jobs, start_job,
 )
 from cratedigger.ops.registry import OPERATIONS, REPOSITORY_ROOT, public_operation
+from cratedigger.playlist_builder import (
+    DEFAULT_TRACKS, MAX_TRACKS as MAX_PLAYLIST_TRACKS, preview_playlist, read_plan, write_plan,
+)
 from cratedigger.web import playlists, reports, services
 from cratedigger.web.analysis_health import load_analysis_health
 from cratedigger.web.export_status import export_job_status
@@ -30,6 +33,7 @@ from cratedigger.web.insights import load_insights, snapshot_freshness
 from cratedigger.web.security import LocalSecurityMiddleware
 from cratedigger.web.similarity import SEARCH_LIMIT, SimilarityCache, SnapshotTrack
 from cratedigger.web.sound_profile import load_sound_profile
+from lib.parsers import sanitise_component
 
 _WEB_DIR = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
@@ -177,6 +181,68 @@ def create_app(
             },
             status_code=503 if error else 200,
         )
+
+    @app.get("/playlists/build", response_class=HTMLResponse)
+    def playlist_builder_page(
+        request: Request,
+        q: str = Query(default="", max_length=200),
+        seed: str = Query(default="", max_length=200),
+        name: str = Query(default="", max_length=120),
+        count: int = Query(default=DEFAULT_TRACKS, ge=1, le=MAX_PLAYLIST_TRACKS),
+        err: str = "",
+    ) -> HTMLResponse:
+        index = None
+        selected = None
+        matches = []
+        total = 0
+        error = err
+        try:
+            index = app.state.similarity_cache.get(app.state.analytics_path)
+            if index is not None:
+                matches, total = index.search(q)
+                if seed:
+                    track = index.by_hash.get(seed)
+                    if track is None or track.vector_index is None:
+                        raise ValueError("Choose a seed with a usable similarity vector")
+                    selected = _similarity_track(track, app.state.music_root)
+        except ValueError as exc:
+            error = str(exc)
+        return _TEMPLATES.TemplateResponse(
+            request, "playlist_builder.html", {
+                "active_nav": "playlists", "badges": _nav_badges(app.state.db_path, app.state.music_root),
+                "index": index, "selected": selected, "matches": [
+                    _similarity_track(track, app.state.music_root) for track in matches
+                ], "total": total, "q": q, "search_limit": SEARCH_LIMIT,
+                "default_name": name or (sanitise_component(f"Similar - {selected['title']}")[:100] if selected else ""),
+                "default_count": count, "max_count": MAX_PLAYLIST_TRACKS, "err": error,
+            },
+        )
+
+    @app.post("/playlists/build/preview")
+    def playlist_builder_preview(
+        seed: Annotated[str, Form(max_length=200)],
+        name: Annotated[str, Form(max_length=120)],
+        count: Annotated[int, Form(ge=1, le=MAX_PLAYLIST_TRACKS)] = DEFAULT_TRACKS,
+    ) -> RedirectResponse:
+        target = "/playlists/build?" + urlencode({"seed": seed, "name": name, "count": count})
+        try:
+            index = app.state.similarity_cache.get(app.state.analytics_path)
+            if index is None:
+                raise ValueError("Build an analytics snapshot before creating a playlist")
+            plan = preview_playlist(index, app.state.music_root, seed=seed, name=name, count=count)
+            report = write_plan(plan, app.state.repo_root / "reports")
+            with open_db(app.state.db_path) as conn:
+                reconcile_jobs(conn)
+                job_id = start_job(
+                    conn, db_path=app.state.db_path, operation_id="create-playlist",
+                    raw_params={"report": str(report)}, mode="preview",
+                    repo_root=app.state.repo_root, logs_dir=app.state.logs_dir,
+                    music_root=app.state.music_root,
+                    expected_report_digest=hashlib.sha256(report.read_bytes()).hexdigest(),
+                )
+            return _redirect_with_flash(f"/jobs/{job_id}", msg="Review the ordered tracks, then apply the successful preview")
+        except (OSError, RuntimeError, ValueError) as exc:
+            return _redirect_with_flash(target, err=str(exc))
 
     @app.get("/playlists/view", response_class=HTMLResponse)
     def playlist_page(
@@ -629,6 +695,20 @@ def create_app(
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
         log_text, log_offset = read_job_log(str(job["log_path"]), allowed_dir=app.state.logs_dir)
+        playlist_plan = None
+        playlist_error = ""
+        if job["operation_id"] == "create-playlist":
+            try:
+                argv = job["argv"]
+                if not isinstance(argv, list) or "--report" not in argv:
+                    raise ValueError("Playlist job has no reviewed report")
+                report_index = argv.index("--report") + 1
+                if report_index >= len(argv) or not isinstance(argv[report_index], str):
+                    raise ValueError("Playlist job has an invalid report path")
+                report = services.resolve_safe_path(argv[report_index], app.state.logs_dir)
+                playlist_plan = read_plan(report, app.state.music_root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                playlist_error = f"Cannot display the reviewed playlist: {exc}"
         return _TEMPLATES.TemplateResponse(
             request,
             "job.html",
@@ -641,6 +721,8 @@ def create_app(
                 "log_offset": log_offset,
                 "artifacts": reports.job_report_artifacts(job, app.state.repo_root / "reports"),
                 "export_status": export_job_status(job, app.state.logs_dir, app.state.repo_root, app.state.features_path),
+                "playlist_plan": playlist_plan,
+                "playlist_error": playlist_error,
                 "msg": msg,
                 "err": err,
             },

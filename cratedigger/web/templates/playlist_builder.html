@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Build playlist — Cratedigger{% endblock %}
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 class="page-title">Build a seed playlist</h1>
+    <div class="mono">Preview an ordered selection, then save a new M3U8 in Playlists</div>
+  </div>
+  <a class="btn" href="/playlists">Back to playlists</a>
+</div>
+<p class="insights-note">The seed comes first, followed by its nearest neighbors using the snapshot's player-compatible
+  similarity vectors. This is similarity ranking, not a DJ transition mix. Unavailable or outside-library neighbors
+  are listed as skipped, not replaced. Existing playlists are never overwritten, and no audio or tags are changed.</p>
+{% if index and index.metadata.snapshot_version >= 3 %}
+  {% if not index.uses_current_recipe %}
+    <div class="flash warn">Rebuild the analytics snapshot to use the current similarity recipe.</div>
+  {% endif %}
+  <p class="mono">Snapshot built {{ index.metadata.generated_at }}. Recorded paths may have moved or changed.
+    Identity checks use file metadata, not a fresh audio hash.</p>
+  <form method="get" action="/playlists/build" class="inline-form similarity-search">
+    <label for="seed-search">Find a seed track</label>
+    <input id="seed-search" name="q" type="text" value="{{ q }}" maxlength="200" placeholder="Artist, title, album or genre">
+    <button type="submit">Search</button>
+  </form>
+  {% if selected %}
+    <section class="card">
+      <h2 class="similarity-section-title">Seed: {{ selected.title }}</h2>
+      <div>{{ selected.artist or 'Unknown artist' }}{% if selected.album %} · {{ selected.album }}{% endif %}</div>
+      {% if selected.audio_url %}<audio controls preload="none" src="{{ selected.audio_url }}" aria-label="Play seed"></audio>
+      {% else %}<div class="flash warn">{{ selected.audio_problem }}</div>{% endif %}
+      <form method="post" action="/playlists/build/preview" class="op-form">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="seed" value="{{ selected.audio_hash }}">
+        <label class="op-field">New playlist name
+          <input type="text" name="name" value="{{ default_name }}" maxlength="120" required>
+        </label>
+        <label class="op-field">Maximum tracks, including seed
+          <input type="number" name="count" value="{{ default_count }}" min="1" max="{{ max_count }}" required>
+        </label>
+        <button type="submit" {% if not selected.audio_url or not index.uses_current_recipe %}disabled{% endif %}>Preview playlist</button>
+      </form>
+    </section>
+  {% endif %}
+  {% if q %}
+    <section class="card">
+      <h2 class="similarity-section-title">Seed search results</h2>
+      <p class="mono">{{ total }} matching tracks{% if total > search_limit %}; showing the first {{ search_limit }}. Refine your search for others{% endif %}.</p>
+      <ul class="similarity-list">
+        {% for track in matches %}
+          <li class="similarity-track">
+            <strong>{{ track.title }}</strong> · {{ track.artist or 'Unknown artist' }}
+            {% if track.eligible %}
+              <a class="btn" href="/playlists/build?seed={{ track.audio_hash|urlencode }}">Use as seed</a>
+            {% else %}<span class="badge warn">No similarity vector</span>{% endif %}
+          </li>
+        {% else %}<li>No matching tracks.</li>{% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+{% else %}
+  <div class="card">Build a current <a href="/ops#op-analytics-snapshot">analytics snapshot</a> before creating a seed playlist.</div>
+{% endif %}
+{% endblock %}

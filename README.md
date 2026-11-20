@@ -187,6 +187,20 @@ playlist files and folders are skipped; external and outside-library entries
 are not followed. Inspection supports UTF-8 playlists up to 32 MiB, 200,000
 entries, and 8,192 characters per line.
 
+**Build a seed playlist** searches the analytics snapshot and previews a seed-first,
+similarity-ranked selection (42 tracks by default; up to 200). Missing, unsupported,
+or outside-library neighbors are explicitly skipped rather than replaced. Review
+the ordered tracks on the preview job, then apply it to create a new `.m3u8` in
+`Playlists/`. Existing names, including case-insensitive collisions, are refused.
+The reviewed report is retained under `reports/playlists/`; jobs use an immutable
+copy and recheck audio file identities before saving. These are metadata checks,
+not fresh audio hashes. Audio, tags, existing playlists, and the feature store
+are unchanged. Creation is not currently undoable through the UI. Editing,
+hash-based relinking, and feature-filter smart playlists are not yet available.
+The same reviewed operation is available to scripts as
+`python scripts/create_playlist.py --report reports/playlists/NAME.json --dry-run`
+(apply with `--no-dry-run`).
+
 The Insights page reads only a separate SQLite analytics snapshot, never the
 live feature pickle during a page request. Genre-chart filters update only the
 chart when JavaScript is available, preserving the surrounding page and its

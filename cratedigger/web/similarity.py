@@ -63,7 +63,7 @@ class SimilarityIndex:
     def neighbors(self, seed: SnapshotTrack, *, limit: int = 10) -> list[tuple[SnapshotTrack, float]]:
         if seed.vector_index is None:
             return []
-        if not 1 <= limit <= 30:
+        if not 1 <= limit <= 200:
             raise ValueError("Invalid similarity result limit")
         scores = self.vectors @ self.vectors[seed.vector_index]
         scores[seed.vector_index] = -np.inf

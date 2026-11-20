@@ -10,6 +10,23 @@
   <span id="job-status" class="badge {% if job.status == 'succeeded' %}ok{% elif job.status in ['failed', 'stale', 'orphaned'] %}warn{% endif %}">{{ job.status }}</span>
 </div>
 {% if job.error %}<div class="flash error">{{ job.error }}</div>{% endif %}
+{% if playlist_error %}<div class="flash error">{{ playlist_error }}</div>{% endif %}
+{% if playlist_plan %}
+  <section class="card">
+    <h2 class="similarity-section-title">Reviewed playlist: {{ playlist_plan.filename }}</h2>
+    <p class="insights-note">{{ playlist_plan.tracks|length }} of up to {{ playlist_plan.requested }} tracks.
+      Seed first, then similarity order. File identities are checked again on apply, not audio content hashes.
+      Only a new playlist is created; audio and tags are unchanged. There is no built-in undo.</p>
+    <ol>{% for track in playlist_plan.tracks %}<li class="playlist-path">{{ track.label }} <span class="mono">· cosine {{ "%.3f"|format(track.score) }}</span></li>{% endfor %}</ol>
+    {% if playlist_plan.skipped %}
+      <h3>Skipped neighbors</h3>
+      <ul>{% for track in playlist_plan.skipped %}<li>{{ track.title }}: {{ track.reason }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if job.mode == 'apply' and job.status == 'succeeded' %}
+      <a class="btn" href="/playlists/view?path={{ playlist_plan.filename|urlencode }}">Inspect saved playlist</a>
+    {% endif %}
+  </section>
+{% endif %}
 {% if job.operation_id == 'server-sync' %}
   <div class="flash">
     {% if job.mode == 'apply' and job.status == 'succeeded' %}
@@ -56,7 +73,7 @@
       <button type="submit">Run preview again</button>
     </form>
     {% if job.mode == "preview" and job.status == "succeeded" and operation.can_apply %}
-      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('{% if operation.id == 'server-sync' %}Mirror this destination? Files missing from the complete source will be deleted before transfer. This cannot be undone.{% elif operation.id in ['recommend-backfill-hashes', 'recommend-backfill-embeddings'] %}Backfill and replace the feature store? This cannot be undone.{% elif operation.legacy %}Apply this preview? This legacy operation cannot be undone through Cratedigger.{% elif operation.id == 'analytics-snapshot' %}Publish this analytics snapshot?{% else %}Publish the player export and replace the existing output? This cannot be undone.{% endif %}');">
+      <form method="post" action="/jobs/{{ job.id }}/apply" onsubmit="return confirm('{% if operation.id == 'create-playlist' %}Create this new playlist? Existing files will not be overwritten. There is no built-in undo.{% elif operation.id == 'server-sync' %}Mirror this destination? Files missing from the complete source will be deleted before transfer. This cannot be undone.{% elif operation.id in ['recommend-backfill-hashes', 'recommend-backfill-embeddings'] %}Backfill and replace the feature store? This cannot be undone.{% elif operation.legacy %}Apply this preview? This legacy operation cannot be undone through Cratedigger.{% elif operation.id == 'analytics-snapshot' %}Publish this analytics snapshot?{% else %}Publish the player export and replace the existing output? This cannot be undone.{% endif %}');">
         <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <button class="danger" type="submit">Apply this preview</button>
       </form>

@@ -209,7 +209,7 @@ def job_report_artifacts(job: dict[str, object], root: Path) -> list[dict[str, s
     candidates: list[tuple[str, str]] = []
     if isinstance(params, dict):
         for key in ("apply_report", "report"):
-            if key == "report" and operation_id != "apply-beets":
+            if key == "report" and operation_id not in {"apply-beets", "create-playlist"}:
                 continue
             if isinstance(params.get(key), str) and params[key]:
                 candidates.append(("Reviewed input", params[key]))

@@ -63,6 +63,7 @@
       <section class="card">
         <h2 class="similarity-section-title">Selected track</h2>
         <ul class="similarity-list">{{ track_card(selected, show_action=false) }}</ul>
+        {% if selected.eligible %}<a class="btn" href="/playlists/build?seed={{ selected.audio_hash|urlencode }}">Build a playlist from this seed</a>{% endif %}
         {% if not selected.eligible %}
           <p>This track has no usable similarity vector in the snapshot.</p>
           <a href="/insights/analysis-health?q={{ selected.audio_hash|urlencode }}">Inspect extraction evidence</a>

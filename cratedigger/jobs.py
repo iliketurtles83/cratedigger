@@ -27,7 +27,7 @@ from cratedigger.ops.registry import OPERATIONS, build_argv, normalize_params, v
 from cratedigger.server_sync import reviewed_sync_plan, sync_scope
 
 _ACTIVE = ("queued", "running", "cancelling", "orphaned")
-_INPUT_REPORTS = {"apply-beets": "report", "repair-bpm": "apply_report"}
+_INPUT_REPORTS = {"apply-beets": "report", "repair-bpm": "apply_report", "create-playlist": "report"}
 _BACKFILLS: dict[str, BackfillKind] = {
     "recommend-backfill-hashes": "hashes",
     "recommend-backfill-embeddings": "embeddings",
@@ -255,6 +255,13 @@ def _fingerprint(
             repo_root / "lib" / "descriptors.py",
             repo_root / "lib" / "embeddings.py",
         ))
+    if operation_id == "create-playlist":
+        sources.extend((
+            repo_root / "cratedigger" / "playlist_builder.py",
+            repo_root / "cratedigger" / "analytics.py",
+            repo_root / "cratedigger" / "engine" / "playlists.py",
+            repo_root / "lib" / "parsers.py",
+        ))
     if operation_id == "recommend-export":
         sources.extend((
             repo_root / "cratedigger" / "feature_export.py",
@@ -328,6 +335,8 @@ def _prepare_params(
         selected = Path(str(params.get(root_field) or root)).resolve()
         if not selected.is_relative_to(root) or not selected.is_dir():
             raise ValueError("Library root override must be an existing directory inside the UI library root")
+        if operation_id == "create-playlist" and selected != root:
+            raise ValueError("Playlist creation must use the configured UI library root")
         if not supports_override and selected != root:
             raise ValueError("This operation cannot use a different library root")
         params[root_field] = str(selected)
